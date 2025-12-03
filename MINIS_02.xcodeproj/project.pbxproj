@@ -6,6 +6,11 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		3A6F59AB2ECE535800062F59 /* Kingfisher in Frameworks */ = {isa = PBXBuildFile; productRef = 3A6F59AA2ECE535800062F59 /* Kingfisher */; };
+		3A74EFA92ED5854C008A7F67 /* Kingfisher in Frameworks */ = {isa = PBXBuildFile; productRef = 3A74EFA82ED5854C008A7F67 /* Kingfisher */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		3A6F598C2ECE43AE00062F59 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -21,17 +26,75 @@
 			remoteGlobalIDString = 3A6F597C2ECE43AC00062F59;
 			remoteInfo = MINIS_02;
 		};
+		3A74EF812ED5806E008A7F67 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 3A6F59752ECE43AC00062F59 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 3A74EF712ED5806C008A7F67;
+			remoteInfo = "App clip";
+		};
+		3A74EF8B2ED5806E008A7F67 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 3A6F59752ECE43AC00062F59 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 3A74EF712ED5806C008A7F67;
+			remoteInfo = "App clip";
+		};
 /* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		3A74EF622ED57F2C008A7F67 /* Embed App Clips */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "$(CONTENTS_FOLDER_PATH)/AppClips";
+			dstSubfolderSpec = 16;
+			files = (
+			);
+			name = "Embed App Clips";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		3A6F597D2ECE43AC00062F59 /* MINIS_02.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MINIS_02.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		3A6F598B2ECE43AE00062F59 /* MINIS_02Tests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MINIS_02Tests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		3A6F59952ECE43AE00062F59 /* MINIS_02UITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MINIS_02UITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		3A74EF492ED57F2C008A7F67 /* MiniTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MiniTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		3A74EF532ED57F2C008A7F67 /* MiniUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MiniUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		3A74EF722ED5806C008A7F67 /* App clip.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "App clip.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		3A74EF802ED5806E008A7F67 /* App clipTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "App clipTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+		3A74EF8A2ED5806E008A7F67 /* App clipUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "App clipUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		3A74EF952ED5806E008A7F67 /* Exceptions for "App clip" folder in "App clip" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				ContentView.swift,
+				Info.plist,
+			);
+			target = 3A74EF712ED5806C008A7F67 /* App clip */;
+		};
+		3A74EFA02ED5808D008A7F67 /* Exceptions for "MINIS_02" folder in "App clip" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				AppDelegate.swift,
+				ContentView.swift,
+				FastlaneModel.swift,
+				"Fonts/primaries-demibold-aaa.otf",
+				Home.swift,
+				Share.swift,
+			);
+			target = 3A74EF712ED5806C008A7F67 /* App clip */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		3A6F597F2ECE43AC00062F59 /* MINIS_02 */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				3A74EFA02ED5808D008A7F67 /* Exceptions for "MINIS_02" folder in "App clip" target */,
+			);
 			path = MINIS_02;
 			sourceTree = "<group>";
 		};
@@ -45,6 +108,34 @@
 			path = MINIS_02UITests;
 			sourceTree = "<group>";
 		};
+		3A74EF4C2ED57F2C008A7F67 /* MiniTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = MiniTests;
+			sourceTree = "<group>";
+		};
+		3A74EF562ED57F2C008A7F67 /* MiniUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = MiniUITests;
+			sourceTree = "<group>";
+		};
+		3A74EF732ED5806C008A7F67 /* App clip */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				3A74EF952ED5806E008A7F67 /* Exceptions for "App clip" folder in "App clip" target */,
+			);
+			path = "App clip";
+			sourceTree = "<group>";
+		};
+		3A74EF832ED5806E008A7F67 /* App clipTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "App clipTests";
+			sourceTree = "<group>";
+		};
+		3A74EF8D2ED5806E008A7F67 /* App clipUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "App clipUITests";
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -52,6 +143,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				3A6F59AB2ECE535800062F59 /* Kingfisher in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -69,6 +161,42 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		3A74EF462ED57F2C008A7F67 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		3A74EF502ED57F2C008A7F67 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		3A74EF6F2ED5806C008A7F67 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				3A74EFA92ED5854C008A7F67 /* Kingfisher in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		3A74EF7D2ED5806E008A7F67 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		3A74EF872ED5806E008A7F67 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -78,6 +206,12 @@
 				3A6F597F2ECE43AC00062F59 /* MINIS_02 */,
 				3A6F598E2ECE43AE00062F59 /* MINIS_02Tests */,
 				3A6F59982ECE43AE00062F59 /* MINIS_02UITests */,
+				3A74EF4C2ED57F2C008A7F67 /* MiniTests */,
+				3A74EF562ED57F2C008A7F67 /* MiniUITests */,
+				3A74EF732ED5806C008A7F67 /* App clip */,
+				3A74EF832ED5806E008A7F67 /* App clipTests */,
+				3A74EF8D2ED5806E008A7F67 /* App clipUITests */,
+				3A6F59A92ECE535800062F59 /* Frameworks */,
 				3A6F597E2ECE43AC00062F59 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -88,8 +222,20 @@
 				3A6F597D2ECE43AC00062F59 /* MINIS_02.app */,
 				3A6F598B2ECE43AE00062F59 /* MINIS_02Tests.xctest */,
 				3A6F59952ECE43AE00062F59 /* MINIS_02UITests.xctest */,
+				3A74EF492ED57F2C008A7F67 /* MiniTests.xctest */,
+				3A74EF532ED57F2C008A7F67 /* MiniUITests.xctest */,
+				3A74EF722ED5806C008A7F67 /* App clip.app */,
+				3A74EF802ED5806E008A7F67 /* App clipTests.xctest */,
+				3A74EF8A2ED5806E008A7F67 /* App clipUITests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		3A6F59A92ECE535800062F59 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			name = Frameworks;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -102,6 +248,7 @@
 				3A6F59792ECE43AC00062F59 /* Sources */,
 				3A6F597A2ECE43AC00062F59 /* Frameworks */,
 				3A6F597B2ECE43AC00062F59 /* Resources */,
+				3A74EF622ED57F2C008A7F67 /* Embed App Clips */,
 			);
 			buildRules = (
 			);
@@ -112,6 +259,7 @@
 			);
 			name = MINIS_02;
 			packageProductDependencies = (
+				3A6F59AA2ECE535800062F59 /* Kingfisher */,
 			);
 			productName = MINIS_02;
 			productReference = 3A6F597D2ECE43AC00062F59 /* MINIS_02.app */;
@@ -163,6 +311,119 @@
 			productReference = 3A6F59952ECE43AE00062F59 /* MINIS_02UITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
+		3A74EF482ED57F2C008A7F67 /* MiniTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 3A74EF632ED57F2C008A7F67 /* Build configuration list for PBXNativeTarget "MiniTests" */;
+			buildPhases = (
+				3A74EF452ED57F2C008A7F67 /* Sources */,
+				3A74EF462ED57F2C008A7F67 /* Frameworks */,
+				3A74EF472ED57F2C008A7F67 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				3A74EF4C2ED57F2C008A7F67 /* MiniTests */,
+			);
+			name = MiniTests;
+			packageProductDependencies = (
+			);
+			productName = MiniTests;
+			productReference = 3A74EF492ED57F2C008A7F67 /* MiniTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		3A74EF522ED57F2C008A7F67 /* MiniUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 3A74EF662ED57F2C008A7F67 /* Build configuration list for PBXNativeTarget "MiniUITests" */;
+			buildPhases = (
+				3A74EF4F2ED57F2C008A7F67 /* Sources */,
+				3A74EF502ED57F2C008A7F67 /* Frameworks */,
+				3A74EF512ED57F2C008A7F67 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				3A74EF562ED57F2C008A7F67 /* MiniUITests */,
+			);
+			name = MiniUITests;
+			packageProductDependencies = (
+			);
+			productName = MiniUITests;
+			productReference = 3A74EF532ED57F2C008A7F67 /* MiniUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+		3A74EF712ED5806C008A7F67 /* App clip */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 3A74EF962ED5806E008A7F67 /* Build configuration list for PBXNativeTarget "App clip" */;
+			buildPhases = (
+				3A74EF6E2ED5806C008A7F67 /* Sources */,
+				3A74EF6F2ED5806C008A7F67 /* Frameworks */,
+				3A74EF702ED5806C008A7F67 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				3A74EF732ED5806C008A7F67 /* App clip */,
+			);
+			name = "App clip";
+			packageProductDependencies = (
+				3A74EFA82ED5854C008A7F67 /* Kingfisher */,
+			);
+			productName = "App clip";
+			productReference = 3A74EF722ED5806C008A7F67 /* App clip.app */;
+			productType = "com.apple.product-type.application.on-demand-install-capable";
+		};
+		3A74EF7F2ED5806E008A7F67 /* App clipTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 3A74EF992ED5806E008A7F67 /* Build configuration list for PBXNativeTarget "App clipTests" */;
+			buildPhases = (
+				3A74EF7C2ED5806E008A7F67 /* Sources */,
+				3A74EF7D2ED5806E008A7F67 /* Frameworks */,
+				3A74EF7E2ED5806E008A7F67 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				3A74EF822ED5806E008A7F67 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				3A74EF832ED5806E008A7F67 /* App clipTests */,
+			);
+			name = "App clipTests";
+			packageProductDependencies = (
+			);
+			productName = "App clipTests";
+			productReference = 3A74EF802ED5806E008A7F67 /* App clipTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		3A74EF892ED5806E008A7F67 /* App clipUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 3A74EF9C2ED5806E008A7F67 /* Build configuration list for PBXNativeTarget "App clipUITests" */;
+			buildPhases = (
+				3A74EF862ED5806E008A7F67 /* Sources */,
+				3A74EF872ED5806E008A7F67 /* Frameworks */,
+				3A74EF882ED5806E008A7F67 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				3A74EF8C2ED5806E008A7F67 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				3A74EF8D2ED5806E008A7F67 /* App clipUITests */,
+			);
+			name = "App clipUITests";
+			packageProductDependencies = (
+			);
+			productName = "App clipUITests";
+			productReference = 3A74EF8A2ED5806E008A7F67 /* App clipUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -184,6 +445,25 @@
 						CreatedOnToolsVersion = 16.4;
 						TestTargetID = 3A6F597C2ECE43AC00062F59;
 					};
+					3A74EF482ED57F2C008A7F67 = {
+						CreatedOnToolsVersion = 16.4;
+						TestTargetID = 3A74EF3A2ED57F2A008A7F67;
+					};
+					3A74EF522ED57F2C008A7F67 = {
+						CreatedOnToolsVersion = 16.4;
+						TestTargetID = 3A74EF3A2ED57F2A008A7F67;
+					};
+					3A74EF712ED5806C008A7F67 = {
+						CreatedOnToolsVersion = 16.4;
+					};
+					3A74EF7F2ED5806E008A7F67 = {
+						CreatedOnToolsVersion = 16.4;
+						TestTargetID = 3A74EF712ED5806C008A7F67;
+					};
+					3A74EF892ED5806E008A7F67 = {
+						CreatedOnToolsVersion = 16.4;
+						TestTargetID = 3A74EF712ED5806C008A7F67;
+					};
 				};
 			};
 			buildConfigurationList = 3A6F59782ECE43AC00062F59 /* Build configuration list for PBXProject "MINIS_02" */;
@@ -195,6 +475,9 @@
 			);
 			mainGroup = 3A6F59742ECE43AC00062F59;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				3A6F59A82ECE532A00062F59 /* XCRemoteSwiftPackageReference "Kingfisher" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 3A6F597E2ECE43AC00062F59 /* Products */;
 			projectDirPath = "";
@@ -203,6 +486,11 @@
 				3A6F597C2ECE43AC00062F59 /* MINIS_02 */,
 				3A6F598A2ECE43AE00062F59 /* MINIS_02Tests */,
 				3A6F59942ECE43AE00062F59 /* MINIS_02UITests */,
+				3A74EF482ED57F2C008A7F67 /* MiniTests */,
+				3A74EF522ED57F2C008A7F67 /* MiniUITests */,
+				3A74EF712ED5806C008A7F67 /* App clip */,
+				3A74EF7F2ED5806E008A7F67 /* App clipTests */,
+				3A74EF892ED5806E008A7F67 /* App clipUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -223,6 +511,41 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		3A6F59932ECE43AE00062F59 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		3A74EF472ED57F2C008A7F67 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		3A74EF512ED57F2C008A7F67 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		3A74EF702ED5806C008A7F67 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		3A74EF7E2ED5806E008A7F67 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		3A74EF882ED5806E008A7F67 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -253,6 +576,41 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		3A74EF452ED57F2C008A7F67 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		3A74EF4F2ED57F2C008A7F67 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		3A74EF6E2ED5806C008A7F67 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		3A74EF7C2ED5806E008A7F67 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		3A74EF862ED5806E008A7F67 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -265,6 +623,16 @@
 			isa = PBXTargetDependency;
 			target = 3A6F597C2ECE43AC00062F59 /* MINIS_02 */;
 			targetProxy = 3A6F59962ECE43AE00062F59 /* PBXContainerItemProxy */;
+		};
+		3A74EF822ED5806E008A7F67 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 3A74EF712ED5806C008A7F67 /* App clip */;
+			targetProxy = 3A74EF812ED5806E008A7F67 /* PBXContainerItemProxy */;
+		};
+		3A74EF8C2ED5806E008A7F67 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 3A74EF712ED5806C008A7F67 /* App clip */;
+			targetProxy = 3A74EF8B2ED5806E008A7F67 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -391,8 +759,11 @@
 				CODE_SIGN_ENTITLEMENTS = MINIS_02/MINIS_02.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = V22SRJBXN7;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "MINIS-02-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = Minis;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -401,14 +772,14 @@
 				"INFOPLIST_KEY_UILaunchScreen_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphoneos*]" = UIStatusBarStyleDefault;
 				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphonesimulator*]" = UIStatusBarStyleDefault;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
 				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 15.5;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "Milkman.MINIS-02";
+				MARKETING_VERSION = 10.7;
+				PRODUCT_BUNDLE_IDENTIFIER = minis.co.uk;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
@@ -428,8 +799,11 @@
 				CODE_SIGN_ENTITLEMENTS = MINIS_02/MINIS_02.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = V22SRJBXN7;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "MINIS-02-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = Minis;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -438,14 +812,14 @@
 				"INFOPLIST_KEY_UILaunchScreen_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphoneos*]" = UIStatusBarStyleDefault;
 				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphonesimulator*]" = UIStatusBarStyleDefault;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
 				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 15.5;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "Milkman.MINIS-02";
+				MARKETING_VERSION = 10.7;
+				PRODUCT_BUNDLE_IDENTIFIER = minis.co.uk;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
@@ -543,6 +917,229 @@
 			};
 			name = Release;
 		};
+		3A74EF642ED57F2C008A7F67 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "Milkman.MINIS-02.MiniTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Mini.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Mini";
+			};
+			name = Debug;
+		};
+		3A74EF652ED57F2C008A7F67 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "Milkman.MINIS-02.MiniTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Mini.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Mini";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		3A74EF672ED57F2C008A7F67 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "Milkman.MINIS-02.MiniUITests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Mini;
+			};
+			name = Debug;
+		};
+		3A74EF682ED57F2C008A7F67 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "Milkman.MINIS-02.MiniUITests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Mini;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		3A74EF972ED5806E008A7F67 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = "App clip/App_clip.entitlements";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = V22SRJBXN7;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "App clip/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = Minis;
+				INFOPLIST_KEY_LSApplicationCategoryType = "";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 10.7;
+				PRODUCT_BUNDLE_IDENTIFIER = minis.co.uk.Clip;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = APPCLIP;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		3A74EF982ED5806E008A7F67 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = "App clip/App_clip.entitlements";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = V22SRJBXN7;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "App clip/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = Minis;
+				INFOPLIST_KEY_LSApplicationCategoryType = "";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 10.7;
+				PRODUCT_BUNDLE_IDENTIFIER = minis.co.uk.Clip;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = APPCLIP;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		3A74EF9A2ED5806E008A7F67 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "Milkman.MINIS-02.App-clipTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/App clip.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/App clip";
+			};
+			name = Debug;
+		};
+		3A74EF9B2ED5806E008A7F67 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "Milkman.MINIS-02.App-clipTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/App clip.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/App clip";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		3A74EF9D2ED5806E008A7F67 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "Milkman.MINIS-02.App-clipUITests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = "App clip";
+			};
+			name = Debug;
+		};
+		3A74EF9E2ED5806E008A7F67 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "Milkman.MINIS-02.App-clipUITests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = "App clip";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -582,7 +1179,76 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
+		3A74EF632ED57F2C008A7F67 /* Build configuration list for PBXNativeTarget "MiniTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				3A74EF642ED57F2C008A7F67 /* Debug */,
+				3A74EF652ED57F2C008A7F67 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		3A74EF662ED57F2C008A7F67 /* Build configuration list for PBXNativeTarget "MiniUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				3A74EF672ED57F2C008A7F67 /* Debug */,
+				3A74EF682ED57F2C008A7F67 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		3A74EF962ED5806E008A7F67 /* Build configuration list for PBXNativeTarget "App clip" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				3A74EF972ED5806E008A7F67 /* Debug */,
+				3A74EF982ED5806E008A7F67 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		3A74EF992ED5806E008A7F67 /* Build configuration list for PBXNativeTarget "App clipTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				3A74EF9A2ED5806E008A7F67 /* Debug */,
+				3A74EF9B2ED5806E008A7F67 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		3A74EF9C2ED5806E008A7F67 /* Build configuration list for PBXNativeTarget "App clipUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				3A74EF9D2ED5806E008A7F67 /* Debug */,
+				3A74EF9E2ED5806E008A7F67 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		3A6F59A82ECE532A00062F59 /* XCRemoteSwiftPackageReference "Kingfisher" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/onevcat/Kingfisher.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 8.6.2;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		3A6F59AA2ECE535800062F59 /* Kingfisher */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 3A6F59A82ECE532A00062F59 /* XCRemoteSwiftPackageReference "Kingfisher" */;
+			productName = Kingfisher;
+		};
+		3A74EFA82ED5854C008A7F67 /* Kingfisher */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 3A6F59A82ECE532A00062F59 /* XCRemoteSwiftPackageReference "Kingfisher" */;
+			productName = Kingfisher;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 3A6F59752ECE43AC00062F59 /* Project object */;
 }
