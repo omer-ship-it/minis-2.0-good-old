@@ -1555,4 +1555,12 @@ struct InvoiceItem {
     }
 }
 
-123454
+struct InvoiceItem2 {
+    let name: String
+    let quantity: Int
+    let unitPrice: Double
+
+    var lineTotal: Double {
+        Double(quantity) * unitPrice
+    }
+}
