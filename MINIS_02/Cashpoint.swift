@@ -24,7 +24,165 @@ struct CashPointView: View {
     @StateObject private var stockToggles = StockToggleStore(
         shopId: 12   // 👈 hard-coded miniAppId
     )
-    @State private var sentLineTimestamps: [Int: Date] = [:]   // lineId -> sent time
+    @State private var showPrintSuccess = false
+    @State private var stockText: [Int: String] = [:]   // productId -> "typed value"
+    @State private var printSuccessScale: CGFloat = 0.6
+    @State private var printSuccessOpacity: Double = 0
+    @State private var unpaidOrderId: Int? = nil
+    @State private var lockedLineIds: Set<Int> = []          // lines restored from unpaid orders
+    @State private var lineSessionTime: [Int: Date] = [:]    // lineId -> updated time (from API)
+    private let sectionTimeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "he_IL")
+        f.dateFormat = "H:mm"        // e.g. 8:32
+        return f
+    }()
+    private var hasAddedLinesInPayLater: Bool {
+        isPayLaterMode && basket.values.contains { !lockedLineIds.contains($0.id) }
+    }
+    
+    private func playPrintSuccess() {
+        showPrintSuccess = true
+        printSuccessScale = 0.6
+        printSuccessOpacity = 0
+
+        withAnimation(.spring(response: 0.5, dampingFraction: 0.7, blendDuration: 0.1)) {
+            printSuccessScale = 1.0
+            printSuccessOpacity = 1.0
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
+            withAnimation(.easeOut(duration: 0.25)) {
+                printSuccessOpacity = 0
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                showPrintSuccess = false
+            }
+        }
+    }
+    
+    private func updateStockFromKeyboard(productId: Int, raw: String) {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if trimmed.isEmpty {
+            // empty → treat as ∞ / untracked
+            stockAdjustments[productId] = nil
+            stockToggles.binding(for: productId).wrappedValue = true    // in stock
+        } else if let value = Int(trimmed), value >= 0 {
+            stockAdjustments[productId] = value
+            // 0 → out of stock, >0 → in stock
+            stockToggles.binding(for: productId).wrappedValue = (value > 0)
+        } else {
+            // invalid input → ignore, reset from current stock
+            let current = remainingStock(for: ShellMenuItem(id: productId,
+                                                            name: "",
+                                                            price: 0,
+                                                            category: "",
+                                                            modifiers: nil,
+                                                            imageURL: nil,
+                                                            description: nil))
+            stockText[productId] = current.map { String($0) } ?? ""
+            return
+        }
+
+        // mark this product as needing sync
+        dirtyStockIds.insert(productId)
+        scheduleStockCommit()
+    }
+    private func printUpdatedUnpaidOrder() {
+        guard let existingId = unpaidOrderId else {
+            // Fallback: if somehow we don't know the original order, go to payment
+            if isPhoneLayout {
+                showBasketSheetPhone = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    showOrderFlow = true
+                }
+            } else {
+                showOrderFlow = true
+            }
+            return
+        }
+
+        // Snapshot current basket
+        let previousLocked = lockedLineIds
+        let entriesArray = Array(basket.values)
+
+        // Only new lines: those NOT in previousLocked
+        let newEntries = entriesArray.filter { !previousLocked.contains($0.id) }
+        guard !newEntries.isEmpty else {
+            return
+        }
+
+        let total      = finalTotal
+        let newTotal   = newEntries.reduce(0.0) { $0 + Double($1.quantity) * $1.unitPrice }
+        let mode       = diningMode
+
+        let nameSnapshot: String? =
+            posSavedName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? nil
+            : posSavedName.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let phoneSnapshot: String? =
+            posSavedPhone.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? nil
+            : posSavedPhone.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // 🔹 1) OPTIMISTIC UI – mark as sent + show success NOW
+
+        // Give this batch a session time
+        let sessionStamp = Date()
+        for e in newEntries {
+            lineSessionTime[e.id] = sessionStamp
+        }
+
+        // All current lines are now “sent”
+        lockedLineIds = Set(entriesArray.map { $0.id })
+
+        // Green check overlay immediately
+        playPrintSuccess()
+
+        // (Optional) snapshot for confirmation / debugging
+        lastOrder = CashOrderSnapshot(
+            orderNumber: existingId,
+            entries: entriesArray,
+            totalPrice: total,
+            diningMode: mode,
+            customerName: nameSnapshot,
+            customerPhone: phoneSnapshot
+        )
+
+        // 🔹 2) FIRE & FORGET: print + submit to server in the background
+
+        // Print only the new lines
+        PrinterManager.shared.printCashPointSplit(
+            orderNumber: existingId,
+            entries: newEntries,
+            total: newTotal,
+            diningMode: mode,
+            customerName: nameSnapshot
+        )
+
+        OrderAPI.submitOrder(
+            orderId: existingId,
+            entries: entriesArray,   // full basket → DB has full order
+            total: total,
+            diningMode: mode,
+            source: "cashpoint",
+            customerName: nameSnapshot,
+            customerPhone: phoneSnapshot,
+            payment: nil,
+            zcreditMeta: nil
+        ) { result in
+            DispatchQueue.main.async {
+                if case .failure(let err) = result {
+                    // You can keep this minimal or add a small toast
+                    print("❌ submitOrder unpaid update \(existingId) failed:", err)
+                    Haptics.error()
+                    // Optional: show a small banner saying “Sync failed, please check admin”
+                }
+            }
+        }
+    }
     @AppStorage("cashPayLaterMode") private var isPayLaterMode: Bool = false
     @AppStorage("posSavedName") private var posSavedName: String = ""
     @AppStorage("posSavedPhone") private var posSavedPhone: String = ""
@@ -38,106 +196,17 @@ struct CashPointView: View {
                                         for: nil)
         #endif
     }
-    
-    // MARK: - Pay-later / waiter helpers
-
-    private var hasUnsentLines: Bool {
-        basket.values.contains { sentLineTimestamps[$0.id] == nil }
-    }
-
-    private struct WaiterSection: Identifiable {
-        let id: String
-        let title: String
-        let entries: [BasketEntry]
-    }
-    
-    private func openOrderFlow(inline: Bool) {
-        if inline {
-            showOrderFlow = true
-        } else {
-            showBasketSheetPhone = false
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                showOrderFlow = true
-            }
-        }
-    }
-
-    private static let waiterTimeFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "he_IL")
-        f.dateFormat = "HH:mm"
-        return f
-    }()
-
-    private var waiterSections: [WaiterSection] {
-        let formatter = Self.waiterTimeFormatter
-        let entries = basketEntriesSorted
-
-        var groups: [String: [BasketEntry]] = [:]
-
-        for entry in entries {
-            if let ts = sentLineTimestamps[entry.id] {
-                let key = formatter.string(from: ts)
-                groups[key, default: []].append(entry)
-            } else {
-                groups["__UNSENT__", default: []].append(entry)
-            }
-        }
-
-        var sections: [WaiterSection] = []
-
-        // Sent stages in chronological order
-        let sentKeys = groups.keys
-            .filter { $0 != "__UNSENT__" }
-            .sorted()
-
-        for key in sentKeys {
-            guard let entries = groups[key] else { continue }
-            let title = isRtl ? "נשלח ב־\(key)" : "Sent at \(key)"
-            sections.append(WaiterSection(id: key, title: title, entries: entries))
-        }
-
-        // Current unsent draft at the bottom
-        if let draftEntries = groups["__UNSENT__"] {
-            let title = isRtl ? "טיוטה נוכחית" : "Current items"
-            sections.append(WaiterSection(id: "__UNSENT__", title: title, entries: draftEntries))
-        }
-
-        return sections
-    }
-    
-    private func sendUnsentStage() {
-        let unsent = basketEntriesSorted.filter { sentLineTimestamps[$0.id] == nil }
-        guard !unsent.isEmpty else { return }
-
-        let now = Date()
-
-        // TODO: call your printer here with only `unsent`
-        // Example:
-        // PrinterManager.shared.printCashPointSplit(
-        //     orderNumber: tempOrderNumber,
-        //     entries: unsent,
-        //     total: unsent.reduce(0) { $0 + Double($1.quantity) * $1.unitPrice },
-        //     diningMode: diningMode,
-        //     customerName: nil
-        // )
-
-        for entry in unsent {
-            sentLineTimestamps[entry.id] = now
-        }
-    }
-    
     @State private var productSwipeOffsets: [Int: CGFloat] = [:]   // productId -> x offset
     @State private var basketSwipeOffsets: [Int: CGFloat] = [:]    // lineId   -> x offset  👈 NEW
    @State private var isBasketDropTarget: Bool = false
-    @State private var showDigitalBones = false
+    @State private var showOrdersAdmin = false
     @State private var showServiceStep: Bool = true
     @State private var expandedBasketLineId: Int? = nil
     @State private var noteDrafts: [Int: String] = [:]
     @State private var optionSelections: [Int: [String: String]] = [:]   // lineId -> [groupTitle: optionName]
     @State private var additionSelections: [Int: Set<String>] = [:]      // lineId -> Set<additionName>
     
-    @State private var showOrdersAdmin = false
+  
     @State private var dirtyStockIds: Set<Int> = []
     @State private var tappedProductId: Int? = nil
     @State private var sheetEntry: BasketEntry?
@@ -155,6 +224,17 @@ struct CashPointView: View {
         case none, ten, fifteen,thirteen, custom
     }
     
+
+    private var mainActionButtonTitle: String {
+        if isPayLaterMode && hasAddedLinesInPayLater {
+            return isRtl ? "שלח הזמנה" : "Print order"
+        } else if isPayLaterMode {
+            return isRtl ? "תשלום" : "Pay"
+        } else {
+            return isRtl ? "הזמנה" : "Order"
+        }
+    }
+     
     @State private var productPoll = Timer.publish(every: 10, on: .main, in: .common).autoconnect()
     @State private var showDiscountPanel = false
     @State private var discountMode: DiscountMode = .none
@@ -450,7 +530,34 @@ struct CashPointView: View {
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
 
-            if !isPayLaterMode {
+            if isPayLaterMode {
+                // 🔹 Pay-later header: New order + unpaid order title
+                VStack(alignment: .leading, spacing: 6) {
+                    Button {
+                        startNewOrderFromPayLater()
+                    } label: {
+                        Text("הזמנה חדשה")
+                            .font(.system(size: 18, weight: .bold))
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 44)
+                            .background(.black)
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    }
+
+                    if !currentUnpaidOrderTitle.isEmpty {
+                        Text(currentUnpaidOrderTitle)
+                                       .font(.system(size: 26, weight: .heavy))
+                                       .foregroundColor(.primary)
+                                       .padding(.top, 4)
+                    }
+                }
+                .padding(.horizontal, 18)
+                .padding(.top, 4)
+                .padding(.bottom, 10)
+
+            } else {
+                // 🔹 Normal mode: dine-in / take-away picker
                 Picker("", selection: $diningMode) {
                     Text(isRtl ? "לשבת" : "Dine in")
                         .tag(DiningMode.dineIn)
@@ -473,33 +580,27 @@ struct CashPointView: View {
                 }
             } else {
                 ScrollView(.vertical, showsIndicators: true) {
-                    if isPayLaterMode {
-                        // ✅ WAITER MODE: stages with time section headers
-                        VStack(alignment: .leading, spacing: 16) {
-                            ForEach(waiterSections) { section in
-                                VStack(alignment: .leading, spacing: 8) {
-                                    Text(section.title)
-                                        .font(.system(size: 13, weight: .semibold))
-                                        .foregroundColor(.secondary)
-                                        .padding(.horizontal, 16)
+                       VStack(spacing: 12) {
+                           ForEach(basketSections()) { section in
+                               // ⏰ Header – only if we have a server time
+                               if let label = section.headerTime {
+                                   HStack {
+                                       Text(label)
+                                           .font(.system(size: 13, weight: .medium))
+                                           .foregroundColor(.secondary)
+                                       Spacer()
+                                   }
+                                   .padding(.horizontal, 16)
+                                   .padding(.top, 4)
+                               }
 
-                                    ForEach(section.entries) { entry in
-                                        basketRow(entry)
-                                    }
-                                }
-                            }
-                        }
-                        .padding(.vertical, 12)
-                    } else {
-                        // 🧾 NORMAL MODE: flat list
-                        VStack(spacing: 12) {
-                            ForEach(basketEntriesSorted) { entry in
-                                basketRow(entry)
-                            }
-                        }
-                        .padding(.vertical, 12)
-                    }
-                }
+                               ForEach(section.entries) { entry in
+                                   basketRow(entry)
+                               }
+                           }
+                       }
+                       .padding(.vertical, 12)
+                   }
             }
 
             Spacer()
@@ -528,34 +629,23 @@ struct CashPointView: View {
                 Button {
                     guard !basket.isEmpty else { return }
 
-                    if isPayLaterMode {
-                        if hasUnsentLines {
-                            // 🧾 waiter flow: send only the new items to print
-                            sendUnsentStage()
-                        } else {
-                            // Nothing new → go to payment
-                            openOrderFlow(inline: inline)
-                        }
+                    if isPayLaterMode && hasAddedLinesInPayLater {
+                        // unpaid + added items → print/update existing order
+                        printUpdatedUnpaidOrder()
                     } else {
-                        // Regular “pay now” flow
-                        openOrderFlow(inline: inline)
+                        // normal / unpaid-without-additions → go to payment
+                        if inline {
+                            showOrderFlow = true
+                        } else {
+                            showBasketSheetPhone = false
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                                showOrderFlow = true
+                            }
+                        }
                     }
 
                 } label: {
-                    let title: String = {
-                        guard isPayLaterMode else {
-                            return isRtl ? "הזמנה" : "Order"
-                        }
-                        if hasUnsentLines {
-                            // When there are new items to send
-                            return isRtl ? "הזמן" : "Send order"
-                        } else {
-                            // All items already sent → just pay
-                            return isRtl ? "המשך לתשלום" : "Proceed to payment"
-                        }
-                    }()
-
-                    Text(title)
+                    Text(mainActionButtonTitle)
                         .font(.system(size: 20, weight: .bold))
                         .foregroundColor(.white)
                         .frame(maxWidth: .infinity)
@@ -668,6 +758,7 @@ struct CashPointView: View {
                         HStack {
                               // push button to the right edge (visual)
                             Button {
+                                
                                 onOrdersTap()
                             } label: {
                                 HStack {
@@ -1396,6 +1487,188 @@ struct CashPointView: View {
     private var basketEntriesSorted: [BasketEntry] {
         basket.values.sorted { $0.id < $1.id } // oldest at top, newest at bottom
     }
+    
+    private func startNewOrderFromPayLater() {
+        // Exit pay-later context and start fresh
+        isPayLaterMode = false
+        unpaidOrderId = nil
+        lockedLineIds.removeAll()
+        lineSessionTime.removeAll()
+
+        basket.removeAll()
+        nextBasketLineId = 1
+
+        // 🔥 Clear saved customer info
+        posSavedName = ""
+        posSavedPhone = ""
+
+        // Also clear local working copies if needed
+        // (This prevents the name/phone step from pre-filling)
+        // These exist in OrderFlowView but POS keeps last values before entering:
+        lastOrder = nil
+
+        // Go back to service picker screen
+        showServiceStep = true
+    }
+    private var currentUnpaidOrderTitle: String {
+        guard let oid = unpaidOrderId else { return "" }
+
+        let cleanName = posSavedName
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "Customer", with: "")
+
+        if cleanName.isEmpty {
+            return "הזמנה \(oid)"
+        } else {
+            return "הזמנה \(oid) \(cleanName)"
+        }
+    }
+    private struct BasketSection: Identifiable {
+        let id: Int
+        let headerTime: String?   // e.g. "8:32" or "הוספה"
+        let entries: [BasketEntry]
+    }
+
+    /// Groups basket entries by server time.
+    /// New section if time diff > 2 minutes between consecutive locked lines.
+    private func basketSections() -> [BasketSection] {
+        let entries = basketEntriesSorted
+
+        let restored = entries
+            .filter { lockedLineIds.contains($0.id) }
+            .sorted {
+                let t1 = lineSessionTime[$0.id] ?? Date.distantPast
+                let t2 = lineSessionTime[$1.id] ?? Date.distantPast
+                return t1 < t2
+            }
+        let added    = entries.filter { !lockedLineIds.contains($0.id) }
+
+        var result: [BasketSection] = []
+        var sectionIndex = 0
+
+        // MARK: Append helper (THIS is the version you asked about)
+        func appendSection(header: String?, entries: [BasketEntry]) {
+            guard !entries.isEmpty else { return }
+            result.append(
+                BasketSection(
+                    id: sectionIndex,      // ← stable ID
+                    headerTime: header,
+                    entries: entries
+                )
+            )
+            sectionIndex += 1           // next section gets next id
+        }
+
+        // MARK: 1. Restored sections — grouped by updated time
+        if !restored.isEmpty {
+            var currentHeader: String? = nil
+            var currentEntries: [BasketEntry] = []
+            var lastTime: Date? = nil
+
+            func flush() {
+                guard !currentEntries.isEmpty else { return }
+                appendSection(header: currentHeader, entries: currentEntries)
+                currentHeader = nil
+                currentEntries = []
+            }
+
+            for entry in restored {
+                guard let t = lineSessionTime[entry.id] else {
+                    currentEntries.append(entry)
+                    continue
+                }
+
+                if let last = lastTime {
+                    let diffMinutes = abs(t.timeIntervalSince(last)) / 60.0
+                    if diffMinutes > 2 {
+                        // too far apart → new session
+                        flush()
+                        currentHeader = sectionTimeFormatter.string(from: t)
+                    }
+                } else {
+                    // first entry
+                    flush()
+                    currentHeader = sectionTimeFormatter.string(from: t)
+                }
+
+                lastTime = t
+                currentEntries.append(entry)
+            }
+
+            flush()
+        }
+
+        // MARK: 2. Added entries (only show "הוספה" in unpaid mode)
+        let unpaidSession = isPayLaterMode && !restored.isEmpty
+
+        if !added.isEmpty {
+            if unpaidSession {
+                appendSection(header: "הוספה", entries: added)
+            } else {
+                appendSection(header: nil, entries: added)
+            }
+        }
+
+        return result
+    }
+    private func restoreUnpaidOrder(_ order: AdminOrderItem) {
+        // Fresh state
+        basket.removeAll()
+        nextBasketLineId = 1
+        lockedLineIds.removeAll()
+        lineSessionTime.removeAll()
+        unpaidOrderId = order.id
+
+        // 🔹 Reset all per-line UI/editing state so everything starts CLOSED
+        expandedBasketLineId = nil
+        noteDrafts.removeAll()
+        optionSelections.removeAll()
+        additionSelections.removeAll()
+        basketSwipeOffsets.removeAll()
+
+        // Rebuild basket from admin order lines
+        for line in order.items {
+            let lineId = nextBasketLineId
+            nextBasketLineId += 1
+
+            let item = makeShellMenuItem(from: line)
+
+            let subtitleText = line.modifiersText?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            let entry = BasketEntry(
+                id: lineId,
+                item: item,
+                quantity: line.quantity,
+                subtitle: (subtitleText?.isEmpty ?? true) ? nil : subtitleText,
+                unitPrice: line.unitPrice
+            )
+            basket[lineId] = entry
+
+            // 🔒 mark this line as “submitted already”
+            lockedLineIds.insert(lineId)
+
+            // ⏰ store server time (prefer per-item; fallback = order time)
+            let ts = line.updatedAt ?? order.placedAt
+            lineSessionTime[lineId] = ts
+        }
+
+        // Service + name etc...
+        if order.subtitle.contains("לקחת") {
+            diningMode = .takeAway
+        } else {
+            diningMode = .dineIn
+        }
+
+        let cleanName = order.customerName
+            .replacingOccurrences(of: "Customer", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !cleanName.isEmpty {
+            posSavedName = cleanName
+        }
+
+        isPayLaterMode = true
+    }
 
     private var basketTotalQuantity: Int {
         basket.values.reduce(0) { $0 + $1.quantity }
@@ -1589,7 +1862,7 @@ struct CashPointView: View {
             ZStack(alignment: .bottom) {
                 VStack(spacing: 0) {
                     let isPhone = isPhoneLayout
-
+                    
                     // MARK: - Responsive Header
                     Group {
                         if isPhone {
@@ -1599,9 +1872,9 @@ struct CashPointView: View {
                                 HStack(spacing: 12) {
                                     Text(isRtl ? "קופה" : "Cash Point")
                                         .font(.system(size: 22, weight: .semibold))
-
+                                    
                                     Spacer()
-
+                                    
                                     Button {
                                         isStockEditMode.toggle()
                                         if isStockEditMode {
@@ -1613,25 +1886,25 @@ struct CashPointView: View {
                                         Text(isRtl
                                              ? (isStockEditMode ? "סיים" : "מלאי")
                                              : (isStockEditMode ? "Done" : "Stock"))
-                                            .font(.system(size: 14, weight: .semibold))
-                                            .padding(.horizontal, 12)
-                                            .padding(.vertical, 6)
-                                            .background(Color(.systemGray5))
-                                            .clipShape(Capsule())
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 6)
+                                        .background(Color(.systemGray5))
+                                        .clipShape(Capsule())
                                     }
                                 }
-
+                                
                                 // Row 2: Search + compact "+"
                                 HStack(spacing: 10) {
                                     HStack(spacing: 8) {
                                         Image(systemName: "magnifyingglass")
                                             .foregroundColor(.secondary)
-
+                                        
                                         TextField(isRtl ? "חיפוש מוצר…" : "Search product…", text: $searchText)
                                             .textInputAutocapitalization(.none)
                                             .autocorrectionDisabled()
                                             .focused($isSearchFocused)
-
+                                        
                                         if !searchText.isEmpty {
                                             Button { searchText = "" } label: {
                                                 Image(systemName: "xmark.circle.fill")
@@ -1644,13 +1917,13 @@ struct CashPointView: View {
                                     .padding(.vertical, 8)
                                     .background(Color(.secondarySystemBackground))
                                     .clipShape(RoundedRectangle(cornerRadius: 12))
-
+                                    
                                     Button {
                                         let defaultCategory =
-                                            selectedCategory.isEmpty
-                                            ? (api.items.first?.category ?? (isRtl ? "כללי" : "General"))
-                                            : selectedCategory
-
+                                        selectedCategory.isEmpty
+                                        ? (api.items.first?.category ?? (isRtl ? "כללי" : "General"))
+                                        : selectedCategory
+                                        
                                         adminDraft = AdminProductDraft(
                                             productId: nil,
                                             name: "",
@@ -1671,29 +1944,29 @@ struct CashPointView: View {
                             .padding(.horizontal, 16)
                             .padding(.top, 8)
                             .padding(.bottom, 8)
-
+                            
                         } else {
                             // 💻 iPad / Mac: your original header
                             HStack(spacing: 12) {
                                 // Title on the left
                                 Text(isRtl ? "קופה" : "Cash Point")
                                     .font(.system(size: 22, weight: .semibold))
-
+                                
                                 // Spacer before search
                                 Spacer()
                                     .frame(maxWidth: 100)
-
+                                
                                 // Search field roughly aligned with the middle products column
                                 HStack(spacing: 8) {
                                     Image(systemName: "magnifyingglass")
                                         .foregroundColor(.secondary)
-
+                                    
                                     TextField(isRtl ? "חיפוש מוצר…" : "Search product…", text: $searchText)
                                         .textInputAutocapitalization(.none)
                                         .autocorrectionDisabled()
                                         .multilineTextAlignment(.leading)
                                         .focused($isSearchFocused)
-
+                                    
                                     if !searchText.isEmpty {
                                         Button {
                                             searchText = ""
@@ -1709,16 +1982,16 @@ struct CashPointView: View {
                                 .background(Color(.secondarySystemBackground))
                                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                                 .frame(maxWidth: 240)
-
+                                
                                 Spacer()
-
+                                
                                 // New product button
                                 Button {
                                     let defaultCategory =
-                                        selectedCategory.isEmpty
-                                        ? (api.items.first?.category ?? (isRtl ? "כללי" : "General"))
-                                        : selectedCategory
-
+                                    selectedCategory.isEmpty
+                                    ? (api.items.first?.category ?? (isRtl ? "כללי" : "General"))
+                                    : selectedCategory
+                                    
                                     adminDraft = AdminProductDraft(
                                         productId: nil,
                                         name: "",
@@ -1739,7 +2012,7 @@ struct CashPointView: View {
                                     .background(Color(.systemGray5))
                                     .clipShape(Capsule())
                                 }
-
+                                
                                 // Stock mode toggle
                                 Button {
                                     isStockEditMode.toggle()
@@ -1752,11 +2025,11 @@ struct CashPointView: View {
                                     Text(isRtl
                                          ? (isStockEditMode ? "סיים" : "מלאי")
                                          : (isStockEditMode ? "Done" : "Stock"))
-                                        .font(.system(size: 14, weight: .semibold))
-                                        .padding(.horizontal, 10)
-                                        .padding(.vertical, 6)
-                                        .background(Color(.systemGray5))
-                                        .clipShape(Capsule())
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                                    .background(Color(.systemGray5))
+                                    .clipShape(Capsule())
                                 }
                             }
                             .padding(.horizontal, 16)
@@ -1764,9 +2037,9 @@ struct CashPointView: View {
                             .padding(.bottom, 15)
                         }
                     }
-
+                    
                     Divider()
-
+                    
                     // MARK: - Main content
                     HStack(spacing: 0) {
                         CashCategoryRail(
@@ -1779,33 +2052,33 @@ struct CashPointView: View {
                             },
                             onOrdersTap: {
                                 //showOrdersAdmin = true
-                                showDigitalBones = true
+                                showOrdersAdmin = true
                             }
                         )
                         .frame(width: 190)
                         Divider()
-
+                        
                         GeometryReader { geo in
                             ScrollView {
                                 LazyVStack(spacing: 8) {
                                     ForEach(filteredItems) { item in
                                         let qty   = quantityInBasket(for: item)
                                         let remainingForItem = maxAdditionalQuantity(for: item)
-
+                                        
                                         let isOut =
-                                            selectedCategory != "✏️ הערות"
-                                            && (
-                                                !stockToggles.isOn(item.id)
-                                                || (remainingForItem ?? 1) <= 0
-                                            )
+                                        selectedCategory != "✏️ הערות"
+                                        && (
+                                            !stockToggles.isOn(item.id)
+                                            || (remainingForItem ?? 1) <= 0
+                                        )
                                         let stockAmount = stockAdjustments[item.id]
                                         let isEditingStock = editingStockProductId == item.id
                                         let showFullStockUI = isStockEditMode || isEditingStock
-
+                                        
                                         let swipeOffset = productSwipeOffsets[item.id] ?? 0    // 👈 NEW
-
+                                        
                                         ZStack(alignment: .topTrailing) {
-
+                                            
                                             // 🔹 MAIN CARD (no Button)
                                             CashProductTile(
                                                 item: item,
@@ -1817,40 +2090,40 @@ struct CashPointView: View {
                                             .onTapGesture {
                                                 // If this interaction was a swipe, ignore the tap
                                                 guard swipingProductId == nil else { return }
-
+                                                
                                                 searchText = ""
                                                 isSearchFocused = false
-
+                                                
                                                 if selectedCategory == "✏️ הערות" {
                                                     messageTargetIsKitchen = false
                                                     messageTargetIsBakery  = false
-
+                                                    
                                                     if item.name.contains("וטרינה") {
                                                         messageTargetIsBakery  = true
                                                     } else if item.name.contains("מטבח") {
                                                         messageTargetIsKitchen = true
                                                     }
-
+                                                    
                                                     messageText  = ""
                                                     messagePrice = ""
-
+                                                    
                                                     DispatchQueue.main.async {
                                                         showMessageSheet = true
                                                     }
-
+                                                    
                                                     return
                                                 }
-
+                                                
                                                 guard !isOut else {
                                                     Haptics.error()
                                                     return
                                                 }
-
+                                                
                                                 if let maxAdd = maxAdditionalQuantity(for: item), maxAdd <= 0 {
                                                     Haptics.error()
                                                     return
                                                 }
-
+                                                
                                                 withAnimation(.spring(response: 0.18,
                                                                       dampingFraction: 0.6,
                                                                       blendDuration: 0.1)) {
@@ -1863,9 +2136,9 @@ struct CashPointView: View {
                                                         tappedProductId = nil
                                                     }
                                                 }
-
+                                                
                                                 Haptics.light()
-
+                                                
                                                 addToBasket(
                                                     item: item,
                                                     quantity: 1,
@@ -1877,7 +2150,7 @@ struct CashPointView: View {
                                                 // Force RTL for EVERYTHING in the menu
                                                 Group {
                                                     if selectedCategory != "הודעות" {
-
+                                                        
                                                         // Stock toggle
                                                         if isOut {
                                                             Button("החזר למלאי") {
@@ -1888,9 +2161,9 @@ struct CashPointView: View {
                                                                 stockToggles.binding(for: item.id).wrappedValue = false
                                                             }
                                                         }
-
+                                                        
                                                         Divider()
-
+                                                        
                                                         // Stock editor
                                                         Button("עדכן מלאי") {
                                                             editingStockProductId = item.id
@@ -1898,9 +2171,9 @@ struct CashPointView: View {
                                                                 restartStockEditTimer()
                                                             }
                                                         }
-
+                                                        
                                                         Divider()
-
+                                                        
                                                         // Product editor (NO ICON)
                                                         Button("ערוך מוצר") {
                                                             adminDraft = makeAdminDraft(from: item)
@@ -1909,7 +2182,7 @@ struct CashPointView: View {
                                                 }
                                                 .environment(\.layoutDirection, .rightToLeft)   // ← THE MAGIC
                                             }
-
+                                            
                                             // 🔹 STOCK UI (unchanged)
                                             if showFullStockUI {
                                                 HStack(spacing: 6) {
@@ -1924,10 +2197,41 @@ struct CashPointView: View {
                                                             .clipShape(Circle())
                                                     }
 
-                                                    Text(stockLabel(for: stockAmount, isOutOfStock: isOut))
+                                                    // 👇 NEW: editable stock text when editing this product
+                                                    if editingStockProductId == item.id {
+                                                        TextField(
+                                                            "∞",
+                                                            text: Binding(
+                                                                get: {
+                                                                    if let existing = stockText[item.id] {
+                                                                        return existing
+                                                                    }
+                                                                    if let current = remainingStock(for: item) {
+                                                                        return String(current)
+                                                                    }
+                                                                    return ""
+                                                                },
+                                                                set: { newValue in
+                                                                    stockText[item.id] = newValue
+                                                                    updateStockFromKeyboard(productId: item.id, raw: newValue)
+                                                                }
+                                                            )
+                                                        )
+                                                        .keyboardType(.numberPad)
+                                                        .multilineTextAlignment(.center)
                                                         .font(.system(size: 16, weight: .bold))
-                                                        .foregroundColor(.primary)
-                                                        .frame(width: 28)
+                                                        .frame(width: 40)
+                                                        .padding(.horizontal, 4)
+                                                        .padding(.vertical, 4)
+                                                        .background(Color(.systemGray6))
+                                                        .cornerRadius(6)
+                                                    } else {
+                                                        // normal read-only label
+                                                        Text(stockLabel(for: stockAmount, isOutOfStock: isOut))
+                                                            .font(.system(size: 16, weight: .bold))
+                                                            .foregroundColor(.primary)
+                                                            .frame(width: 28)
+                                                    }
 
                                                     Button {
                                                         bumpStockAmount(productId: item.id, delta: +1)
@@ -1944,7 +2248,7 @@ struct CashPointView: View {
                                                 .background(
                                                     RoundedRectangle(cornerRadius: 12)
                                                         .fill(Color(.systemBackground))
-                                                        .shadow(color:.black, radius: 4, y: 2)
+                                                        .shadow(color: .black, radius: 4, y: 2)
                                                 )
                                                 .padding(6)
                                             } else if !isOut, let remaining = remainingForItem, remaining > 0 {
@@ -1960,13 +2264,13 @@ struct CashPointView: View {
                                             DragGesture(minimumDistance: 10)
                                                 .onChanged { value in
                                                     dismissKeyboard()
-
+                                                    
                                                     let dx = value.translation.width
                                                     let dy = value.translation.height
                                                     let horizontal = abs(dx)
                                                     let vertical = abs(dy)
                                                     let horizontalThreshold: CGFloat = 28   // how much horizontal before we treat as swipe
-
+                                                    
                                                     // Only start treating as swipe if it's clearly horizontal
                                                     guard horizontal > horizontalThreshold,
                                                           horizontal > vertical else {
@@ -1974,10 +2278,10 @@ struct CashPointView: View {
                                                         swipingProductId = nil
                                                         return
                                                     }
-
+                                                    
                                                     // Mark this product as being swiped so tap doesn't fire
                                                     swipingProductId = item.id
-
+                                                    
                                                     // Normalize direction:
                                                     // dir = +1 → LTR forward, dir = -1 → RTL forward (right→left)
                                                     let dir: CGFloat = isRtl ? -1 : 1
@@ -1990,12 +2294,12 @@ struct CashPointView: View {
                                                     let vertical = abs(dy)
                                                     let horizontalThreshold: CGFloat = 28
                                                     let dir: CGFloat = isRtl ? -1 : 1
-
+                                                    
                                                     defer {
                                                         // reset swipe tracking
                                                         swipingProductId = nil
                                                     }
-
+                                                    
                                                     // If gesture wasn't clearly horizontal enough, just reset
                                                     guard horizontal > horizontalThreshold,
                                                           horizontal > vertical else {
@@ -2004,54 +2308,54 @@ struct CashPointView: View {
                                                         }
                                                         return
                                                     }
-
+                                                    
                                                     let translated = dx * dir        // normalized: >0 = forward, <0 = backward
                                                     let commitThreshold: CGFloat = 40
-
+                                                    
                                                     let canAdd = (maxAdditionalQuantity(for: item) ?? 1) > 0 &&
-                                                                 !isOut &&
-                                                                 selectedCategory != "✏️ הערות"
-
+                                                    !isOut &&
+                                                    selectedCategory != "✏️ הערות"
+                                                    
                                                     let qtyInBasket = quantityInBasket(for: item)
                                                     let canRemove = qtyInBasket > 0
-
+                                                    
                                                     if translated > commitThreshold, canAdd {
                                                         // ✅ FORWARD SWIPE → ADD ONE
                                                         withAnimation(.spring(response: 0.25, dampingFraction: 0.75)) {
                                                             productSwipeOffsets[item.id] = 200 * dir
                                                         }
-
+                                                        
                                                         Haptics.light()
-
+                                                        
                                                         addToBasket(
                                                             item: item,
                                                             quantity: 1,
                                                             subtitle: nil,
                                                             unitPrice: item.price
                                                         )
-
+                                                        
                                                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                                                             withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                                                                 productSwipeOffsets[item.id] = 0
                                                             }
                                                         }
-
+                                                        
                                                     } else if translated < -commitThreshold, canRemove {
                                                         // ✅ BACKWARD SWIPE → REMOVE ONE FROM LAST ADDED
                                                         withAnimation(.spring(response: 0.25, dampingFraction: 0.75)) {
                                                             productSwipeOffsets[item.id] = -200 * dir
                                                         }
-
+                                                        
                                                         Haptics.light()
-
+                                                        
                                                         removeOneFromLastLine(of: item)
-
+                                                        
                                                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                                                             withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                                                                 productSwipeOffsets[item.id] = 0
                                                             }
                                                         }
-
+                                                        
                                                     } else {
                                                         // Not far enough → reset
                                                         withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
@@ -2102,7 +2406,7 @@ struct CashPointView: View {
                                 } else {
                                     name = "הערה לבר"
                                 }
-
+                                
                                 let item = ShellMenuItem(
                                     id: Int.random(in: -9000 ... -8000),
                                     name: name,
@@ -2112,21 +2416,21 @@ struct CashPointView: View {
                                     imageURL: nil,
                                     description: nil
                                 )
-
+                                
                                 addToBasket(
                                     item: item,
                                     quantity: 1,
                                     subtitle: text,
                                     unitPrice: price
                                 )
-
+                                
                                 messageTargetIsKitchen = false
                                 messageTargetIsBakery = false
                             }
                         }
-
+                        
                         Divider()
-
+                        
                         if !isPhone && !isStockEditMode {
                             Divider()
                             basketPanel(inline: true)
@@ -2134,7 +2438,7 @@ struct CashPointView: View {
                     }
                 }
                 .navigationBarHidden(true)
-
+                
                 if isPhoneLayout && !basket.isEmpty {
                     BasketBar(
                         totalQuantity: basketTotalQuantity,
@@ -2143,18 +2447,35 @@ struct CashPointView: View {
                         showBasketSheetPhone = true
                     }
                 }
+                if showPrintSuccess {
+                    ZStack {
+                        Color.black.opacity(0.35)
+                            .ignoresSafeArea()
+                        
+                        VStack(spacing: 16) {
+                            ZStack {
+                                Circle()
+                                    .fill(Color.green)
+                                    .frame(width: 110, height: 110)
+                                
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 52, weight: .bold))
+                                    .foregroundColor(.white)
+                            }
+                            .scaleEffect(printSuccessScale)
+                            .opacity(printSuccessOpacity)
+                            
+                            Text(isRtl ? "ההזמנה עודכנה" : "Order updated")
+                                .font(.system(size: 22, weight: .semibold))
+                                .foregroundColor(.white)
+                        }
+                    }
+                    .transition(.opacity)
+                }
+            
             }
             .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
-            .fullScreenCover(isPresented: $showDigitalBones) {
-                /*
-                DigitalBonesView(onRefundToCashPoint: { bone in
-                    // 👇 rebuild this order into the cashpoint basket
-                    refundOrderFromBone(bone)
-                })
-                .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
-                 */
-                AdminOrdersView()
-            }
+            
             .fullScreenCover(isPresented: $showServiceStep) {
                 ServiceModeView(
                     isRtl: isRtl,
@@ -2163,19 +2484,22 @@ struct CashPointView: View {
                         showServiceStep = false
                     },
                     onOrdersTap: {
-                        showDigitalBones = true     // 👈 same as tapping "הזמנות" later
+                        showServiceStep = false
+                        DispatchQueue.main.async {
+                            showOrdersAdmin = true
+                        }
                     }
                 )
                 .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
             }
            // .transaction { $0.disablesAnimations = true }
             .onAppear {
+                isPayLaterMode = false
+                   lockedLineIds.removeAll()
+                   lineSessionTime.removeAll()
+
+               
                 api.load(skipCache: true)
-            }
-            .onChange(of: isPayLaterMode) { newValue in
-                if newValue {
-                    diningMode = .dineIn
-                }
             }
             .onChange(of: basket.count) { _ in
                 let currentIds = Set(basket.keys)
@@ -2194,8 +2518,22 @@ struct CashPointView: View {
                 }
             }
             .fullScreenCover(isPresented: $showOrdersAdmin) {
-                AdminOrdersView()
-                    .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
+                OrdersHostView(
+                    onSelectUnpaid: { unpaidOrder in
+                        // From AdminOrdersView → restore unpaid to basket
+                        restoreUnpaidOrder(unpaidOrder)
+                        showOrdersAdmin = false
+                    },
+                    onRefundFromBone: { bone in
+                        // From DigitalBonesView → refund into current basket
+                        refundOrderFromBone(bone)
+                        isPayLaterMode = false
+                        lockedLineIds.removeAll()
+                        lineSessionTime.removeAll()
+                        showOrdersAdmin = false
+                    }
+                )
+                .environment(\.isRtl, isRtl)
             }
             .sheet(isPresented: $showBasketSheetPhone) {
                 NavigationStack {
@@ -2259,7 +2597,7 @@ struct CashPointView: View {
                     total: finalTotal,
                     isRtl: isRtl,
                     diningMode: $diningMode,
-                    requiresPhoneStep: requiresPhoneStep,   // 👈 NEW
+                    requiresPhoneStep: requiresPhoneStep,
                     onCancel: {
                         showOrderFlow = false
                         if let first = categories.first {
@@ -2275,7 +2613,9 @@ struct CashPointView: View {
                         if let first = categories.first {
                             selectedCategory = first
                         }
-                    }
+                    },
+                    // 👇 NEW
+                    allowPayLater: (!isPayLaterMode) || hasAddedLinesInPayLater
                 )
             }
             .sheet(item: $adminDraft) { draft in
@@ -2408,10 +2748,9 @@ struct CashPointView: View {
 
         // Clear basket & close the flow immediately in the UI
         basket.removeAll()
-        sentLineTimestamps.removeAll()
         showOrderFlow  = false
         showServiceStep = true
-        
+
         var meta: [String: Any] = [:]
 
         if let summary = paymentSummary {
@@ -2421,8 +2760,13 @@ struct CashPointView: View {
         }
 
         let metaToSend = meta.isEmpty ? nil : meta
-        // 🔥 Submit to server – we now wait for the real orderId
+
+        // If this started as an unpaid order → reuse that id
+        let existingIdForPayLater: Int? = (isPayLaterMode ? unpaidOrderId : nil)
+
+        // 🔥 Submit to server – we now wait for the real (or reused) orderId
         OrderAPI.submitOrder(
+            orderId: existingIdForPayLater,   // 👈 reuse open order id when pay-later
             entries: entriesArray,
             total: total,
             diningMode: mode,
@@ -2431,78 +2775,106 @@ struct CashPointView: View {
             customerPhone: phoneSnapshot,
             payment: paymentSummary,
             zcreditMeta: metaToSend
-        ){ result in
-              DispatchQueue.main.async {
-                  switch result {
-                  case .success(let response):
-                      let serverOrderId = response
-                      posSavedName = ""
-                      posSavedPhone = ""
-                      // ✅ Print split tickets with TRUE server order id
-                      PrinterManager.shared.printCashPointSplit(
-                          orderNumber: serverOrderId,
-                          entries: entriesArray,
-                          total: total,
-                          diningMode: mode,
-                          customerName: nameSnapshot
-                      )
+        ) { result in
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let response):
+                    let serverOrderId = response
+                    posSavedName = ""
+                    posSavedPhone = ""
 
-                      // ✅ Confirmation screen snapshot with real id
-                      let snapshot = CashOrderSnapshot(
-                          orderNumber: serverOrderId,
-                          entries: entriesArray,
-                          totalPrice: total,
-                          diningMode: mode,
-                          customerName: nameSnapshot,
-                          customerPhone: phoneSnapshot
-                      )
-                      lastOrder = snapshot
-                      showConfirmation = true
+                    // 🧾 Decide what to print:
+                    let printerEntries: [BasketEntry]
+                    let printerTotal: Double
 
-                  case .failure:
-                      // ❌ Server failed → queue for retry and still print with a local temp id
-                      let fallbackOrderId = Int.random(in: 1000...9999)
+                    if isPayLaterMode, let _ = existingIdForPayLater {
+                        // 🔹 Pay-later finalization:
+                        // Print ONLY lines that weren't already sent (not in lockedLineIds)
+                        let unsent = entriesArray.filter { !lockedLineIds.contains($0.id) }
+                        if unsent.isEmpty {
+                            printerEntries = []
+                            printerTotal = 0
+                        } else {
+                            printerEntries = unsent
+                            printerTotal = unsent.reduce(0.0) { $0 + Double($1.quantity) * $1.unitPrice }
+                        }
+                    } else {
+                        // 🔹 Normal order → print full ticket
+                        printerEntries = entriesArray
+                        printerTotal = total
+                    }
 
-                      CashpointOrderQueue.enqueue(
-                          entries: entriesArray,
-                          total: total,
-                          diningMode: mode
-                      )
+                    if !printerEntries.isEmpty {
+                        PrinterManager.shared.printCashPointSplit(
+                            orderNumber: serverOrderId,
+                            entries: printerEntries,
+                            total: printerTotal,
+                            diningMode: mode,
+                            customerName: nameSnapshot
+                        )
+                    }
 
-                      PrinterManager.shared.printCashPointSplit(
-                          orderNumber: fallbackOrderId,
-                          entries: entriesArray,
-                          total: total,
-                          diningMode: mode,
-                          customerName: nameSnapshot
-                      )
+                    // ✅ Confirmation snapshot with real id
+                    let snapshot = CashOrderSnapshot(
+                        orderNumber: serverOrderId,
+                        entries: entriesArray,
+                        totalPrice: total,
+                        diningMode: mode,
+                        customerName: nameSnapshot,
+                        customerPhone: phoneSnapshot
+                    )
+                    lastOrder = snapshot
+                    showConfirmation = true
 
-                      let snapshot = CashOrderSnapshot(
-                          orderNumber: fallbackOrderId,
-                          entries: entriesArray,
-                          totalPrice: total,
-                          diningMode: mode,
-                          customerName: nameSnapshot,
-                          customerPhone: phoneSnapshot
-                      )
-                      lastOrder = snapshot
-                      showConfirmation = true
-                  }
-              }
-          }
+                    // 🔄 Clear pay-later context after successful final payment
+                    isPayLaterMode = false
+                    unpaidOrderId = nil
+                    lockedLineIds.removeAll()
+                    lineSessionTime.removeAll()
+
+                case .failure:
+                    // ❌ Server failed → queue for retry and still print with a local temp id (normal behaviour)
+                    let fallbackOrderId = Int.random(in: 1000...9999)
+
+                    CashpointOrderQueue.enqueue(
+                        entries: entriesArray,
+                        total: total,
+                        diningMode: mode
+                    )
+
+                    PrinterManager.shared.printCashPointSplit(
+                        orderNumber: fallbackOrderId,
+                        entries: entriesArray,
+                        total: total,
+                        diningMode: mode,
+                        customerName: nameSnapshot
+                    )
+
+                    let snapshot = CashOrderSnapshot(
+                        orderNumber: fallbackOrderId,
+                        entries: entriesArray,
+                        totalPrice: total,
+                        diningMode: mode,
+                        customerName: nameSnapshot,
+                        customerPhone: phoneSnapshot
+                    )
+                    lastOrder = snapshot
+                    showConfirmation = true
+                }
+            }
+        }
     }
 
     private func addToBasket(item: ShellMenuItem, quantity: Int, subtitle: String?, unitPrice: Double) {
-        // 1) Always collapse previously expanded row
+        // 1) Always squeeze / collapse the previously expanded row
         withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
             expandedBasketLineId = nil
         }
 
         let hasModifiers = !(item.modifiers?.isEmpty ?? true)
 
-        // In waiter / pay-later mode we ALWAYS create a new line,
-        // even for simple products (so each round is visible).
-        if hasModifiers || isPayLaterMode {
+        if hasModifiers {
+            // Each modifiers combo is its own line
             let lineId = nextBasketLineId
             nextBasketLineId += 1
 
@@ -2514,34 +2886,49 @@ struct CashPointView: View {
                 unitPrice: unitPrice
             )
 
-            if hasModifiers {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                    expandedBasketLineId = lineId
-                }
+            // 2) New line has modifiers → expand this one
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                expandedBasketLineId = lineId
             }
-            return
-        }
-
-        // 💳 Normal (non-waiter) behaviour for simple items: merge into one line
-        if let (lineId, existing) = basket.first(where: { $0.value.item.id == item.id }) {
-            basket[lineId] = BasketEntry(
-                id: lineId,
-                item: existing.item,
-                quantity: existing.quantity + quantity,
-                subtitle: subtitle ?? existing.subtitle,
-                unitPrice: existing.unitPrice
-            )
         } else {
-            let lineId = nextBasketLineId
-            nextBasketLineId += 1
+               // No modifiers → single line per product
+               // ✅ In pay-later mode, NEVER merge into locked lines.
+               let mergeCandidate = basket.first(where: { pair in
+                   let entry = pair.value
+                   guard entry.item.id == item.id else { return false }
 
-            basket[lineId] = BasketEntry(
-                id: lineId,
-                item: item,
-                quantity: quantity,
-                subtitle: subtitle,
-                unitPrice: unitPrice
-            )
+                   // In normal mode → merge as before
+                   if !isPayLaterMode { return true }
+
+                   // In pay-later mode → only merge into UNLOCKED lines
+                   return !lockedLineIds.contains(pair.key)
+               })
+
+               if let (lineId, existing) = mergeCandidate {
+                   // Merge into existing, editable line
+                   basket[lineId] = BasketEntry(
+                       id: lineId,
+                       item: existing.item,
+                       quantity: existing.quantity + quantity,
+                       subtitle: subtitle ?? existing.subtitle,
+                       unitPrice: existing.unitPrice
+                   )
+               } else {
+                   // No suitable line (or only locked lines) → create NEW line
+                   let lineId = nextBasketLineId
+                   nextBasketLineId += 1
+
+                   basket[lineId] = BasketEntry(
+                       id: lineId,
+                       item: item,
+                       quantity: quantity,
+                       subtitle: subtitle,
+                       unitPrice: unitPrice
+                   )
+               }
+               // For plain items we keep everything collapsed – just the squeeze.
+           
+            // For plain items we keep everything collapsed – just the squeeze.
         }
     }
 
@@ -2904,9 +3291,10 @@ struct CashPointView: View {
             }
     }
     private func basketRow(_ entry: BasketEntry) -> some View {
-        let isExpanded = expandedBasketLineId == entry.id
+        let isLocked = lockedLineIds.contains(entry.id)
+        let isExpanded = !isLocked && expandedBasketLineId == entry.id
         let swipeOffset = basketSwipeOffsets[entry.id] ?? 0   // 👈 NEW
-        // Note binding
+       
         let noteBinding = Binding<String>(
             get: {
                 if let existing = noteDrafts[entry.id] {
@@ -2939,21 +3327,24 @@ struct CashPointView: View {
                 Spacer()
 
                 HStack(spacing: 8) {
-                    Button { decrementEntry(entry.id) } label: {
-                        Image(systemName: "minus.circle.fill")
-                            .font(.system(size: 22))
-                           
+                    if !isLocked {
+                        Button { decrementEntry(entry.id) } label: {
+                            Image(systemName: "minus.circle.fill")
+                                .font(.system(size: 22))
+                            
+                        }
                     }
 
                     Text("\(entry.quantity)")
                         .font(.system(size: 17, weight: .semibold))
                         .frame(minWidth: 26)
                        
-
-                    Button { incrementEntry(entry.id) } label: {
-                        Image(systemName: "plus.circle.fill")
-                            .font(.system(size: 22))
-                           
+                    if !isLocked {
+                        Button { incrementEntry(entry.id) } label: {
+                            Image(systemName: "plus.circle.fill")
+                                .font(.system(size: 22))
+                            
+                        }
                     }
                 }
             }
@@ -3088,6 +3479,10 @@ struct CashPointView: View {
         .simultaneousGesture(
             DragGesture(minimumDistance: 10)   // smaller min distance, we control sensitivity ourselves
                 .onChanged { value in
+                    if isLocked {
+                        basketSwipeOffsets[entry.id] = 0
+                        return
+                    }
                     let dx = value.translation.width
                     let dy = value.translation.height
                     let horizontal = abs(dx)
@@ -3105,6 +3500,12 @@ struct CashPointView: View {
                     basketSwipeOffsets[entry.id] = dx * dir
                 }
                 .onEnded { value in
+                    if isLocked {
+                           withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                               basketSwipeOffsets[entry.id] = 0
+                           }
+                           return
+                       }
                     let dx = value.translation.width
                     let dy = value.translation.height
                     let horizontal = abs(dx)
@@ -3178,15 +3579,25 @@ struct CashPointView: View {
             // Seed options state for this line once
             if optionSelections[entry.id] == nil {
                 var map = optionsFromSubtitle(entry.subtitle)
-                if let groups = entry.item.modifiers {
+
+                if let groups = entry.item.modifiers, !groups.isEmpty {
+                    // 🔹 Only for real modifier items:
+                    //     ensure each options group has a FIRST item selected by default
                     for g in groups where g.type == .options {
                         if map[g.title] == nil {
                             map[g.title] = g.items.first?.name
                         }
                     }
+                    optionSelections[entry.id] = map
+
+                    // 🔥 Only recalc price/subtitle when we actually have modifiers
+                    updateEntryPricingAndSubtitle(lineId: entry.id)
+                } else {
+                    // No modifiers on this item (restored unpaid lines) → just keep whatever subtitle we got
+                    optionSelections[entry.id] = map
                 }
-                optionSelections[entry.id] = map
             }
+
             if additionSelections[entry.id] == nil {
                 additionSelections[entry.id] = []
             }
@@ -3319,7 +3730,7 @@ struct OrderFlowView: View {
     @State private var cashPaid: Bool = false
     @State private var studentDiscountActive: Bool = false
     
-
+  
     @State private var cardPaidTotal: Double = 0
     @State private var cashPaidTotal: Double = 0
 
@@ -3377,7 +3788,7 @@ struct OrderFlowView: View {
     let requiresPhoneStep: Bool
     let onCancel: () -> Void
     let onCompleted: (String?, String?, OrderAPI.PaymentSummary) -> Void
-    
+    let allowPayLater: Bool
     private func buildPaymentSummary() -> OrderAPI.PaymentSummary {
         let totalPaid = cardPaidTotal + cashPaidTotal
 
@@ -3802,29 +4213,37 @@ struct OrderFlowView: View {
     }
     // MARK: - Step: Charge (card OR cash)
     private func toggleStudentDiscount() {
-        // Flip state
+        // 1️⃣ Flip discount flag
         studentDiscountActive.toggle()
 
-        // Cancel any in-flight ZCredit transaction
+        // 2️⃣ Cancel any in-flight ZCredit payment
         if !AppConfig.isDemoMode {
             ZCreditPaymentHandler.shared.cancelCurrent()
         }
 
-        // Reset payment UI state
+        // 3️⃣ Reset payment UI
         isPaying = false
         payError = nil
 
-        // If we haven't started splitting or doing partial payments,
-        // update the remainingToPay to the new effective total.
+        // 4️⃣ Update remainingToPay if we are in a simple non-split flow
         if !isSplitMode,
            manualCashTargetAmount == nil,
            activeSplitIndex == nil {
             remainingToPay = effectiveTotal
         }
 
-        // Restart ZCredit flow automatically for full-card charge (no split, no cash)
-        if !payingWithCash && !isSplitMode && manualCashTargetAmount == nil {
-            paymentStarted = true
+        // 5️⃣ Only auto-restart ZCredit if this is a clean full-card flow
+        guard !payingWithCash,
+              !isSplitMode,
+              manualCashTargetAmount == nil else {
+            return
+        }
+
+        // 6️⃣ ADD 2-second DELAY before restarting payment
+        paymentStarted = true
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            // Start new payment with updated discounted amount
             startPayment()
         }
     }
@@ -3957,31 +4376,33 @@ struct OrderFlowView: View {
                 }
 
                 // Card / Cash buttons
+                // Card / Cash buttons
                 VStack(spacing: 12) {
-                    // Retry card if failed
-                    if payError != nil && !isPaying {
-                        Button {
-                            if !AppConfig.isDemoMode {
-                                ZCreditPaymentHandler.shared.cancelCurrent()
-                            }
-                            paymentStarted = true
-                            startPayment()
-                        } label: {
-                            Text(isRtl ? "תשלום באשראי" : "Pay by card")
-                                .font(.system(size: 18, weight: .semibold))
-                                .foregroundColor(.white)
-                                .frame(width: 240, height: 50)
-                                .background(.black)
-                                .clipShape(RoundedRectangle(cornerRadius: 18))
+                    // 🔹 Always show "Pay by card" (תשלום באשראי), not only on error
+                    Button {
+                        // Cancel any in-flight transaction before starting a new one
+                        if !AppConfig.isDemoMode {
+                            ZCreditPaymentHandler.shared.cancelCurrent()
                         }
+                        paymentStarted = true
+                        payError = nil
+                        startPayment()
+                    } label: {
+                        Text(isRtl ? "תשלום באשראי" : "Pay by card")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundColor(.white)
+                            .frame(width: 240, height: 50)
+                            .background(.black)
+                            .clipShape(RoundedRectangle(cornerRadius: 18))
                     }
+                    .disabled(isPaying)   // don't allow double-tap while terminal is busy
 
                     // Full-amount cash (no split)
                     Button {
                         payingWithCash = true
                         payError = nil
                         isPaying = false
-                        paymentStarted = false
+                        paymentStarted = false      // allow card to be started again later
                         cashInput = ""
                         manualCashTargetAmount = nil   // full total
 
@@ -3997,13 +4418,15 @@ struct OrderFlowView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 18))
                     }
 
-                    Button {
-                        completeWithoutPayment()
-                    } label: {
-                        Text(isRtl ? "תשלום מאוחר יותר" : "Pay later")
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundColor(.secondary)
-                            .frame(width: 220, height: 44)
+                    if allowPayLater {
+                        Button {
+                            completeWithoutPayment()
+                        } label: {
+                            Text(isRtl ? "תשלום מאוחר יותר" : "Pay later")
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundColor(.secondary)
+                                .frame(width: 220, height: 44)
+                        }
                     }
 
                     Button {
@@ -5007,21 +5430,20 @@ struct OrderFlowView: View {
 
     private var hebrewRowsWide: [[String]] {
         [
-            // Row 1 – like iOS: ק ר א ט ו ן ם פ
+            // Row 1 – like iOS: ק ר א ט ו ן ם פ + delete
             ["ק","ר","א","ט","ו","ן","ם","פ","⌫"],
 
-
-            // Row 2 – ends with ך ף on the right
+            // Row 2 – ends with ך ף
             ["ש","ד","ג","כ","ע","י","ח","ל","ך","ף"],
 
-            // Row 3 – last row of letters + delete on the right
-            ["ז","ס","ב","ה","נ","מ","צ","ת"],
+            // Row 3 – add apostrophe "'" at the end
+            ["ז","ס","ב","ה","נ","מ","צ","ת","'"],
 
             // Space row
             ["רווח"]
         ]
     }
-
+    
     private var latinRowsWide: [[String]] {
         [
             // Row 1: QWERTYUIOP

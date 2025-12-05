@@ -361,6 +361,7 @@ enum OrderAPI {
     }
 
     static func submitOrder(
+        orderId: Int? = nil,                     // 👈 NEW
         entries: [BasketEntry],
         total: Double,
         diningMode: DiningMode,
@@ -416,7 +417,10 @@ enum OrderAPI {
                 "token": apnsToken
             ]
         ]
-
+        
+        if let orderId = orderId {
+            payload["orderId"] = orderId
+        }
         // 🧾 Optional: rich payment summary
         if let payment {
             // Clamp to 2 decimals just to be safe
@@ -558,8 +562,9 @@ final class ZCreditPaymentHandler {
              orderId: Int?,
              completion: @escaping (ZCreditResult) -> Void) {
 
-          //  UserDefaults.standard.set("48796294", forKey: "pinpadId")   // cashpoint 1
-        UserDefaults.standard.set("48796855", forKey: "pinpadId")   // cashpoint 2
+            UserDefaults.standard.set("48796294", forKey: "pinpadId")   // cashpoint 1
+       // UserDefaults.standard.set("48796855", forKey: "pinpadId")   // cashpoint 2
+        //UserDefaults.standard.set("48796856", forKey: "pinpadId")   // cashpoint 3
         
         let safeAmount = max(0, amount)
         let pinpadId = UserDefaults.standard.string(forKey: "pinpadId") ?? "48796294"
@@ -1096,3 +1101,21 @@ final class ZCreditApplePayHandler: NSObject, PKPaymentAuthorizationControllerDe
     }
 }
 
+// GLOBAL helper – accessible from anywhere
+func makeShellMenuItem(from line: AdminOrderLineItem) -> ShellMenuItem {
+    ShellMenuItem(
+        id: line.productId ?? line.id,
+        name: line.name,
+        price: line.unitPrice,
+        category: line.category ?? "",
+        modifiers: nil,
+        imageURL: nil,
+        description: nil
+    )
+}
+struct SalesRow {
+    let net: String        // ללא מע״מ
+    let gross: String      // כולל מע״מ
+    let diners: String     // סועד
+    let ppa: String        // PPA
+}

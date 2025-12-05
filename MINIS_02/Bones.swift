@@ -104,7 +104,10 @@ struct DigitalBonesView: View {
     }
     // MARK: - State
 
-    @State private var selectedStation: Station = .bar
+    @AppStorage("DigitalBones.selectedStation")
+    private var selectedStationRaw: String = Station.bar.rawValue   // persisted raw value
+
+    @State private var selectedStation: Station = .bar              // real mutable state
     @State private var showStationPicker = false
 
     @State private var toPrepare: [Bone] = []      // top row
@@ -396,8 +399,20 @@ struct DigitalBonesView: View {
             isPresented: $showStationPicker,
             titleVisibility: .visible
         ) {
-            Button("עמדת בר") { selectedStation = .bar; rebuildBonesFromOrders() }
-            Button("עמדת מטבח") { selectedStation = .kitchen; rebuildBonesFromOrders() }
+            Button("עמדת בר") {
+                selectedStation = .bar
+                selectedStationRaw = Station.bar.rawValue     // persist
+                rebuildBonesFromOrders()
+            }
+
+            Button("עמדת מטבח") {
+                selectedStation = .kitchen
+                selectedStationRaw = Station.kitchen.rawValue // persist
+                rebuildBonesFromOrders()
+            }
+        }
+        .onAppear {
+            selectedStation = Station(rawValue: selectedStationRaw) ?? .bar
         }
         .task {
             await loadOrders(showSpinner: true)

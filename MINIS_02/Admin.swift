@@ -3,26 +3,23 @@ import Kingfisher
 
 // A mutable draft of a product used for editing/creating
 struct AdminProductDraft: Identifiable {
-    let id = UUID()          // local ID for SwiftUI
-
-    /// If editing an existing product, store its real ID here.
+    let id = UUID()
     var productId: Int?
 
     var name: String
-    var priceText: String    // text field binding, we parse to Double on save
+    var priceText: String
     var category: String
     var description: String
-    var imageURL: String
+    var imageURL: String        // can be full URL or short name
     var modifierGroups: [AdminModifierGroupDraft]
 }
+
 
 struct AdminModifierGroupDraft: Identifiable, Hashable {
     enum Kind: String, CaseIterable, Identifiable {
         case options
         case additions
-
         var id: String { rawValue }
-
         var title: String {
             switch self {
             case .options:   return "Options"
@@ -36,6 +33,7 @@ struct AdminModifierGroupDraft: Identifiable, Hashable {
     var kind: Kind
     var items: [AdminModifierItemDraft]
 }
+
 
 struct AdminModifierItemDraft: Identifiable, Hashable {
     var id = UUID()
@@ -54,10 +52,15 @@ struct AdminProductEditorMode {
 
 struct AdminProductEditorView: View {
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.isRtl) private var isRtl
+    @Environment(\.isRtl)   private var isRtl
 
     @State private var draft: AdminProductDraft
     @State private var lastAddedGroupId: AdminModifierGroupDraft.ID?
+
+    // 👇 NEW: keep a live local preview of the picked image
+    @State private var pickedImage: UIImage? = nil
+    @State private var showImagePicker = false
+    @State private var isUploadingImage = false
 
     private let mode: AdminProductEditorMode.Mode
     private let onSave: (AdminProductDraft) -> Void
@@ -73,7 +76,6 @@ struct AdminProductEditorView: View {
     ) {
         _draft = State(initialValue: draft)
 
-        // 💡 Ensure new product starts with "0.0"
         if draft.priceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             self._draft.wrappedValue.priceText = "0.0"
         }
@@ -83,22 +85,14 @@ struct AdminProductEditorView: View {
         self.onDelete = onDelete
         self.onChangeImage = onChangeImage
     }
-    
+
     var body: some View {
         NavigationStack {
             ScrollViewReader { proxy in
                 List {
-                    // IMAGE
-                    Section {
-                        headerImageSection
-                    }
+                    Section { headerImageSection }
+                    Section { mainFieldsSection }
 
-                    // MAIN FIELDS
-                    Section {
-                        mainFieldsSection
-                    }
-
-                    // MODIFIER GROUPS (DRAG & DROP)
                     Section(
                         header:
                             HStack {
@@ -119,31 +113,24 @@ struct AdminProductEditorView: View {
                             ForEach(draft.modifierGroups) { group in
                                 AdminModifierGroupEditor(
                                     group: binding(for: group),
-                                    onDelete: {
-                                        removeModifierGroup(group)
-                                    }
+                                    onDelete: { removeModifierGroup(group) }
                                 )
-                                .id(group.id)   // for scroll-to-new-group
+                                .id(group.id)
                             }
                             .onMove(perform: moveModifierGroups)
                         }
                     }
                 }
                 .listStyle(.insetGrouped)
-             //   .environment(\.editMode, .constant(.active))   // always show drag handles
                 .onChange(of: lastAddedGroupId) { id in
                     guard let id else { return }
-                    withAnimation {
-                        proxy.scrollTo(id, anchor: .bottom)
-                    }
+                    withAnimation { proxy.scrollTo(id, anchor: .bottom) }
                 }
             }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Button {
-                        dismiss()
-                    } label: {
+                    Button { dismiss() } label: {
                         Image(systemName: isRtl ? "chevron.right" : "chevron.left")
                             .font(.system(size: 17, weight: .semibold))
                     }
@@ -163,8 +150,11 @@ struct AdminProductEditorView: View {
                     }
                 }
             }
-            .safeAreaInset(edge: .bottom) {
-                bottomBar
+            .safeAreaInset(edge: .bottom) { bottomBar }
+            .sheet(isPresented: $showImagePicker) {
+                AdminImagePicker { image in
+                    handlePickedImage(image)
+                }
             }
         }
         .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
@@ -172,24 +162,40 @@ struct AdminProductEditorView: View {
 
     private var modeTitle: String {
         switch mode {
-        case .create:
-            return isRtl ? "מוצר חדש" : "New Product"
-        case .edit:
-            return isRtl ? "עריכת מוצר" : "Edit Product"
+        case .create: return isRtl ? "מוצר חדש" : "New Product"
+        case .edit:   return isRtl ? "עריכת מוצר" : "Edit Product"
         }
     }
 
-    // MARK: - Sections
+    // MARK: - Image header
 
     private var headerImageSection: some View {
         VStack(spacing: 8) {
+
+            // Resolve a remote URL only when we *don't* have a local preview
+            let remoteURL: URL? = {
+                let trimmed = draft.imageURL.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { return nil }
+                if trimmed.lowercased().hasPrefix("http://") || trimmed.lowercased().hasPrefix("https://") {
+                    return URL(string: trimmed)
+                } else {
+                    return URL(string: "https://minitel.co.uk/images/\(trimmed).png")
+                }
+            }()
+
             ZStack {
                 Rectangle()
                     .fill(Color(.systemGray5))
                     .frame(height: 220)
                     .overlay(
                         Group {
-                            if let url = URL(string: draft.imageURL), !draft.imageURL.isEmpty {
+                            if let img = pickedImage {
+                                // 👇 show local picked image immediately
+                                Image(uiImage: img)
+                                    .resizable()
+                                    .scaledToFill()
+                                    .clipped()
+                            } else if let url = remoteURL {
                                 KFImage(url)
                                     .resizable()
                                     .scaledToFill()
@@ -201,54 +207,100 @@ struct AdminProductEditorView: View {
                         }
                     )
                     .clipped()
+                    .onTapGesture {
+                        showImagePicker = true
+                    }
+
+                if isUploadingImage {
+                    ZStack {
+                        Color.black.opacity(0.25)
+                        ProgressView(isRtl ? "מעלה תמונה…" : "Uploading…")
+                            .tint(.white)
+                            .foregroundColor(.white)
+                    }
+                    .frame(height: 220)
+                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                }
             }
             .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
             .padding(.horizontal, 4)
             .padding(.top, 4)
 
-            if let onChangeImage {
-                Button {
-                    onChangeImage()
-                } label: {
-                    Text(isRtl ? "בחירת תמונה" : "Change Image")
-                        .font(.primariesDemi(15))
-                }
-            } else {
+            if onChangeImage == nil {
                 HStack {
                     Text(isRtl ? "קישור לתמונה" : "Image URL")
                         .font(.primariesDemi(14))
-                    TextField(isRtl ? "https://..." : "https://...", text: $draft.imageURL)
+                    TextField(isRtl ? "shop12_croissant" : "shop12_croissant",
+                              text: $draft.imageURL)
                         .textInputAutocapitalization(.none)
                         .autocorrectionDisabled()
                         .textFieldStyle(.roundedBorder)
+                }
+            } else {
+                Button { showImagePicker = true } label: {
+                    Text(isRtl ? "בחירת תמונה" : "Change Image")
+                        .font(.primariesDemi(15))
                 }
             }
         }
         .padding(.vertical, 4)
     }
 
+    /// Called when the user picks an image from the gallery.
+    private func handlePickedImage(_ image: UIImage) {
+        // 1️⃣ Show it immediately in the UI
+        self.pickedImage = image
+
+        // 2️⃣ Start upload in background
+        isUploadingImage = true
+
+        let shopId = UserDefaults.standard.string(forKey: "shopId") ?? "0"
+        let productIdPart = draft.productId.map { "prod\($0)" } ?? "new"
+        let ts = Int(Date().timeIntervalSince1970)
+        let slugName = draft.name
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: " ", with: "_")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "\\", with: "_")
+
+        // short key used by the uploader
+        let imageName = "shop\(shopId)_\(productIdPart)_\(ts)_\(slugName)"
+
+        saveImageToServer(image: image, imageName: imageName) { result in
+            DispatchQueue.main.async {
+                self.isUploadingImage = false
+                switch result {
+                case .success(let savedName):
+                    // 🔴 savedName is the bare key, e.g. "shop12_prod653_..._קראפין_פיסטוק"
+                    // ✅ store the FULL URL in draft.imageURL:
+                    let encoded = savedName.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? savedName
+                    self.draft.imageURL = "https://minitel.co.uk/images/uploads/\(encoded).png"
+
+                case .failure(let error):
+                    print("❌ image upload failed:", error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    // MARK: - Main fields
+
     private var mainFieldsSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            // Name
             VStack(alignment: .leading, spacing: 6) {
                 Text(isRtl ? "שם המוצר" : "Name")
                     .font(.primariesDemi(14))
-                TextField(
-                    "",
-                    text: $draft.name,
-                    prompt: Text(isRtl ? "שם המוצר" : "Name")
-                )
-                .font(.custom(primariesFontName, size: 18))
-                .textFieldStyle(.roundedBorder)
+                TextField("",
+                          text: $draft.name,
+                          prompt: Text(isRtl ? "שם המוצר" : "Name"))
+                    .font(.custom(primariesFontName, size: 18))
+                    .textFieldStyle(.roundedBorder)
             }
 
-            // Price + Category
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(isRtl ? "מחיר" : "Price")
                         .font(.primariesDemi(14))
-
-                    // Use PriceTextField so tapping selects all text
                     PriceTextField(text: $draft.priceText)
                         .frame(height: 36)
                 }
@@ -260,7 +312,6 @@ struct AdminProductEditorView: View {
                 }
             }
 
-            // Description
             VStack(alignment: .leading, spacing: 6) {
                 Text(isRtl ? "תיאור" : "Description")
                     .font(.primariesDemi(14))
@@ -280,16 +331,14 @@ struct AdminProductEditorView: View {
             Spacer()
             Button {
                 let price = Double(draft.priceText.replacingOccurrences(of: ",", with: ".")) ?? 0
-
-                // Clean out empty options/groups before saving
                 var cleanDraft = cleanedForSave(draft)
                 cleanDraft.priceText = String(format: "%.2f", price)
 
                 onSave(cleanDraft)
                 dismiss()
             } label: {
-                Text(mode == .create ? (isRtl ? "הוסף מוצר" : "Create") :
-                                       (isRtl ? "שמור שינויים" : "Save"))
+                Text(mode == .create ? (isRtl ? "הוסף מוצר" : "Create")
+                                     : (isRtl ? "שמור שינויים" : "Save"))
                     .font(.primariesDemi(17))
                     .foregroundColor(.white)
                     .frame(maxWidth: .infinity)
@@ -303,7 +352,7 @@ struct AdminProductEditorView: View {
         .background(Color(.systemBackground).ignoresSafeArea(edges: .bottom))
     }
 
-    // MARK: - Save cleaning (no empty options)
+    // MARK: - Cleaning + helpers
 
     private func cleanedForSave(_ draft: AdminProductDraft) -> AdminProductDraft {
         var copy = draft
@@ -313,7 +362,7 @@ struct AdminProductEditorView: View {
             g.items = g.items.filter {
                 !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             }
-            return g
+            return g;
         }
 
         copy.modifierGroups = copy.modifierGroups.filter { group in
@@ -325,8 +374,6 @@ struct AdminProductEditorView: View {
 
         return copy
     }
-
-    // MARK: - Helper for groups
 
     private func binding(for group: AdminModifierGroupDraft) -> Binding<AdminModifierGroupDraft> {
         Binding(
@@ -352,7 +399,7 @@ struct AdminProductEditorView: View {
     }
 
     private func addNewModifierGroup() {
-        var new = AdminModifierGroupDraft(
+        let new = AdminModifierGroupDraft(
             title: "",
             kind: .options,
             items: []
@@ -447,8 +494,23 @@ struct AdminModifierGroupEditor: View {
                     }
                 }
 
-                // Manual "Add option" button
-               
+                // 👇 New "Add modifier" button at bottom of each group
+                Button {
+                    appendEmptyItem()
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "plus.circle.fill")
+                        Text(
+                            group.kind == .options
+                            ? (isRtl ? "הוסף אפשרות" : "Add option")
+                            : (isRtl ? "הוסף תוספת" : "Add extra")
+                        )
+                        .font(.system(size: 14, weight: .semibold))
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 4)
+                }
+                .buttonStyle(.plain)
             }
         }
         .padding(12)
@@ -549,6 +611,108 @@ struct PriceTextField: UIViewRepresentable {
     }
 }
 
+import UIKit
+
+extension UIImage {
+    /// Scale proportionally so that max(width, height) == maxDimension
+    func scaled(toMaxDimension maxDimension: CGFloat) -> UIImage? {
+        let maxSide = max(size.width, size.height)
+        guard maxSide > 0 else { return self }
+
+        let scale = maxDimension / maxSide
+        if scale >= 1 { return self }   // already small enough
+
+        let newSize = CGSize(width: size.width * scale,
+                             height: size.height * scale)
+
+        UIGraphicsBeginImageContextWithOptions(newSize, false, 0)
+        defer { UIGraphicsEndImageContext() }
+
+        draw(in: CGRect(origin: .zero, size: newSize))
+        return UIGraphicsGetImageFromCurrentImageContext()
+    }
+}
+
+func saveImageToServer(
+    image: UIImage,
+    imageName: String,
+    completion: @escaping (Result<String, Error>) -> Void
+) {
+    // 1) Scale down to 400px max
+    let resized = image.scaled(toMaxDimension: 400) ?? image
+    
+    // 2) Convert to JPEG
+    guard let imageData = resized.jpegData(compressionQuality: 0.7) else {
+        completion(.failure(NSError(domain: "", code: -1)))
+        return
+    }
+    let imageString = imageData.base64EncodedString()
+    guard let uploadURL = URL(string: "https://minitel.co.uk/utilities/saveimage.aspx") else {
+        completion(.failure(NSError(domain: "", code: -1)))
+        return
+    }
+    
+    var request = URLRequest(url: uploadURL)
+    request.httpMethod = "POST"
+    request.addValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+    
+    // The server expects something like: "myImageName.pngimage=BASE64DATA"
+    let postBody = "\(imageName).pngimage=\(imageString)"
+    request.httpBody = postBody.data(using: .utf8)
+    request.addValue("\(postBody.count)", forHTTPHeaderField: "Content-Length")
+    
+    URLSession.shared.dataTask(with: request) { _, response, error in
+        if let error = error {
+            completion(.failure(error))
+            return
+        }
+        if let httpResp = response as? HTTPURLResponse,
+           httpResp.statusCode == 200 {
+            completion(.success(imageName))
+        } else {
+            completion(.failure(NSError(domain: "", code: -1)))
+        }
+    }.resume()
+}
+
+struct AdminImagePicker: UIViewControllerRepresentable {
+    var onImagePicked: (UIImage) -> Void
+    
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onImagePicked: onImagePicked)
+    }
+    
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let picker = UIImagePickerController()
+        picker.sourceType = .photoLibrary
+        picker.delegate = context.coordinator
+        return picker
+    }
+    
+    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
+    
+    final class Coordinator: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
+        let onImagePicked: (UIImage) -> Void
+        
+        init(onImagePicked: @escaping (UIImage) -> Void) {
+            self.onImagePicked = onImagePicked
+        }
+        
+        func imagePickerController(
+            _ picker: UIImagePickerController,
+            didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey : Any]
+        ) {
+            if let img = info[.editedImage] as? UIImage ?? info[ .originalImage ] as? UIImage {
+                onImagePicked(img)
+            }
+            picker.dismiss(animated: true)
+        }
+        
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
+            picker.dismiss(animated: true)
+        }
+    }
+}
 extension AdminProductDraft {
     func toUpsertPayload(shopId: Int) -> MinisProductAPI.UpsertPayload {
         // 1) Build groups array for ModifierGroups
@@ -610,9 +774,15 @@ extension AdminProductDraft {
         let cleanCategory = category.trimmingCharacters(in: .whitespacesAndNewlines)
         let finalCategory = cleanCategory.isEmpty ? "General" : cleanCategory
 
-        let cleanImage = imageURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? "https://beithaam.com/wp-content/uploads/2024/12/share.jpg"
-            : imageURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawImage = imageURL.trimmingCharacters(in: .whitespacesAndNewlines)
+               let cleanImage: String
+               if rawImage.isEmpty {
+                   // default placeholder ONLY if nothing was set
+                   cleanImage = "https://beithaam.com/wp-content/uploads/2024/12/share.jpg"
+               } else {
+                   // could be short name (shop12_...) or full URL
+                   cleanImage = rawImage
+               }
 
         return .init(
             Id: productId,            // existing DB id or nil for new

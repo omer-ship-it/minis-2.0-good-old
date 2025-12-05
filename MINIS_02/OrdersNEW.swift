@@ -30,14 +30,16 @@ enum AdminOrderStatus: String, Codable {
 
 struct AdminOrderLineItem: Identifiable, Hashable {
     let id: Int
+    let productId: Int?
     var name: String
     var quantity: Int
     var unitPrice: Double
     var category: String?
-
+    var modifiersText: String?
     var rowTotal: Double {
         Double(quantity) * unitPrice
     }
+    var updatedAt: Date?
 }
 
 struct AdminOrderItem: Identifiable, Hashable {
@@ -51,6 +53,7 @@ struct AdminOrderItem: Identifiable, Hashable {
     var items: [AdminOrderLineItem]
     var total: Double            // order total
     var stations: Set<AdminStation>   // 👈 which stations this order touches
+    var isUnpaid: Bool                // 👈 NEW
 }
 
 // MARK: - API DTOs
@@ -64,12 +67,14 @@ private struct AdminOrdersApiResponse: Decodable {
 private struct LineDTO: Decodable {
     let itemId: Int?
     let productId: Int?
-    let name: String
-    let qty: Int
-    let category: String?
-    let status: Int
-    let station: String?
-    let modifiers: String?
+    var name: String
+    var qty: Int
+    var category: String?
+    var status: Int
+    var station: String?
+    var modifiers: String?
+
+    var updatedAt: Date?   // 👈 new
 }
 
 private struct OrderDTO: Decodable {
@@ -87,11 +92,12 @@ private struct OrderDTO: Decodable {
     let shortCode: String?
     let lines: [LineDTO]
     let status: Int?
+    let paymentMethod: String?    // 👈 NEW
 
     enum CodingKeys: String, CodingKey {
         case id, source, bucket, stage, placedAt, scheduledFor,
              customerName, customerDisplayName, totalGBP, itemSummary,
-             isDelivery, shortCode, lines, status
+             isDelivery, shortCode, lines, status, paymentMethod
         case Status = "Status"
     }
 
@@ -110,6 +116,7 @@ private struct OrderDTO: Decodable {
         isDelivery   = try c.decode(Bool.self,   forKey: .isDelivery)
         shortCode    = try? c.decodeIfPresent(String.self, forKey: .shortCode)
         lines        = try c.decode([LineDTO].self, forKey: .lines)
+        paymentMethod = try? c.decodeIfPresent(String.self, forKey: .paymentMethod)
 
         if let s = try? c.decodeIfPresent(Int.self, forKey: .status) {
             status = s
@@ -135,24 +142,15 @@ struct BasketItem: Identifiable, Hashable {
     let price: Double
 }
 
-private func makeShellMenuItem(from line: AdminOrderLineItem) -> ShellMenuItem {
-    let cat = line.category ?? ""
-    print("🧩 makeShellMenuItem: name='\(line.name)' category='\(cat)'")
 
-    return ShellMenuItem(
-        id: line.id,
-        name: line.name,
-        price: line.unitPrice,
-        category: cat,       // 👈 keep real category, e.g. "🥗 סלטים"
-        modifiers: nil,
-        imageURL: nil,
-        description: nil
-    )
-}
 
 struct AdminOrdersView: View {
     @AppStorage("AdminOrders.stationMode")
     private var stationModeRaw: String = StationViewMode.bar.rawValue
+    let onSelectUnpaid: ((AdminOrderItem) -> Void)?
+    init(onSelectUnpaid: ((AdminOrderItem) -> Void)? = nil) {
+           self.onSelectUnpaid = onSelectUnpaid
+       }
     enum Tab: String, CaseIterable {
         case active
         case history
@@ -245,30 +243,109 @@ struct AdminOrdersView: View {
                     Spacer()
                 } else {
                     ScrollView {
-                        LazyVStack(spacing: 16) {
-                            ForEach(currentOrders) { order in
-                                AdminOrderRow(
-                                    item: order,
-                                    onAdvance: { newStatus in
-                                        update(order: order, to: newStatus)
+                        let list   = currentOrders
+
+                        if selectedTab == .active {
+                            // 🔹 ACTIVE TAB: split into unpaid / paid
+                            let unpaid = list.filter { $0.isUnpaid }
+                            let paid   = list.filter { !$0.isUnpaid }
+
+                            LazyVStack(spacing: 16) {
+                                // 1️⃣ Not paid yet
+                                if !unpaid.isEmpty {
+                                    HStack {
+                                        Text("פתוח")
+                                            .font(.system(size: 15, weight: .semibold))
+                                            .foregroundColor(.secondary)
+                                        Spacer()
                                     }
-                                )
-                                .padding(.horizontal)
-                                .contentShape(Rectangle())
-                                .onTapGesture {
-                                    selectedOrder = order
+                                    .padding(.horizontal)
+
+                                    ForEach(unpaid) { order in
+                                        AdminOrderRow(
+                                            item: order,
+                                            onAdvance: { newStatus in
+                                                update(order: order, to: newStatus)
+                                            }
+                                        )
+                                        .padding(.horizontal)
+                                        .contentShape(Rectangle())
+                                        .onTapGesture {
+                                                // If in Active tab and this is unpaid → bounce to CashPoint
+                                                if selectedTab == .active, order.isUnpaid, let cb = onSelectUnpaid {
+                                                    cb(order)
+                                                } else {
+                                                    selectedOrder = order
+                                                }
+                                            }
+                                    }
+
+                                    Divider()
+                                        .padding(.horizontal)
+                                }
+
+                                // 2️⃣ Paid (but still active, e.g. ready/awaiting collection)
+                                if !paid.isEmpty {
+                                    HStack {
+                                        Text("סגור")
+                                            .font(.system(size: 15, weight: .semibold))
+                                            .foregroundColor(.secondary)
+                                        Spacer()
+                                    }
+                                    .padding(.horizontal)
+
+                                    ForEach(paid) { order in
+                                        AdminOrderRow(
+                                            item: order,
+                                            onAdvance: { newStatus in
+                                                update(order: order, to: newStatus)
+                                            }
+                                        )
+                                        .padding(.horizontal)
+                                        .contentShape(Rectangle())
+                                        .onTapGesture {
+                                                if selectedTab == .active, order.isUnpaid, let cb = onSelectUnpaid {
+                                                    cb(order)
+                                                } else {
+                                                    selectedOrder = order
+                                                }
+                                            }
+                                    }
+                                }
+
+                                if list.isEmpty {
+                                    Text("אין הזמנות פעילות כרגע")
+                                        .foregroundColor(.secondary)
+                                        .padding(.top, 40)
                                 }
                             }
+                            .padding(.vertical, 16)
 
-                            if currentOrders.isEmpty {
-                                Text(selectedTab == .active
-                                     ? "אין הזמנות פעילות כרגע"
-                                     : "אין הזמנות בהיסטוריה")
-                                    .foregroundColor(.secondary)
-                                    .padding(.top, 40)
+                        } else {
+                            // 🔹 HISTORY TAB: regular flat list
+                            LazyVStack(spacing: 16) {
+                                ForEach(list) { order in
+                                    AdminOrderRow(
+                                        item: order,
+                                        onAdvance: { newStatus in
+                                            update(order: order, to: newStatus)
+                                        }
+                                    )
+                                    .padding(.horizontal)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture {
+                                        selectedOrder = order
+                                    }
+                                }
+
+                                if list.isEmpty {
+                                    Text("אין הזמנות בהיסטוריה")
+                                        .foregroundColor(.secondary)
+                                        .padding(.top, 40)
+                                }
                             }
+                            .padding(.vertical, 16)
                         }
-                        .padding(.vertical, 16)
                     }
                 }
             }
@@ -334,7 +411,10 @@ struct AdminOrdersView: View {
                     update(order: order, to: newStatus)
                 },
                 onPrint: {
-                    printOrder(order)
+                    printOrder(order)          // kitchen/bar ticket
+                },
+                onPrintInvoice: {
+                    printInvoice(for: order)   // tax invoice re-print
                 }
             )
         }
@@ -407,22 +487,33 @@ struct AdminOrdersView: View {
             base = orders.filter { $0.status == .collected }
         }
 
-        // 2) Filter by station view mode
-        switch stationMode {
-        case .bar:
-            // Orders that have ANY bar items
-            return base
-                .filter { $0.stations.contains(.bar) }
-                .sorted(by: sortRule)
+        // 2) 🔧 NEW: no station filtering – show all orders
+        return base.sorted(by: sortRule)
+    }
 
-        case .kitchen:
-            // Orders that have ANY kitchen items
-            return base
-                .filter { $0.stations.contains(.kitchen) }
-                .sorted(by: sortRule)
+    // Build invoice line items from AdminOrderItem
+    private func makeInvoiceItems(from order: AdminOrderItem) -> [InvoiceItem] {
+        order.items.map { li in
+            // If you want to include modifiers text on the invoice line, append it:
+            let fullName: String
+            if let mods = li.modifiersText, !mods.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                fullName = "\(li.name) (\(mods))"
+            } else {
+                fullName = li.name
+            }
+
+            return InvoiceItem(
+                name: fullName,
+                quantity: li.quantity,
+                unitPrice: li.unitPrice
+            )
         }
     }
 
+    private func printInvoice(for order: AdminOrderItem) {
+       // PrinterManager.shared.printSalesDebugDemo()
+    }//
+    
     private func printOrder(_ order: AdminOrderItem) {
         let entries = toBasketEntries(from: order)
         let mode    = diningMode(for: order)
@@ -580,20 +671,27 @@ struct AdminOrdersView: View {
                 let lineItems: [AdminOrderLineItem] = dto.lines.enumerated().map { idx, l in
                     AdminOrderLineItem(
                         id: l.itemId ?? l.productId ?? idx,
+                        productId: l.productId,
                         name: l.name,
                         quantity: max(l.qty, 1),
                         unitPrice: perUnit,
-                        category: l.category        // 👈 pass category from API
-                        
+                        category: l.category,
+                        modifiersText: l.modifiers,
+                        updatedAt: l.updatedAt    // 👈 new field from DTO
                     )
                 }
                 
-                for l in dto.lines {
-                    print("🧾 API line dto: name='\(l.name)' category='\(l.category ?? "nil")'")
-                }
-
-                // 👇 derive which stations this order touches
                 let stationSet = Set(dto.lines.map { classifyAdminStation(for: $0) })
+
+                // 👇 Define what counts as "unpaid"
+                let bucketLower = dto.bucket.lowercased()
+                let stageLower  = dto.stage.lowercased()
+
+                let isUnpaid =
+                    bucketLower.contains("unpaid")
+                    || bucketLower.contains("open")
+                    || bucketLower.contains("tab")
+                    || stageLower.contains("unpaid")
 
                 return AdminOrderItem(
                     id: dto.id,
@@ -605,39 +703,17 @@ struct AdminOrdersView: View {
                     placedAt: dto.placedAt,
                     items: lineItems,
                     total: dto.totalGBP,
-                    stations: stationSet
+                    stations: stationSet,
+                    isUnpaid: isUnpaid          // 👈 NEW
                 )
             }
 
-            if allowAutoPrint {
-
-                let newOrders = mapped.filter { order in
-                    let src = order.source.lowercased()
-                    let isCash = (src == "קופה" || src == "cashpoint")
-                    return !isCash && !printedOrderIds.contains(order.id)
-                }
-
-                for order in newOrders {
-                    print("🖨 AUTO PRINT #\(order.id) (src=\(order.source))")
-
-                    let entries = toBasketEntries(from: order)
-                    let mode    = diningMode(for: order)
-
-                    PrinterManager.shared.printCashPointSplit(
-                        orderNumber: order.id,
-                        entries: entries,
-                        total: order.total,
-                        diningMode: mode,
-                        customerName: order.customerName
-                    )
-
-                    printedOrderIds.insert(order.id)
-                }
-            }
+            
             self.orders = mapped
         } catch {
             print("❌ admin/orders network error:", error.localizedDescription)
         }
+        
     }
 }
 
@@ -731,6 +807,7 @@ struct AdminOrderDetailSheet: View {
     @State var order: AdminOrderItem
     let onAdvance: (AdminOrderStatus) -> Void
     let onPrint: () -> Void
+    let onPrintInvoice: () -> Void
     @Environment(\.dismiss) private var dismiss
     @Environment(\.isRtl)   private var isRtl
 
@@ -834,18 +911,35 @@ struct AdminOrderDetailSheet: View {
                             }
                         }
 
+                        // 🔹 Re-print kitchen/bar ticket
                         Button {
                             onPrint()
                         } label: {
                             HStack {
                                 Image(systemName: "printer")
-                                Text("הדפס")
+                                Text("הדפס הזמנה")
                             }
                             .font(.system(size: 18, weight: .medium))
                             .foregroundColor(.primary)
                             .frame(maxWidth: .infinity)
                             .frame(height: 48)
                             .background(Color(UIColor.systemGray5))
+                            .cornerRadius(14)
+                        }
+
+                        // 🔹 Re-print tax invoice (like in DigitalBonesView)
+                        Button {
+                            onPrintInvoice()
+                        } label: {
+                            HStack {
+                                Image(systemName: "doc.text")
+                                Text("הדפס חשבונית")
+                            }
+                            .font(.system(size: 18, weight: .medium))
+                            .foregroundColor(.primary)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 48)
+                            .background(Color(UIColor.systemGray6))
                             .cornerRadius(14)
                         }
 
@@ -904,4 +998,33 @@ private enum DateTimeFormatter {
         f.dateFormat = "HH:mm"
         return f
     }()
+}
+
+struct OrdersHostView: View {
+    let onSelectUnpaid: ((AdminOrderItem) -> Void)?
+    let onRefundFromBone: ((DigitalBonesView.Bone) -> Void)?
+
+    @Environment(\.isRtl) private var isRtl
+
+    var body: some View {
+        GeometryReader { proxy in
+            let isPad        = UIDevice.current.userInterfaceIdiom == .pad
+            let isLandscape  = proxy.size.width > proxy.size.height
+
+            Group {
+                if isPad && isLandscape {
+                    // 🧾 Kitchen "bones" view (KDS style)
+                    DigitalBonesView(onRefundToCashPoint: { bone in
+                        onRefundFromBone?(bone)
+                    })
+                    .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
+
+                } else {
+                    // 📋 Classic admin orders list
+                    AdminOrdersView(onSelectUnpaid: onSelectUnpaid)
+                        .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
+                }
+            }
+        }
+    }
 }

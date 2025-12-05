@@ -28,20 +28,24 @@ struct MINIS_02App: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     @State var isRtl = true
-    @Environment(\.scenePhase) private var scenePhase        // 👈 ADD THIS
+    @Environment(\.scenePhase) private var scenePhase
     @AppStorage("cashPointMode") private var cashPointMode: Bool = true
     @AppStorage("shopId") private var shopId: String = "0"
     @AppStorage("launchMenuOnce") private var launchMenuOnce: Bool = false
+    @AppStorage("autoPrintEnabled") private var autoPrintEnabled: Bool = false   // 👈 new flag
 
     init() {
-         UIView.appearance().tintColor = UIColor.label
+        PrinterManager.shared.printSalesDebugDemo()
+        UIView.appearance().tintColor = UIColor.label
 
-         // 🔥 Global RTL for UIKit (menus, alerts, etc.)
-         UIView.appearance().semanticContentAttribute = .forceRightToLeft
+        // 🔥 Global RTL for UIKit (menus, alerts, etc.)
+        UIView.appearance().semanticContentAttribute = .forceRightToLeft
+
+        // Clear saved POS name/phone on fresh launch
         UserDefaults.standard.removeObject(forKey: "posSavedName")
-          UserDefaults.standard.removeObject(forKey: "posSavedPhone")
-     }
-    
+        UserDefaults.standard.removeObject(forKey: "posSavedPhone")
+    }
+
     var body: some Scene {
         WindowGroup {
             Group {
@@ -59,18 +63,39 @@ struct MINIS_02App: App {
             .onOpenURL { url in
                 handleIncoming(url: url)
             }
-
-            // 🔥 ADD THIS BLOCK (scenePhase listener)
+            // 🔥 React to app lifecycle
             .onChange(of: scenePhase) { phase in
                 switch phase {
                 case .active:
-                    print("📡 App active → start polling")
-                    OrdersAutoPrinter.shared.startPolling(interval: 10)   // or 30 seconds
+                    if cashPointMode && autoPrintEnabled {
+                        print("📡 App active + cashPointMode + autoPrintEnabled → start polling")
+                        OrdersAutoPrinter.shared.startPolling(interval: 10) // or 30
+                    } else {
+                        print("📡 App active but auto-print disabled → stop polling")
+                        OrdersAutoPrinter.shared.stopPolling()
+                    }
+
                 case .inactive, .background:
                     print("🛑 App inactive/background → stop polling")
                     OrdersAutoPrinter.shared.stopPolling()
+
                 @unknown default:
                     break
+                }
+            }
+            // 🔥 React if the setting changes while app is running
+            .onChange(of: autoPrintEnabled) { enabled in
+                guard scenePhase == .active, cashPointMode else {
+                    OrdersAutoPrinter.shared.stopPolling()
+                    return
+                }
+
+                if enabled {
+                    print("⚙️ autoPrintEnabled turned ON → start polling")
+                    OrdersAutoPrinter.shared.startPolling(interval: 10)
+                } else {
+                    print("⚙️ autoPrintEnabled turned OFF → stop polling")
+                    OrdersAutoPrinter.shared.stopPolling()
                 }
             }
         }
