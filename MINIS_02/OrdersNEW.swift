@@ -67,18 +67,23 @@ private struct AdminOrdersApiResponse: Decodable {
 private struct LineDTO: Decodable {
     let itemId: Int?
     let productId: Int?
-    var name: String
-    var qty: Int
-    var category: String?
-    var status: Int
-    var station: String?
-    var modifiers: String?
+    let name: String
+    let qty: Int
+    let category: String?
+    let status: Int
+    let station: String?
+    let modifiers: String?
 
-    var updatedAt: Date?   // 👈 new
+    let updatedAt: Date?
+
+    // Optional – if server ever sends them
+    let unitPrice: Double?
+    let lineTotal: Double?
 }
 
 private struct OrderDTO: Decodable {
     let id: Int
+    let ticketNumber: Int?        // 👈 local slip number from DB (if present)
     let source: String
     let bucket: String
     let stage: String
@@ -97,27 +102,32 @@ private struct OrderDTO: Decodable {
     enum CodingKeys: String, CodingKey {
         case id, source, bucket, stage, placedAt, scheduledFor,
              customerName, customerDisplayName, totalGBP, itemSummary,
-             isDelivery, shortCode, lines, status, paymentMethod
+             isDelivery, shortCode, lines, status, paymentMethod, ticketNumber
         case Status = "Status"
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        id           = try c.decode(Int.self,    forKey: .id)
-        source       = try c.decode(String.self, forKey: .source)
-        bucket       = try c.decode(String.self, forKey: .bucket)
-        stage        = try c.decode(String.self, forKey: .stage)
-        placedAt     = try c.decode(Date.self,   forKey: .placedAt)
-        scheduledFor = try? c.decodeIfPresent(Date.self, forKey: .scheduledFor)
-        customerName = try c.decode(String.self, forKey: .customerName)
-        customerDisplayName = try? c.decodeIfPresent(String.self, forKey: .customerDisplayName)
-        totalGBP     = try c.decode(Double.self, forKey: .totalGBP)
-        itemSummary  = try c.decode(String.self, forKey: .itemSummary)
-        isDelivery   = try c.decode(Bool.self,   forKey: .isDelivery)
-        shortCode    = try? c.decodeIfPresent(String.self, forKey: .shortCode)
-        lines        = try c.decode([LineDTO].self, forKey: .lines)
-        paymentMethod = try? c.decodeIfPresent(String.self, forKey: .paymentMethod)
 
+        id               = try c.decode(Int.self,    forKey: .id)
+        // 👇 NEW: decode ticketNumber if present
+        ticketNumber     = try? c.decodeIfPresent(Int.self, forKey: .ticketNumber)
+
+        source           = try c.decode(String.self, forKey: .source)
+        bucket           = try c.decode(String.self, forKey: .bucket)
+        stage            = try c.decode(String.self, forKey: .stage)
+        placedAt         = try c.decode(Date.self,   forKey: .placedAt)
+        scheduledFor     = try? c.decodeIfPresent(Date.self, forKey: .scheduledFor)
+        customerName     = try c.decode(String.self, forKey: .customerName)
+        customerDisplayName = try? c.decodeIfPresent(String.self, forKey: .customerDisplayName)
+        totalGBP         = try c.decode(Double.self, forKey: .totalGBP)
+        itemSummary      = try c.decode(String.self, forKey: .itemSummary)
+        isDelivery       = try c.decode(Bool.self,   forKey: .isDelivery)
+        shortCode        = try? c.decodeIfPresent(String.self, forKey: .shortCode)
+        lines            = try c.decode([LineDTO].self, forKey: .lines)
+        paymentMethod    = try? c.decodeIfPresent(String.self, forKey: .paymentMethod)
+
+        // robust status decoding as before
         if let s = try? c.decodeIfPresent(Int.self, forKey: .status) {
             status = s
         } else if let sStr = try? c.decodeIfPresent(String.self, forKey: .status),
@@ -163,13 +173,145 @@ struct AdminOrdersView: View {
         }
     }
     
+    // MARK: - Decoding helper (shared by cache + network)
+    private func decodeAdminOrders(from data: Data) -> [AdminOrderItem]? {
+        // 🔧 Decoder with robust date handling
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .custom { dec in
+            let c = try dec.singleValueContainer()
+            let s = try c.decode(String.self)
+
+            let isoFrac = ISO8601DateFormatter()
+            isoFrac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            if let d = isoFrac.date(from: s) { return d }
+
+            let iso = ISO8601DateFormatter()
+            iso.formatOptions = [.withInternetDateTime]
+            if let d = iso.date(from: s) { return d }
+
+            let df = DateFormatter()
+            df.calendar = Calendar(identifier: .gregorian)
+            df.locale   = Locale(identifier: "en_US_POSIX")
+            df.timeZone = TimeZone.current
+
+            for format in [
+                "yyyy-MM-dd'T'HH:mm:ss.SSS",
+                "yyyy-MM-dd'T'HH:mm:ss"
+            ] {
+                df.dateFormat = format
+                if let d = df.date(from: s) { return d }
+            }
+
+            throw DecodingError.dataCorruptedError(
+                in: c,
+                debugDescription: "Unrecognized date: \(s)"
+            )
+        }
+
+        do {
+            let parsed = try decoder.decode(AdminOrdersApiResponse.self, from: data)
+            guard parsed.ok else {
+                print("❌ admin/orders cache: ok=false")
+                return nil
+            }
+
+            let mapped: [AdminOrderItem] = parsed.orders.map { dto in
+                let displayOrderNumber = dto.ticketNumber ?? dto.id
+
+                let status: AdminOrderStatus = {
+                    switch dto.status ?? 0 {
+                    case 4:  return .ready
+                    case 5:  return .collected
+                    default: return .received
+                    }
+                }()
+
+                let displayName: String = {
+                    if let dn = dto.customerDisplayName, !dn.isEmpty {
+                        return dn
+                    }
+                    return dto.customerName
+                }()
+
+                let sourceHe: String = {
+                    switch dto.source.lowercased() {
+                    case "cashpoint": return "קופה"
+                    case "kiosk":     return "קיוסק"
+                    case "mini", "appclip", "web": return "מיני"
+                    default:          return dto.source
+                    }
+                }()
+                // Fallback for when API doesn't send line prices yet
+                let totalQty = max(1, dto.lines.reduce(0) { $0 + max($1.qty, 1) })
+                let fallbackPerUnit = totalQty > 0 ? dto.totalGBP / Double(totalQty) : 0
+                // 👇 NEW: build line items with correct prices
+                // ❌ remove fallbackPerUnit entirely
+
+                let lineItems: [AdminOrderLineItem] = dto.lines.enumerated().map { idx, l in
+                    let quantity = max(l.qty, 1)
+
+                    let effectiveUnit: Double
+                    if let explicitUnit = l.unitPrice, explicitUnit > 0 {
+                        effectiveUnit = explicitUnit
+                    } else if let row = l.lineTotal, row > 0, quantity > 0 {
+                        effectiveUnit = row / Double(quantity)
+                    } else {
+                        effectiveUnit = 0        // no info → no price
+                    }
+
+                    return AdminOrderLineItem(
+                        id: l.itemId ?? l.productId ?? idx,
+                        productId: l.productId,
+                        name: l.name,
+                        quantity: quantity,
+                        unitPrice: effectiveUnit,
+                        category: l.category,
+                        modifiersText: l.modifiers,
+                        updatedAt: l.updatedAt
+                    )
+                }
+                let stationSet = Set(dto.lines.map { classifyAdminStation(for: $0) })
+
+                let bucketLower = dto.bucket.lowercased()
+                let stageLower  = dto.stage.lowercased()
+
+                let isUnpaid =
+                    bucketLower.contains("unpaid")
+                    || bucketLower.contains("open")
+                    || bucketLower.contains("tab")
+                    || stageLower.contains("unpaid")
+
+                // 👇 You can still trust dto.totalGBP for overall total
+                return AdminOrderItem(
+                    id: dto.id,
+                    orderId: String(displayOrderNumber),
+                    customerName: displayName,
+                    subtitle: dto.itemSummary,
+                    source: sourceHe,
+                    status: status,
+                    placedAt: dto.placedAt,
+                    items: lineItems,
+                    total: dto.totalGBP,
+                    stations: stationSet,
+                    isUnpaid: isUnpaid
+                )
+            }
+
+            return mapped
+        } catch {
+            let body = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
+            print("❌ admin/orders decode failed: \(error)\nBody:\n\(body)")
+            return nil
+        }
+    }
+    
     private func toBasketEntries(from order: AdminOrderItem) -> [BasketEntry] {
         order.items.map { li in
             BasketEntry(
                 id: li.id,
                 item: makeShellMenuItem(from: li),
                 quantity: li.quantity,
-                subtitle: nil,
+                subtitle: li.modifiersText,   // 👈 keep modifiers
                 unitPrice: li.unitPrice
             )
         }
@@ -511,15 +653,32 @@ struct AdminOrdersView: View {
     }
 
     private func printInvoice(for order: AdminOrderItem) {
-       // PrinterManager.shared.printSalesDebugDemo()
-    }//
+        let items = makeInvoiceItems(from: order)
+
+        // Clean display name (like you do elsewhere)
+        let customer = order.customerName
+            .replacingOccurrences(of: "Customer", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Use your existing tax-invoice printer API (same as in DigitalBonesView)
+        PrinterManager.shared.printTaxInvoice(
+            invoiceNumber: order.id,        // or Int(order.orderId) ?? order.id
+            date: order.placedAt,
+            customerName: customer.isEmpty ? "לקוח" : customer,
+            items: items,
+            vatRate: 0.17                   // 17% VAT – same as in /submitOrder
+        )
+    }
     
     private func printOrder(_ order: AdminOrderItem) {
         let entries = toBasketEntries(from: order)
         let mode    = diningMode(for: order)
 
+        // order.orderId is your ticketNumber string (fallback to DB id if parse fails)
+        let ticketNumber = Int(order.orderId) ?? order.id
+
         PrinterManager.shared.printCashPointSplit(
-            orderNumber: order.id,
+            orderNumber: ticketNumber,
             entries: entries,
             total: order.total,
             diningMode: mode,
@@ -563,6 +722,18 @@ struct AdminOrdersView: View {
     private func loadOrders(showSpinner: Bool) async {
         guard miniAppId > 0 else { return }
 
+        // 👇 Key for this miniApp's orders cache
+        let cacheKey = "AdminOrdersCache_\(miniAppId)"
+
+        // 0️⃣ On first load, try to show cached data immediately
+        if showSpinner, orders.isEmpty {
+            if let cachedData = UserDefaults.standard.data(forKey: cacheKey),
+               let cachedOrders = decodeAdminOrders(from: cachedData) {
+                self.orders = cachedOrders
+                print("🟡 admin/orders: showing cached orders (\(cachedOrders.count))")
+            }
+        }
+
         if showSpinner {
             isLoading = true
         }
@@ -592,128 +763,23 @@ struct AdminOrdersView: View {
                 return
             }
 
-            // 🔧 Decoder with robust date handling
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .custom { dec in
-                let c = try dec.singleValueContainer()
-                let s = try c.decode(String.self)
-
-                let isoFrac = ISO8601DateFormatter()
-                isoFrac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-                if let d = isoFrac.date(from: s) { return d }
-
-                let iso = ISO8601DateFormatter()
-                iso.formatOptions = [.withInternetDateTime]
-                if let d = iso.date(from: s) { return d }
-
-                let df = DateFormatter()
-                df.calendar = Calendar(identifier: .gregorian)
-                df.locale   = Locale(identifier: "en_US_POSIX")
-                df.timeZone = TimeZone.current
-
-                for format in [
-                    "yyyy-MM-dd'T'HH:mm:ss.SSS",
-                    "yyyy-MM-dd'T'HH:mm:ss"
-                ] {
-                    df.dateFormat = format
-                    if let d = df.date(from: s) { return d }
-                }
-
-                throw DecodingError.dataCorruptedError(
-                    in: c,
-                    debugDescription: "Unrecognized date: \(s)"
-                )
+            // 1️⃣ Decode fresh data
+            guard let freshOrders = decodeAdminOrders(from: data) else {
+                return   // decodeAdminOrders already printed the error
             }
 
-            let parsed: AdminOrdersApiResponse
-            do {
-                parsed = try decoder.decode(AdminOrdersApiResponse.self, from: data)
-            } catch {
-                let body = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
-                print("❌ Decode failed: \(error)\nBody:\n\(body)")
-                return
-            }
+            // 2️⃣ Cache raw JSON for offline use
+            UserDefaults.standard.set(data, forKey: cacheKey)
+            print("🟢 admin/orders: cached \(freshOrders.count) orders to UserDefaults")
 
-            guard parsed.ok else {
-                print("❌ admin/orders returned ok=false")
-                return
-            }
+            // 3️⃣ Update UI
+            self.orders = freshOrders
 
-            let mapped: [AdminOrderItem] = parsed.orders.map { dto in
-
-                let status: AdminOrderStatus = {
-                    switch dto.status ?? 0 {
-                    case 4:  return .ready
-                    case 5:  return .collected
-                    default: return .received
-                    }
-                }()
-
-                let displayName: String = {
-                    if let dn = dto.customerDisplayName, !dn.isEmpty {
-                        return dn
-                    }
-                    return dto.customerName
-                }()
-
-                let sourceHe: String = {
-                    switch dto.source.lowercased() {
-                    case "cashpoint": return "קופה"
-                    case "kiosk":     return "קיוסק"
-                    case "mini", "appclip", "web": return "מיני"
-                    default:          return dto.source
-                    }
-                }()
-
-                let totalQty = max(1, dto.lines.reduce(0) { $0 + max($1.qty, 1) })
-                let perUnit = dto.totalGBP / Double(totalQty)
-
-                let lineItems: [AdminOrderLineItem] = dto.lines.enumerated().map { idx, l in
-                    AdminOrderLineItem(
-                        id: l.itemId ?? l.productId ?? idx,
-                        productId: l.productId,
-                        name: l.name,
-                        quantity: max(l.qty, 1),
-                        unitPrice: perUnit,
-                        category: l.category,
-                        modifiersText: l.modifiers,
-                        updatedAt: l.updatedAt    // 👈 new field from DTO
-                    )
-                }
-                
-                let stationSet = Set(dto.lines.map { classifyAdminStation(for: $0) })
-
-                // 👇 Define what counts as "unpaid"
-                let bucketLower = dto.bucket.lowercased()
-                let stageLower  = dto.stage.lowercased()
-
-                let isUnpaid =
-                    bucketLower.contains("unpaid")
-                    || bucketLower.contains("open")
-                    || bucketLower.contains("tab")
-                    || stageLower.contains("unpaid")
-
-                return AdminOrderItem(
-                    id: dto.id,
-                    orderId: String(dto.id),
-                    customerName: displayName,
-                    subtitle: dto.itemSummary,
-                    source: sourceHe,
-                    status: status,
-                    placedAt: dto.placedAt,
-                    items: lineItems,
-                    total: dto.totalGBP,
-                    stations: stationSet,
-                    isUnpaid: isUnpaid          // 👈 NEW
-                )
-            }
-
-            
-            self.orders = mapped
         } catch {
+            // Network error: keep whatever we have (maybe cached)
             print("❌ admin/orders network error:", error.localizedDescription)
+            // No need to change self.orders here – if cache existed, it's already shown.
         }
-        
     }
 }
 
@@ -865,21 +931,31 @@ struct AdminOrderDetailSheet: View {
 
                     VStack(alignment: .leading, spacing: 12) {
                         ForEach(order.items) { line in
-                            HStack {
-                                Text("\(line.name) ×\(line.quantity)")
-                                    .font(.system(size: 30))
-                                    .lineLimit(1)
-                                    .truncationMode(.tail)
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Text("\(line.name) ×\(line.quantity)")
+                                        .font(.system(size: 20))
+                                        .lineLimit(1)
+                                        .truncationMode(.tail)
 
-                                Spacer()
+                                    Spacer()
 
-                                if line.unitPrice > 0 {
-                                    Text(String(format: "₪%.2f", line.rowTotal))
-                                        .font(.system(size: 18, weight: .bold))
-                                } else {
-                                    Text("₪–")
-                                        .font(.system(size: 18))
+                                    if line.unitPrice > 0 {
+                                        Text(String(format: "₪%.2f", line.rowTotal))
+                                            .font(.system(size: 18, weight: .bold))
+                                    } else {
+                                        Text("₪–")
+                                            .font(.system(size: 18))
+                                            .foregroundColor(.secondary)
+                                    }
+                                }
+
+                                if let mods = line.modifiersText,
+                                   !mods.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                    Text(mods)
+                                        .font(.system(size: 16))
                                         .foregroundColor(.secondary)
+                                        .lineLimit(2)
                                 }
                             }
                         }
@@ -894,6 +970,7 @@ struct AdminOrderDetailSheet: View {
                         Text(String(format: "₪%.2f", orderTotal))
                             .font(.system(size: 22, weight: .bold))
                     }
+                    
 
                     VStack(alignment: .leading, spacing: 12) {
                         if let target = nextStatus {

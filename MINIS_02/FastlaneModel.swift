@@ -20,40 +20,64 @@ final class MenuApiModel: ObservableObject {
             errorMessage = "Invalid URL"
             return
         }
+
+        // 🔹 Two caches:
+        // 1) UserDefaults (primary, fast)
+        // 2) File in Caches (fallback, legacy)
+        let cacheKey = "MenuJSON_\(shopId)"
         let cacheURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
             .appendingPathComponent("shop_\(shopId).json")
 
         isLoading = true
         errorMessage = nil
 
-        // 👇 only show cache if skipCache == false
-        if !skipCache, let cached = try? Data(contentsOf: cacheURL) {
-            Task { await parseAndApply(data: cached) }
+        // 0️⃣ Try to show cached data immediately (unless caller explicitly skips cache)
+        if !skipCache, items.isEmpty {
+            if let cachedData = UserDefaults.standard.data(forKey: cacheKey) {
+                Task { await parseAndApply(data: cachedData) }
+            } else if let cachedFile = try? Data(contentsOf: cacheURL) {
+                Task { await parseAndApply(data: cachedFile) }
+            }
         }
 
         URLSession.shared.dataTask(with: url) { [weak self] data, _, err in
             guard let self else { return }
+
             if let err = err {
                 Task { @MainActor in
+                    // Network failed → keep whatever we already have (cached),
+                    // just show error for debugging.
                     self.isLoading = false
-                    self.errorMessage = err.localizedDescription
+                    // Only show error if we don't have any items at all
+                    if self.items.isEmpty {
+                        self.errorMessage = err.localizedDescription
+                    }
                 }
                 return
             }
+
             guard let data else {
                 Task { @MainActor in
                     self.isLoading = false
-                    self.errorMessage = "No data received"
+                    if self.items.isEmpty {
+                        self.errorMessage = "No data received"
+                    }
                 }
                 return
             }
+
+            // 1️⃣ Persist JSON in both UserDefaults and file cache
+            UserDefaults.standard.set(data, forKey: cacheKey)
             try? data.write(to: cacheURL)
+
+            // 2️⃣ Parse + apply to UI
             Task { await self.parseAndApply(data: data) }
         }.resume()
     }
 
     private func parseAndApply(data: Data) async {
         do {
+            // Wrapper { products: [...] } or plain [ProductPayload]
             if let wrapper = try? JSONDecoder().decode(ShopPayload.self, from: data),
                let products = wrapper.products {
                 await apply(mapProducts(products))
@@ -73,7 +97,7 @@ final class MenuApiModel: ObservableObject {
         await MainActor.run {
             items = newItems
             isLoading = false
-            version &+= 1 
+            version &+= 1
         }
     }
 
@@ -88,7 +112,7 @@ final class MenuApiModel: ObservableObject {
                 imageURL: $0.image,
                 description: $0.description,
                 status: $0.status,
-                stockQuantity: $0.stockQuantity      // 👈 NEW
+                stockQuantity: $0.stockQuantity
             )
         }
     }
@@ -370,6 +394,7 @@ enum OrderAPI {
         customerPhone: String? = nil,
         payment: PaymentSummary? = nil,
         zcreditMeta: [String: Any]? = nil,
+        ticketNumber: Int? = nil,
         completion: @escaping (Result<Int, Error>) -> Void
     ) {
         let shopId = 12
@@ -420,6 +445,10 @@ enum OrderAPI {
         
         if let orderId = orderId {
             payload["orderId"] = orderId
+        }
+        
+        if let ticketNumber = ticketNumber {
+            payload["ticketNumber"] = ticketNumber   // 👈 NEW: save local slip id in DB
         }
         // 🧾 Optional: rich payment summary
         if let payment {
@@ -562,9 +591,10 @@ final class ZCreditPaymentHandler {
              orderId: Int?,
              completion: @escaping (ZCreditResult) -> Void) {
 
-            UserDefaults.standard.set("48796294", forKey: "pinpadId")   // cashpoint 1
-       // UserDefaults.standard.set("48796855", forKey: "pinpadId")   // cashpoint 2
-        //UserDefaults.standard.set("48796856", forKey: "pinpadId")   // cashpoint 3
+           // UserDefaults.standard.set("48796294", forKey: "pinpadId")   // cashpoint 1
+            //UserDefaults.standard.set("48796855", forKey: "pinpadId")   // cashpoint 2
+      UserDefaults.standard.set("48796856", forKey: "pinpadId")   // cashpoint 3
+        let cp = CashpointID(rawValue: UserDefaults.standard.integer(forKey: "cashpointID")) ?? .one
         
         let safeAmount = max(0, amount)
         let pinpadId = UserDefaults.standard.string(forKey: "pinpadId") ?? "48796294"
@@ -1119,3 +1149,35 @@ struct SalesRow {
     let diners: String     // סועד
     let ppa: String        // PPA
 }
+
+
+func nextLocalTicketNumber() -> Int {
+    let defaults = UserDefaults.standard
+    let key = "cpLastTicketNumber"
+
+    let last = defaults.integer(forKey: key)   // 0 if missing
+    let base = max(last, 1000)                 // start from 1000
+    let next = base + 1
+
+    defaults.set(next, forKey: key)
+    return next
+}
+
+enum CashpointID: Int {
+    case one = 1
+    case two = 2
+}
+struct ZReportData: Decodable {
+    let date: Date
+    let grossTotal: Double
+    let netTotal: Double
+    let vatTotal: Double
+    let cashTotal: Double
+    let cardTotal: Double
+    let paymentsTotal: Double
+    let totalTips: Double
+    let cashTips: Double
+    let cardTips: Double
+}
+
+

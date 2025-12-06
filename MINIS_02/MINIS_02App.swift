@@ -32,15 +32,30 @@ struct MINIS_02App: App {
     @AppStorage("cashPointMode") private var cashPointMode: Bool = true
     @AppStorage("shopId") private var shopId: String = "0"
     @AppStorage("launchMenuOnce") private var launchMenuOnce: Bool = false
-    @AppStorage("autoPrintEnabled") private var autoPrintEnabled: Bool = false   // 👈 new flag
+    @AppStorage("autoPrintEnabled") private var autoPrintEnabled: Bool = true   // 👈 new flag
 
     init() {
-        PrinterManager.shared.printSalesDebugDemo()
+        // PrinterManager.shared.printSalesDebugDemo()
         UIView.appearance().tintColor = UIColor.label
 
         // 🔥 Global RTL for UIKit (menus, alerts, etc.)
         UIView.appearance().semanticContentAttribute = .forceRightToLeft
+        UISegmentedControl.appearance().setTitleTextAttributes(
+              [.foregroundColor: UIColor.black],
+              for: .selected
+          )
 
+          // Unselected: white 70% opacity
+          UISegmentedControl.appearance().setTitleTextAttributes(
+              [.foregroundColor: UIColor.white.withAlphaComponent(0.7)],
+              for: .normal
+          )
+
+          // Background for selected segment
+          UISegmentedControl.appearance().selectedSegmentTintColor = UIColor.white
+
+          // Transparent background for the whole control
+          UISegmentedControl.appearance().backgroundColor = UIColor.white.withAlphaComponent(0.15)
         // Clear saved POS name/phone on fresh launch
         UserDefaults.standard.removeObject(forKey: "posSavedName")
         UserDefaults.standard.removeObject(forKey: "posSavedPhone")

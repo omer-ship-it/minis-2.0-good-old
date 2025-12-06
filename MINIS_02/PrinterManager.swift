@@ -10,25 +10,46 @@ enum OneShotPrinter {
         let portNW = NWEndpoint.Port(rawValue: port) ?? .init(integerLiteral: 9100)
 
         let connection = NWConnection(host: hostNW, port: portNW, using: .tcp)
+
         connection.stateUpdateHandler = { state in
             switch state {
+
             case .ready:
                 Swift.print("📡 [OneShotPrinter] connected to \(host):\(port)")
+
                 connection.send(content: data, completion: .contentProcessed { error in
                     if let error = error {
                         Swift.print("⚠️ [OneShotPrinter] send error:", error)
+
+                        // ❌ SEND FAILED – update flag on main actor
+                        Task { @MainActor in
+                            PrinterManager.shared.lastSendHadNetworkError = true
+                        }
                     } else {
-                        Swift.print("✅ [OneShotPrinter] drawer pulse sent")
+                        Swift.print("✅ [OneShotPrinter] send OK to \(host):\(port)")
+
+                        // ✅ SEND SUCCEEDED – update flag on main actor
+                        Task { @MainActor in
+                            PrinterManager.shared.lastSendHadNetworkError = false
+                        }
                     }
                     connection.cancel()
                 })
+
             case .failed(let error):
                 Swift.print("❌ [OneShotPrinter] connection failed:", error)
+
+                // ❌ CONNECTION FAILED – update flag on main actor
+                Task { @MainActor in
+                    PrinterManager.shared.lastSendHadNetworkError = true
+                }
                 connection.cancel()
+
             default:
                 break
             }
         }
+
         connection.start(queue: .global())
     }
 }
@@ -363,7 +384,13 @@ final class TCPPrinter: ObservableObject {
 @MainActor
 final class PrinterManager {
     enum Mode { case persistent, oneShot }
+    @Published var lastSendHadNetworkError: Bool = false
 
+       func markLastSendResult(success: Bool) {
+           Task { @MainActor in
+               self.lastSendHadNetworkError = !success
+           }
+       }
     static let shared = PrinterManager()
     private let debugTickets = true
 
@@ -472,7 +499,7 @@ final class PrinterManager {
         date: Date = Date(),
         customerName: String?,
         items: [InvoiceItem],
-        vatRate: Double = 0.17
+        vatRate: Double = 0.18
     ) {
         // ---- BUSINESS DETAILS ----
         let businessName    = "בית העם קונדיטוריה ויין בע\"מ"
@@ -486,7 +513,7 @@ final class PrinterManager {
         df.dateFormat = "dd/MM/yyyy  HH:mm"
         let dateText = df.string(from: date)
 
-        let invoiceIdText = "חשבונית מס #\(invoiceNumber)"
+        let invoiceIdText = "‎חשבונית מס/קבלה #\(invoiceNumber)"
 
         let safeCustomer = (customerName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let customerLine = safeCustomer.isEmpty ? "ללא שם לקוח" : "לקוח: \(safeCustomer)"
@@ -1085,10 +1112,10 @@ final class PrinterManager {
             }
 
             // ---- META BLOCK (will appear at top after rotation) ----
-            job += EscPos.feed(2)
+           // job += EscPos.feed(2)
 
             // Time/date – small, right
-            job += EscPos.align(2)
+          //  job += EscPos.align(2)
             job += EscPos.style(doubleHeight: false,
                                 doubleWidth: false,
                                 bold: false)
@@ -1153,8 +1180,8 @@ final class PrinterManager {
 
             // ===== SMALL RIGHT-ALIGNED DATE/TIME =====
             job += EscPos.align(2)
-            job += EscPos.style(doubleHeight: false,
-                                doubleWidth: false,
+            job += EscPos.style(doubleHeight: true,
+                                doubleWidth: true,
                                 bold: false)
             job += asciiLine(orderMeta1)
 
@@ -1214,6 +1241,13 @@ final class PrinterManager {
                 job += EscPos.feed(1)
             }
 
+            job += EscPos.feed(1)
+            job += EscPos.align(1)
+            job += EscPos.style(doubleHeight: true,
+                                doubleWidth: true,
+                                bold: true)
+            job += hebrewLineData(caution)
+
             // ===== BOTTOM TA BLOCK (for TA) =====
             if isTakeAwayService {
                 job += EscPos.align(1)
@@ -1259,7 +1293,136 @@ fileprivate func breakModifiers(_ mods: String) -> String {
 }
 
 extension PrinterManager {
+    func printHardcodedZ() {
 
+            let z = ZReportData(
+                date: ISO8601DateFormatter().date(from: "2025-12-04T19:17:47Z")!,
+                grossTotal: 19505.00,
+                netTotal:   47213.37,
+                vatTotal:   8498.41,
+                cashTotal:  2568.00,
+                cardTotal:  15774.00,
+                paymentsTotal: 18828.75,
+                totalTips: 0.00,
+                cashTips:  0.00,
+                cardTips:  0.00
+            )
+
+            printZReport(z)
+        }
+    func printZReport(_ z: ZReportData) {
+        
+         var job = Data()
+         job += EscPos.initPrinter
+         job.append(contentsOf: [0x1B, 0x74, 33])  // Hebrew codepage
+
+         let money: (Double) -> String = { value in
+             String(format: "%.2f", value)
+         }
+        
+        
+
+         // --- Date formatting ---
+         let df = DateFormatter()
+         df.locale = Locale(identifier: "he_IL")
+         df.dateFormat = "dd/MM/yyyy HH:mm"
+         let dateText = df.string(from: z.date)
+
+         // ===== HEADER =====
+         job += EscPos.align(1)
+         job += asciiLine("Z REPORT")
+         job += EscPos.align(0)
+         job += makeDebugSeparator()
+
+         job += hebrewLineData("תאריך: \(dateText)")
+         job += makeDebugSeparator()
+         job += EscPos.feed(1)
+
+         // ===== SECTION: מכירות (Net / VAT / Gross) =====
+         job += makeBlackTitle("מכירות", totalWidth: 24)
+         job += EscPos.feed(1)
+         job += makeDebugSeparator()
+
+         // Use your 4-column row, but put everything in the last column (wide)
+         // ללא מע״מ
+         job += makeDebugRow(
+             ["", "", "", "ללא מע\"מ  \(money(z.netTotal))"],
+             align: ["R","R","R","R"]
+         )
+
+         // מע״מ 18%
+         job += makeDebugRow(
+             ["", "", "", "מע\"מ 18%  \(money(z.vatTotal))"],
+             align: ["R","R","R","R"]
+         )
+
+         // סה״כ כולל
+         job += makeDebugRow(
+             ["", "", "", "סה\"כ כולל \(money(z.grossTotal))"],
+             align: ["R","R","R","R"]
+         )
+
+         job += makeDebugSeparator()
+         job += EscPos.feed(1)
+
+         // ===== SECTION: תקבולים (payments) =====
+         job += makeBlackTitle("תקבולים", totalWidth: 24)
+         job += EscPos.feed(1)
+         job += makeDebugSeparator()
+
+         // מזומן
+         job += makeDebugRow(
+             ["", "", "", "מזומן      \(money(z.cashTotal))"],
+             align: ["R","R","R","R"]
+         )
+
+         // אשראי
+         job += makeDebugRow(
+             ["", "", "", "אשראי      \(money(z.cardTotal))"],
+             align: ["R","R","R","R"]
+         )
+
+         // סה״כ תקבולים
+         job += makeDebugRow(
+             ["", "", "", "סה\"כ תקבולים \(money(z.paymentsTotal))"],
+             align: ["R","R","R","R"]
+         )
+
+         job += makeDebugSeparator()
+         job += EscPos.feed(1)
+
+         // ===== SECTION: תשר (tips) =====
+         job += makeBlackTitle("תשר", totalWidth: 24)
+         job += EscPos.feed(1)
+         job += makeDebugSeparator()
+
+         // תשר מזומן
+         job += makeDebugRow(
+             ["", "", "", "תשר מזומן  \(money(z.cashTips))"],
+             align: ["R","R","R","R"]
+         )
+
+         // תשר אשראי
+         job += makeDebugRow(
+             ["", "", "", "תשר אשראי  \(money(z.cardTips))"],
+             align: ["R","R","R","R"]
+         )
+
+         // תשר סה״כ
+         job += makeDebugRow(
+             ["", "", "", "תשר סה\"כ  \(money(z.totalTips))"],
+             align: ["R","R","R","R"]
+         )
+
+         job += makeDebugSeparator()
+
+         // ===== FOOTER =====
+         job += EscPos.feed(3)
+         job += EscPos.cut
+
+         Swift.print("🧾 [PrinterManager] printZReport bytes:", job.count)
+         OneShotPrinter.send(host: kitchenPrinterIP, port: port, data: job)
+     }
     // MARK: - Hebrew detection
     private func containsHebrew(_ s: String) -> Bool {
         return s.range(of: "\\p{Hebrew}", options: .regularExpression) != nil
@@ -1425,6 +1588,10 @@ extension PrinterManager {
         diningMode: DiningMode,
         customerName: String?
     ) {
+        Swift.print("🧾 [PM] printCashPointSplit order=\(orderNumber) " +
+                    "lines=\(entries.count) total=\(total) mode=\(diningMode) " +
+                    "customer=\(customerName ?? "-")")
+
         let lines: [KDSOrderLine] = entries.map { entry in
             KDSOrderLine(
                 itemId: nil,
@@ -1555,12 +1722,3 @@ struct InvoiceItem {
     }
 }
 
-struct InvoiceItem2 {
-    let name: String
-    let quantity: Int
-    let unitPrice: Double
-
-    var lineTotal: Double {
-        Double(quantity) * unitPrice
-    }
-}

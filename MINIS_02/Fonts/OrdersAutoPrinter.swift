@@ -1,7 +1,45 @@
 import Foundation
 import SwiftUI
+import Darwin   // for getifaddrs / inet_ntop
 
-// MARK: - DTOs for /api/admin/orders
+// MARK: - LAN IPv4 helper (Wi-Fi en0 / Ethernet bridge100)
+
+func currentLANIPv4() -> String? {
+    var ifaddrPtr: UnsafeMutablePointer<ifaddrs>?
+
+    guard getifaddrs(&ifaddrPtr) == 0, let firstAddr = ifaddrPtr else {
+        return nil
+    }
+    defer { freeifaddrs(ifaddrPtr) }
+
+    for ptr in sequence(first: firstAddr, next: { $0.pointee.ifa_next }) {
+        let interface = ptr.pointee
+        let name = String(cString: interface.ifa_name)
+
+        // We only care about Wi-Fi (en0) and Ethernet-style bridge (bridge100)
+        guard name == "en0" || name == "bridge100" else { continue }
+
+        // Only IPv4
+        guard interface.ifa_addr.pointee.sa_family == sa_family_t(AF_INET) else { continue }
+
+        // Cast sockaddr -> sockaddr_in
+        let addrInPtr = withUnsafePointer(to: interface.ifa_addr.pointee) {
+            $0.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0 }
+        }
+
+        var addr4 = addrInPtr.pointee.sin_addr
+
+        // Convert binary address -> string
+        var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+        inet_ntop(AF_INET, &addr4, &buffer, socklen_t(INET_ADDRSTRLEN))
+
+        return String(cString: buffer)
+    }
+
+    return nil
+}
+
+// MARK: - DTOs for /api/admin/orders/claim-to-print
 
 private struct AutoOrdersApiResponse: Decodable {
     let ok: Bool
@@ -18,6 +56,39 @@ private struct AutoLineDTO: Decodable {
     let status: Int
     let station: String?
     let modifiers: String?
+
+    enum CodingKeys: String, CodingKey {
+        case itemId
+        case productId
+        case name
+        case qty
+        case category
+        case status
+        case station
+        case modifiers
+        case modifiersUpper = "Modifiers"   // DB / JSON field
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+
+        itemId    = try c.decodeIfPresent(Int.self,    forKey: .itemId)
+        productId = try c.decodeIfPresent(Int.self,    forKey: .productId)
+        name      = try c.decode(String.self,          forKey: .name)
+        qty       = try c.decode(Int.self,             forKey: .qty)
+        category  = try c.decodeIfPresent(String.self, forKey: .category)
+        status    = try c.decode(Int.self,             forKey: .status)
+        station   = try c.decodeIfPresent(String.self, forKey: .station)
+
+        // 🔑 accept both "modifiers" and "Modifiers"
+        if let m = try c.decodeIfPresent(String.self, forKey: .modifiers) {
+            modifiers = m
+        } else if let m = try c.decodeIfPresent(String.self, forKey: .modifiersUpper) {
+            modifiers = m
+        } else {
+            modifiers = nil
+        }
+    }
 }
 
 private struct AutoOrderDTO: Decodable {
@@ -84,19 +155,21 @@ final class OrdersAutoPrinter {
     private init() {}
 
     private let miniAppId = 12
-    private let baseURL   = "https://minis.studio/api/admin/orders"
 
-    /// Orders we've already printed in this app run
+    /// Claim endpoint (server uses SentToPrinterAt / PrintedAt)
+    private let claimURLBase   = "https://minis.studio/api/admin/orders/claim-to-print"
+
+    /// Printed endpoint (marks PrintedAt on server)
+    private let printedURLBase = "https://minis.studio/api/admin/orders"
+
+    /// Orders we've already printed in this app run (extra safety)
     private var printedOrderIds: Set<Int> = []
-
-    /// Has the first successful fetch already seeded printedOrderIds?
-    private var hasSeededPrintedIds = false
 
     /// Background polling task (timer loop)
     private var pollTask: Task<Void, Never>?
 
-    /// Current polling interval (seconds) – just for debug
-    private var currentInterval: TimeInterval = 60
+    /// Current polling interval (seconds) – tweak as needed
+    private var currentInterval: TimeInterval = 5   // fast polling for claim
 
     // Lightweight internal order + line model for printing
     private struct SimpleLine {
@@ -105,6 +178,7 @@ final class OrdersAutoPrinter {
         let quantity: Int
         let unitPrice: Double
         let category: String?
+        let modifiers: String?      // 👈 NEW
     }
 
     private struct SimpleOrder {
@@ -119,8 +193,8 @@ final class OrdersAutoPrinter {
 
     // MARK: - Public API
 
-    /// New API: start polling every `interval` seconds.
-    func startPolling(interval: TimeInterval = 60) {
+    /// Start polling every `interval` seconds.
+    func startPolling(interval: TimeInterval = 5) {
         guard pollTask == nil else { return }   // already running
 
         currentInterval = interval
@@ -144,7 +218,7 @@ final class OrdersAutoPrinter {
 
     /// Backwards-compatible alias used by older code.
     func startBackgroundPolling() {
-        startPolling(interval: 60)
+        startPolling(interval: 5)
     }
 
     /// Called from AppDelegate silent push + NotificationCenter(.orderReady)
@@ -158,12 +232,24 @@ final class OrdersAutoPrinter {
     private func pollOnce(trigger: String) async {
         guard miniAppId > 0 else { return }
 
-        guard let url = URL(string: "\(baseURL)?miniAppId=\(miniAppId)") else {
-            print("❌ OrdersAutoPrinter: bad URL")
+        // 🔒 Guard per tick: only work when LAN IP is in the allowed prefix
+        if let ip = currentLANIPv4() {
+            if !ip.hasPrefix("192.168.68.") {   // <-- home test; in prod use "10.100.10."
+                print("ℹ️ [OrdersAutoPrinter] pollOnce: LAN IP \(ip) not allowed prefix → skipping this poll")
+                return
+            }
+        } else {
+            print("ℹ️ [OrdersAutoPrinter] pollOnce: no LAN IPv4 (en0/bridge100) → skipping this poll")
+            return
+        }
+
+        guard let url = URL(string: "\(claimURLBase)?miniAppId=\(miniAppId)") else {
+            print("❌ OrdersAutoPrinter: bad claim URL")
             return
         }
 
         var req = URLRequest(url: url, timeoutInterval: 15)
+        req.httpMethod = "POST"                         // 👈 claim is POST
         req.setValue("application/json", forHTTPHeaderField: "Accept")
 
         do {
@@ -174,7 +260,7 @@ final class OrdersAutoPrinter {
             }
             guard http.statusCode == 200 else {
                 let body = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
-                print("❌ OrdersAutoPrinter HTTP \(http.statusCode)\n\(body)")
+                print("❌ OrdersAutoPrinter claim HTTP \(http.statusCode)\n\(body)")
                 return
             }
 
@@ -215,6 +301,7 @@ final class OrdersAutoPrinter {
                 return
             }
 
+            // These orders were already claimed (SentToPrinterAt set) on the server
             processFetchedOrders(parsed.orders, trigger: trigger)
         } catch {
             print("❌ OrdersAutoPrinter network error:", error.localizedDescription)
@@ -224,6 +311,11 @@ final class OrdersAutoPrinter {
     // MARK: - Mapping + print logic
 
     private func processFetchedOrders(_ dtos: [AutoOrderDTO], trigger: String) {
+        guard !dtos.isEmpty else {
+            print("ℹ️ [OrdersAutoPrinter] no claimed orders to print (trigger=\(trigger))")
+            return
+        }
+
         // Map DTOs to simple orders
         let mapped: [SimpleOrder] = dtos.map { dto in
 
@@ -243,7 +335,8 @@ final class OrdersAutoPrinter {
                     name: l.name,
                     quantity: max(l.qty, 1),
                     unitPrice: perUnit,
-                    category: l.category  // 👈 PRESERVE CATEGORY HERE
+                    category: l.category,
+                    modifiers: l.modifiers         // 👈 pass through
                 )
             }
 
@@ -258,41 +351,77 @@ final class OrdersAutoPrinter {
             )
         }
 
-        // 1) First successful fetch: seed baseline, no printing
-        if !hasSeededPrintedIds {
-            printedOrderIds = Set(mapped.map { $0.id })
-            hasSeededPrintedIds = true
-            print("🧩 [OrdersAutoPrinter] seeded baseline with \(printedOrderIds.count) orders (trigger=\(trigger))")
-            return
-        }
+        // Optional extra guard: only kiosk-ish sources
+        let kioskSources: Set<String> = ["mini", "kiosk", "appclip", "fastlane"]
 
-        // 2) Only print non-cashpoint orders that are *new*
         let newOrders = mapped.filter { order in
             let srcLower = order.source.lowercased()
-            let isCash   = (srcLower == "cashpoint" || srcLower == "קופה")
-            return !isCash && !printedOrderIds.contains(order.id)
+            guard kioskSources.contains(srcLower) else { return false }
+
+            if printedOrderIds.contains(order.id) {
+                print("⚠️ [OrdersAutoPrinter] order #\(order.id) already printed this run, skipping")
+                return false
+            }
+            return true
         }
 
         guard !newOrders.isEmpty else {
-            print("ℹ️ [OrdersAutoPrinter] no new orders to print (trigger=\(trigger))")
+            print("ℹ️ [OrdersAutoPrinter] no new orders after local filtering (trigger=\(trigger))")
             return
         }
 
         for order in newOrders {
-            print("🖨 [OrdersAutoPrinter] AUTO PRINT #\(order.id) (src=\(order.source)) trigger=\(trigger)")
+            Task {
+                await self.printAndMark(order: order, trigger: trigger)
+            }
+        }
+    }
 
-            let entries = toBasketEntries(from: order)
-            let mode    = diningMode(for: order)
+    // MARK: - Print + markPrinted
 
-            PrinterManager.shared.printCashPointSplit(
-                orderNumber: order.id,
-                entries: entries,
-                total: order.total,
-                diningMode: mode,
-                customerName: order.customerName
-            )
+    private func printAndMark(order: SimpleOrder, trigger: String) async {
+        print("🖨 [OrdersAutoPrinter] AUTO PRINT #\(order.id) (src=\(order.source)) trigger=\(trigger)")
 
-            printedOrderIds.insert(order.id)
+        let entries = toBasketEntries(from: order)
+        let mode    = diningMode(for: order)
+
+        PrinterManager.shared.printCashPointSplit(
+            orderNumber: order.id,
+            entries: entries,
+            total: order.total,
+            diningMode: mode,
+            customerName: order.customerName
+        )
+
+        printedOrderIds.insert(order.id)
+        await markPrinted(orderId: order.id)
+    }
+
+    // MARK: - /printed call
+
+    private func markPrinted(orderId: Int) async {
+        guard let url = URL(string: "\(printedURLBase)/\(orderId)/printed?miniAppId=\(miniAppId)") else {
+            print("❌ markPrinted: bad URL for order \(orderId)")
+            return
+        }
+
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        do {
+            let (_, response) = try await URLSession.shared.data(for: req)
+            if let http = response as? HTTPURLResponse {
+                if http.statusCode == 200 {
+                    print("✅ [OrdersAutoPrinter] markPrinted(\(orderId)) OK")
+                } else {
+                    print("⚠️ [OrdersAutoPrinter] markPrinted(\(orderId)) HTTP \(http.statusCode)")
+                }
+            } else {
+                print("⚠️ [OrdersAutoPrinter] markPrinted(\(orderId)) no HTTPURLResponse")
+            }
+        } catch {
+            print("❌ [OrdersAutoPrinter] markPrinted(\(orderId)) network error:", error.localizedDescription)
         }
     }
 
@@ -306,13 +435,13 @@ final class OrdersAutoPrinter {
                     id: li.id,
                     name: li.name,
                     price: li.unitPrice,
-                    category: li.category ?? "",   // 👈 PASS REAL CATEGORY INTO SHELLMENUITEM
+                    category: li.category ?? "",
                     modifiers: nil,
                     imageURL: nil,
                     description: nil
                 ),
                 quantity: li.quantity,
-                subtitle: nil,
+                subtitle: li.modifiers,   // 👈 now goes into KDSOrderLine.modifiers
                 unitPrice: li.unitPrice
             )
         }

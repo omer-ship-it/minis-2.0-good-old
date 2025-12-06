@@ -5,6 +5,11 @@ import Kingfisher
 
 
 struct CashPointView: View {
+    @AppStorage("cashpointID") private var cashpointIDRaw: Int = 2
+
+    var cashpointID: CashpointID {
+        CashpointID(rawValue: cashpointIDRaw) ?? .one
+    }
     @Environment(\.isRtl) private var isRtl
     @Environment(\.currency) private var currency
     @StateObject private var api = MenuApiModel()
@@ -907,7 +912,7 @@ struct CashPointView: View {
     }
     
     private func syncAdminDraftToServer(_ draft: AdminProductDraft) async {
-        let shopId = Int(UserDefaults.standard.string(forKey: "shopId") ?? " t0") ?? 0
+        let shopId = 12
         guard shopId > 0 else {
             print("❌ syncAdminDraftToServer: missing shopId")
             return
@@ -1952,6 +1957,7 @@ struct CashPointView: View {
                                 Text(isRtl ? "קופה" : "Cash Point")
                                     .font(.system(size: 22, weight: .semibold))
                                 
+                                
                                 // Spacer before search
                                 Spacer()
                                     .frame(maxWidth: 100)
@@ -2495,11 +2501,16 @@ struct CashPointView: View {
            // .transaction { $0.disablesAnimations = true }
             .onAppear {
                 isPayLaterMode = false
-                   lockedLineIds.removeAll()
-                   lineSessionTime.removeAll()
+                lockedLineIds.removeAll()
+                lineSessionTime.removeAll()
 
-               
-                api.load(skipCache: true)
+                // ✅ Use cached menu first, then network if available
+                if api.items.isEmpty {
+                    api.load(skipCache: false)   // allow UserDefaults/file cache
+                } else {
+                    // Already have items (e.g. returning to view) – just try a network refresh
+                    api.load(skipCache: true)
+                }
             }
             .onChange(of: basket.count) { _ in
                 let currentIds = Set(basket.keys)
@@ -2739,16 +2750,53 @@ struct CashPointView: View {
         stockEditWorkItem?.cancel()
         stockEditWorkItem = nil
 
-        // Snapshot current order data BEFORE we mutate basket
+        // Snapshot BEFORE we mutate basket
         let entriesArray  = Array(basket.values)
         let total         = finalTotal
         let mode          = diningMode
         let nameSnapshot  = customerName
         let phoneSnapshot = customerPhone
 
+        // If this started as an unpaid order → reuse that id as ticket number
+        let existingIdForPayLater: Int? = (isPayLaterMode ? unpaidOrderId : nil)
+
+        let ticketNumber: Int = {
+            if let existing = existingIdForPayLater {
+                return existing            // keep the same reference for that open tab
+            } else {
+                return nextLocalTicketNumber()
+            }
+        }()
+
+        // Decide which lines to print on the ticket
+        let printerEntries: [BasketEntry]
+        let printerTotal: Double
+
+        if isPayLaterMode, existingIdForPayLater != nil {
+            // Pay-later finalization → only print lines that were NOT already sent
+            let unsent = entriesArray.filter { !lockedLineIds.contains($0.id) }
+            printerEntries = unsent
+            printerTotal   = unsent.reduce(0.0) { $0 + Double($1.quantity) * $1.unitPrice }
+        } else {
+            // Normal order → print everything
+            printerEntries = entriesArray
+            printerTotal   = total
+        }
+
+        // ✅ PRINT *IMMEDIATELY* with the local ticketNumber
+        if !printerEntries.isEmpty {
+            PrinterManager.shared.printCashPointSplit(
+                orderNumber: ticketNumber,
+                entries: printerEntries,
+                total: printerTotal,
+                diningMode: mode,
+                customerName: nameSnapshot
+            )
+        }
+
         // Clear basket & close the flow immediately in the UI
         basket.removeAll()
-        showOrderFlow  = false
+        showOrderFlow   = false
         showServiceStep = true
 
         var meta: [String: Any] = [:]
@@ -2761,12 +2809,9 @@ struct CashPointView: View {
 
         let metaToSend = meta.isEmpty ? nil : meta
 
-        // If this started as an unpaid order → reuse that id
-        let existingIdForPayLater: Int? = (isPayLaterMode ? unpaidOrderId : nil)
-
-        // 🔥 Submit to server – we now wait for the real (or reused) orderId
+        // 🔥 Submit to server in the background – we now also send ticketNumber
         OrderAPI.submitOrder(
-            orderId: existingIdForPayLater,   // 👈 reuse open order id when pay-later
+            orderId: existingIdForPayLater,
             entries: entriesArray,
             total: total,
             diningMode: mode,
@@ -2774,49 +2819,17 @@ struct CashPointView: View {
             customerName: nameSnapshot,
             customerPhone: phoneSnapshot,
             payment: paymentSummary,
-            zcreditMeta: metaToSend
+            zcreditMeta: metaToSend,
+            ticketNumber: ticketNumber
         ) { result in
             DispatchQueue.main.async {
                 switch result {
-                case .success(let response):
-                    let serverOrderId = response
-                    posSavedName = ""
+                case .success(let serverOrderId):
+                    posSavedName  = ""
                     posSavedPhone = ""
 
-                    // 🧾 Decide what to print:
-                    let printerEntries: [BasketEntry]
-                    let printerTotal: Double
-
-                    if isPayLaterMode, let _ = existingIdForPayLater {
-                        // 🔹 Pay-later finalization:
-                        // Print ONLY lines that weren't already sent (not in lockedLineIds)
-                        let unsent = entriesArray.filter { !lockedLineIds.contains($0.id) }
-                        if unsent.isEmpty {
-                            printerEntries = []
-                            printerTotal = 0
-                        } else {
-                            printerEntries = unsent
-                            printerTotal = unsent.reduce(0.0) { $0 + Double($1.quantity) * $1.unitPrice }
-                        }
-                    } else {
-                        // 🔹 Normal order → print full ticket
-                        printerEntries = entriesArray
-                        printerTotal = total
-                    }
-
-                    if !printerEntries.isEmpty {
-                        PrinterManager.shared.printCashPointSplit(
-                            orderNumber: serverOrderId,
-                            entries: printerEntries,
-                            total: printerTotal,
-                            diningMode: mode,
-                            customerName: nameSnapshot
-                        )
-                    }
-
-                    // ✅ Confirmation snapshot with real id
                     let snapshot = CashOrderSnapshot(
-                        orderNumber: serverOrderId,
+                        orderNumber: ticketNumber,   // what the slip shows
                         entries: entriesArray,
                         totalPrice: total,
                         diningMode: mode,
@@ -2826,32 +2839,25 @@ struct CashPointView: View {
                     lastOrder = snapshot
                     showConfirmation = true
 
-                    // 🔄 Clear pay-later context after successful final payment
+                    // Reset pay-later context
                     isPayLaterMode = false
-                    unpaidOrderId = nil
+                    unpaidOrderId  = nil
                     lockedLineIds.removeAll()
                     lineSessionTime.removeAll()
 
-                case .failure:
-                    // ❌ Server failed → queue for retry and still print with a local temp id (normal behaviour)
-                    let fallbackOrderId = Int.random(in: 1000...9999)
+                    print("🟢 submitOrder OK → serverOrderId=\(serverOrderId), ticket=\(ticketNumber)")
 
+                case .failure:
+                    // ❌ Queue for retry, keep ticketNumber so DB still knows the printed id
                     CashpointOrderQueue.enqueue(
                         entries: entriesArray,
                         total: total,
-                        diningMode: mode
-                    )
-
-                    PrinterManager.shared.printCashPointSplit(
-                        orderNumber: fallbackOrderId,
-                        entries: entriesArray,
-                        total: total,
                         diningMode: mode,
-                        customerName: nameSnapshot
+                        ticketNumber: ticketNumber
                     )
 
                     let snapshot = CashOrderSnapshot(
-                        orderNumber: fallbackOrderId,
+                        orderNumber: ticketNumber,
                         entries: entriesArray,
                         totalPrice: total,
                         diningMode: mode,
@@ -6029,6 +6035,7 @@ struct QueuedCashpointOrder: Codable {
     let total: Double
     let diningMode: String
     let createdAt: Date
+    let ticketNumber: Int?  
 }
 
 enum CashpointOrderQueue {
@@ -6044,7 +6051,12 @@ enum CashpointOrderQueue {
         UserDefaults.standard.set(data, forKey: storageKey)
     }
 
-    static func enqueue(entries: [BasketEntry], total: Double, diningMode: DiningMode) {
+    static func enqueue(
+        entries: [BasketEntry],
+        total: Double,
+        diningMode: DiningMode,
+        ticketNumber: Int? = nil
+    ) {
         var pending = load()
         let mapped = entries.map {
             QueuedCashpointEntry(
@@ -6058,7 +6070,8 @@ enum CashpointOrderQueue {
             entries: mapped,
             total: total,
             diningMode: diningMode.rawValue,
-            createdAt: Date()
+            createdAt: Date(),
+            ticketNumber: ticketNumber
         )
         pending.append(order)
         save(pending)
