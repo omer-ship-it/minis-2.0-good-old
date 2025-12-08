@@ -21,9 +21,10 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         let center = UNUserNotificationCenter.current()
         center.delegate = self
 
-        center.requestAuthorization(options: [.alert, .badge, .sound]) { granted, error in
-            print("🔐 Notification auth granted:", granted, "error:", String(describing: error))
-        }
+        // 🔇 Removed the automatic prompt:
+        // center.requestAuthorization(options: [.alert, .badge, .sound]) { granted, error in
+        //     print("🔐 Notification auth granted:", granted, "error:", String(describing: error))
+        // }
 
         application.registerForRemoteNotifications()
 
@@ -38,7 +39,6 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
             print("ℹ️ No remote notification in launchOptions")
         }
 
-        // Optional: print last saved token
         if let savedToken = UserDefaults.standard.string(forKey: apnsTokenKey) {
             print("🔎 Saved APNs token (from last launch):", savedToken)
         }

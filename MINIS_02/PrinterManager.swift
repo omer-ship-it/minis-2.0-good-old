@@ -386,17 +386,139 @@ final class PrinterManager {
     enum Mode { case persistent, oneShot }
     @Published var lastSendHadNetworkError: Bool = false
 
-       func markLastSendResult(success: Bool) {
-           Task { @MainActor in
-               self.lastSendHadNetworkError = !success
-           }
-       }
+    func markLastSendResult(success: Bool) {
+        Task { @MainActor in
+            self.lastSendHadNetworkError = !success
+        }
+    }
+
     static let shared = PrinterManager()
     private let debugTickets = true
 
-    private let barPrinterIP     = "10.100.10.222"
-    private let bakeryPrinterIP  = "10.100.10.221"
-    private let kitchenPrinterIP = "10.100.10.220"
+    // MARK: - Raw IPs for each physical printer
+
+    // Ron / Rongta printers
+    private let RonbarPrinterIP     = "10.100.10.222"
+    private let RonbakeryPrinterIP  = "10.100.10.221"
+    private let RonkitchenPrinterIP = "10.100.10.220"
+
+    // Tabit printers
+    private let TabitBarPrinterIP     = "10.100.10.234"
+    private let TabitBakeryPrinterIP  = "10.100.10.221"   // adjust if needed
+    private let TabitKitchenPrinterIP = "10.100.10.232"
+
+    // MARK: - Which set is active? (global toggle)
+
+    enum PrinterSet: String {
+        case ron
+        case tabit
+    }
+
+    private let printerSetKey = "kds.printer.set"
+
+    var activePrinterSet: PrinterSet {
+        get {
+            let raw = UserDefaults.standard.string(forKey: printerSetKey) ?? PrinterSet.tabit.rawValue
+            return PrinterSet(rawValue: raw) ?? .tabit
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: printerSetKey)
+            Swift.print("🖨 Active printer set changed to:", newValue.rawValue)
+        }
+    }
+
+    /// Public helper to switch between Ron and Tabit from UI / settings
+    func setPrinterSet(_ set: PrinterSet) {
+        activePrinterSet = set
+        // If you use persistent mode, you may want to reconnect:
+        updatePort(port)  // reconfigure TCP connections with new IPs
+    }
+
+    // Computed active IPs based on current set
+    private var activeBarIP: String {
+        switch activePrinterSet {
+        case .ron:   return RonbarPrinterIP
+        case .tabit: return TabitBarPrinterIP
+        }
+    }
+
+    private var activeBakeryIP: String {
+        switch activePrinterSet {
+        case .ron:   return RonbakeryPrinterIP
+        case .tabit: return TabitBakeryPrinterIP
+        }
+    }
+
+    private var activeKitchenIP: String {
+        switch activePrinterSet {
+        case .ron:   return RonkitchenPrinterIP
+        case .tabit: return TabitKitchenPrinterIP
+        }
+    }
+
+    // MARK: - Printer family (Hebrew + rotation rules)
+
+    enum HebrewCodePage: UInt8 {
+        case beitHaam = 33  // your original Rongta setting
+        case tabit    = 2   // Tabit printers (t=2 worked in probe)
+        // if you later decide 3 is better: case tabit = 3
+    }
+
+    enum PrinterFamily {
+        case ron
+        case tabit
+
+        var codePage: HebrewCodePage {
+            switch self {
+            case .ron:   return .beitHaam
+            case .tabit: return .tabit
+            }
+        }
+
+        /// Only Ron tickets should use 180° rotation
+        var supportsRotation: Bool {
+            switch self {
+            case .ron:   return true
+            case .tabit: return false
+            }
+        }
+    }
+
+    // Family derived only from activePrinterSet (global switch)
+    private var activeFamily: PrinterFamily {
+        switch activePrinterSet {
+        case .ron:   return .ron
+        case .tabit: return .tabit
+        }
+    }
+
+    func escSelectHebrew(_ cp: HebrewCodePage) -> Data {
+        Data([0x1B, 0x74, cp.rawValue])
+    }
+
+    // MARK: - Test helper: probe codepages on any given IP
+
+    func printHebrewCodepageProbe(to host: String, port: UInt16 = 9100) {
+        var job = Data()
+        job += EscPos.initPrinter
+
+        let testText = "אבגדהוזחט כלםמןנסעפצקרשת 123"
+
+        for n: UInt8 in 0...47 {
+            job.append(contentsOf: [0x1B, 0x74, n])
+            job += asciiLine("ESC t \(n) → Windows-1255 bytes + visualHebrew")
+            job += hebrewLineData(testText)
+            job += EscPos.feed(1)
+        }
+
+        job += EscPos.feed(4)
+        job += EscPos.cut
+
+        Swift.print("📄 Probing Hebrew codepages on \(host):\(port)")
+        OneShotPrinter.send(host: host, port: port, data: job)
+    }
+
+    // MARK: - TCP printers
 
     private let barTCP     = TCPPrinter()
     private let bakeryTCP  = TCPPrinter()
@@ -409,26 +531,31 @@ final class PrinterManager {
         let candidate = UInt16(exactly: raw) ?? 0
         return candidate == 0 ? 9100 : candidate
     }
-    
+
+    // MARK: - Cash drawer
+
     func openCashDrawer() {
         let job = EscPos.openDrawer
             + EscPos.feed(2)
             + EscPos.openDrawerAlt
             + EscPos.feed(2)
 
-        Swift.print("🔔 [PrinterManager] openCashDrawer (one-shot) → BAKERY \(bakeryPrinterIP):\(port)")
-        OneShotPrinter.send(host: bakeryPrinterIP, port: port, data: job)
+        let host = activeBakeryIP
+        Swift.print("🔔 [PrinterManager] openCashDrawer (one-shot) → BAKERY \(host):\(port)")
+        OneShotPrinter.send(host: host, port: port, data: job)
     }
-    private init() {
-     
-    }
+
+    private init() { }
+
+    // MARK: - Connection mode / port
 
     func updatePort(_ port: UInt16 = 9100) {
         UserDefaults.standard.set(Int(port), forKey: "kds.printer.port")
 
-        barTCP.configure(host: barPrinterIP, port: port)
-        bakeryTCP.configure(host: bakeryPrinterIP, port: port)
-        kitchenTCP.configure(host: kitchenPrinterIP, port: port)
+        // Configure TCP connections based on ACTIVE set
+        barTCP.configure(host: activeBarIP,     port: port)
+        bakeryTCP.configure(host: activeBakeryIP, port: port)
+        kitchenTCP.configure(host: activeKitchenIP, port: port)
 
         if mode == .persistent {
             barTCP.connectIfNeeded()
@@ -437,46 +564,40 @@ final class PrinterManager {
         }
     }
 
+    func updateMode(_ newMode: Mode) {
+        mode = newMode
+        barTCP.disconnect()
+        bakeryTCP.disconnect()
+        kitchenTCP.disconnect()
+    }
+
     // === Mixed Hebrew + Price helper (2-column table line) ===
     // Hebrew label on the RIGHT (RTL), price on the LEFT (LTR).
-    // The Hebrew label is reversed, the price is NOT reversed.
     func hebrewMixedLineData(label: String,
                              price: String,
-                             totalWidth: Int = 42,   // 42 or 48 for your printer
+                             totalWidth: Int = 42,
                              leftPadding: Int = 1) -> Data {
 
-        // Left margin so the text doesn't hug the edge
         let margin = String(repeating: " ", count: leftPadding)
-
-        // Price text (keep as-is, LTR)
         let priceText = price
-
-        // Start of the line: [margin][price][space]
         let leftPart = margin + priceText + " "
 
-        // 🔹 Visual Hebrew only for the label (RTL fix)
         let visualLabel = visualHebrew(label)
 
-        // Remaining width available for [spaces + label]
         let remainingWidth = max(0, totalWidth - leftPart.count)
-
-        // Spaces so that the label is flush to the right edge
         let labelLen = visualLabel.count
         let spacesCount = max(1, remainingWidth - labelLen)
         let spaces = String(repeating: " ", count: spacesCount)
 
-        // Final line: [margin][price][spaces][visual Hebrew label]
         let line = leftPart + spaces + visualLabel
 
-        // Encode as Windows-1255
         let win1255Enc = CFStringConvertEncodingToNSStringEncoding(
             CFStringEncoding(CFStringEncodings.windowsHebrew.rawValue)
         )
         if let d = line.data(using: String.Encoding(rawValue: win1255Enc)) {
-            return d + Data([0x0A]) // LF
+            return d + Data([0x0A])
         }
 
-        // Fallback: ISO-8859-8
         let iso8859_8_Enc = CFStringConvertEncodingToNSStringEncoding(
             CFStringEncoding(CFStringEncodings.isoLatinHebrew.rawValue)
         )
@@ -484,16 +605,11 @@ final class PrinterManager {
             return d + Data([0x0A])
         }
 
-        // Last fallback: UTF-8
         return Data((line + "\n").utf8)
     }
-    
-    func updateMode(_ newMode: Mode) {
-        mode = newMode
-        barTCP.disconnect()
-        bakeryTCP.disconnect()
-        kitchenTCP.disconnect()
-    }
+
+    // MARK: - Tax invoice
+
     func printTaxInvoice(
         invoiceNumber: Int,
         date: Date = Date(),
@@ -542,11 +658,9 @@ final class PrinterManager {
         Swift.print("════════════════════════════════════════════\n")
 
         // ---- LAYOUT CONSTANTS ----
-        let lineWidth = 42   // adjust if your printer is 48 chars wide
-
+        let lineWidth = 42
         func separatorLine() -> Data {
-            let dashes = String(repeating: "-", count: lineWidth)
-            return asciiLine(dashes)
+            asciiLine(String(repeating: "-", count: lineWidth))
         }
 
         // ---- BUILD ESC/POS JOB ----
@@ -554,8 +668,8 @@ final class PrinterManager {
         job += EscPos.initPrinter
         job += EscPos.feed(1)
 
-        // Hebrew codepage (Windows-1255)
-        job.append(contentsOf: [0x1B, 0x74, 33])  // ESC t 33
+        let fam = activeFamily
+        job += escSelectHebrew(fam.codePage)
 
         // ===== TITLE: חשבונית מס (BIG, CENTER) =====
         job += EscPos.align(1)
@@ -607,7 +721,6 @@ final class PrinterManager {
         job += EscPos.feed(1)
         job += EscPos.align(0)
 
-        // Subtotal
         job += EscPos.style(doubleHeight: false, doubleWidth: false, bold: false)
         job += hebrewMixedLineData(
             label: "סה\"כ לפני מע\"מ",
@@ -616,7 +729,6 @@ final class PrinterManager {
             leftPadding: 1
         )
 
-        // VAT row
         job += hebrewMixedLineData(
             label: "מע\"מ \(Int(vatRate * 100))%",
             price: money(vatAmount),
@@ -624,7 +736,6 @@ final class PrinterManager {
             leftPadding: 1
         )
 
-        // Grand total – same layout, just bold
         job += EscPos.style(doubleHeight: false, doubleWidth: false, bold: true)
         job += hebrewMixedLineData(
             label: "סה\"כ לתשלום",
@@ -633,21 +744,23 @@ final class PrinterManager {
             leftPadding: 1
         )
 
-        // RESET + bottom padding + cut
         job += EscPos.style(doubleHeight: false, doubleWidth: false, bold: false)
         job += EscPos.align(0)
         job += EscPos.feed(4)
         job += EscPos.cut
 
-        Swift.print("🧾 [PrinterManager] printTaxInvoice → bakery (one-shot) \(bakeryPrinterIP):\(port)")
-        OneShotPrinter.send(host: bakeryPrinterIP, port: port, data: job)
+        let host = activeBakeryIP
+        Swift.print("🧾 [PrinterManager] printTaxInvoice → bakery (one-shot) \(host):\(port)")
+        OneShotPrinter.send(host: host, port: port, data: job)
     }
+
+    // MARK: - Main order printing
 
     func print(order o: KDSAdminOrder, for station: StationFilter) {
         guard o.source == .kiosk else {
-               Swift.print("🛑 [PrinterManager] skipping print for non-kiosk source: \(o.source)")
-               return
-           }
+            Swift.print("🛑 [PrinterManager] skipping print for non-kiosk source: \(o.source)")
+            return
+        }
 
         let allLines = o.lines
 
@@ -664,10 +777,11 @@ final class PrinterManager {
 
             debugTicketPreview(order: o, lines: kitchenLines, stationLabel: "Kitchen")
 
-            let job = makeJob(order: o, lines: kitchenLines)
-            Swift.print("🧑‍🍳 KITCHEN: sending \(job.count) bytes to \(kitchenPrinterIP):\(port)")
-
-            send(job, via: kitchenTCP, host: kitchenPrinterIP)
+            let host = activeKitchenIP
+            let fam  = activeFamily
+            let job  = makeJob(order: o, lines: kitchenLines, rotated: false, family: fam)
+            Swift.print("🧑‍🍳 KITCHEN: sending \(job.count) bytes to \(host):\(port)")
+            send(job, via: kitchenTCP, host: host)
 
         case .bakery:
             Swift.print("🧁 BAKERY printing order #\(o.id), lines=",
@@ -680,10 +794,11 @@ final class PrinterManager {
 
             debugTicketPreview(order: o, lines: bakeryLines, stationLabel: "Bakery")
 
-            let job = makeJob(order: o, lines: bakeryLines)
-            Swift.print("🧁 BAKERY: sending \(job.count) bytes to \(bakeryPrinterIP):\(port)")
-
-            send(job, via: bakeryTCP, host: bakeryPrinterIP)
+            let host = activeBakeryIP
+            let fam  = activeFamily
+            let job  = makeJob(order: o, lines: bakeryLines, rotated: false, family: fam)
+            Swift.print("🧁 BAKERY: sending \(job.count) bytes to \(host):\(port)")
+            send(job, via: bakeryTCP, host: host)
 
         case .all:
             guard !allLines.isEmpty else {
@@ -691,11 +806,12 @@ final class PrinterManager {
                 return
             }
 
-            let job = makeJob(order: o, lines: allLines)
-            Swift.print("📦 ALL: sending \(job.count) bytes to bar \(barPrinterIP):\(port)")
+            let host = activeBarIP
+            let fam  = activeFamily
+            let job  = makeJob(order: o, lines: allLines, rotated: false, family: fam)
+            Swift.print("📦 ALL: sending \(job.count) bytes to bar \(host):\(port)")
             debugTicketPreview(order: o, lines: allLines, stationLabel: "All stations")
-
-            send(job, via: barTCP, host: barPrinterIP)
+            send(job, via: barTCP, host: host)
 
         case .bar:
             Swift.print("🖨 BAR station handling order #\(o.id)")
@@ -714,9 +830,11 @@ final class PrinterManager {
                                    lines: bakeryLines,
                                    stationLabel: "Bakery via BAR")
 
-                let bakeryJob = makeJob(order: o, lines: bakeryLines)
-                Swift.print("🧁 BAKERY (from BAR): sending \(bakeryJob.count) bytes to \(bakeryPrinterIP):\(port)")
-                send(bakeryJob, via: bakeryTCP, host: bakeryPrinterIP)
+                let host = activeBakeryIP
+                let fam  = activeFamily
+                let bakeryJob = makeJob(order: o, lines: bakeryLines, rotated: false, family: fam)
+                Swift.print("🧁 BAKERY (from BAR): sending \(bakeryJob.count) bytes to \(host):\(port)")
+                send(bakeryJob, via: bakeryTCP, host: host)
             }
 
             if !barLines.isEmpty {
@@ -724,22 +842,22 @@ final class PrinterManager {
                                    lines: barLines,
                                    stationLabel: "Bar")
 
-                let barJob = makeJob(order: o, lines: barLines)
-                Swift.print("🖨 BAR: sending \(barJob.count) bytes to \(barPrinterIP):\(port)")
-                send(barJob, via: barTCP, host: barPrinterIP)
+                let host = activeBarIP
+                let fam  = activeFamily
+                let barJob = makeJob(order: o, lines: barLines, rotated: false, family: fam)
+                Swift.print("🖨 BAR: sending \(barJob.count) bytes to \(host):\(port)")
+                send(barJob, via: barTCP, host: host)
             }
         }
     }
 
-    
-    
-    
-    
+    // MARK: - Split-all printing (rotated only for Ron)
+
     func printSplitAllStations(order o: KDSAdminOrder) {
         guard o.source == .kiosk else {
-                Swift.print("🛑 [PrinterManager] skipping split-all print for non-kiosk source: \(o.source)")
-                return
-            }
+            Swift.print("🛑 [PrinterManager] skipping split-all print for non-kiosk source: \(o.source)")
+            return
+        }
 
         let allLines = o.lines
 
@@ -752,16 +870,21 @@ final class PrinterManager {
             return
         }
 
+        let fam = activeFamily
+
         if !kitchenLines.isEmpty {
             debugTicketPreview(order: o,
                                lines: kitchenLines,
                                stationLabel: "Kitchen (split all)")
 
+            let host = activeKitchenIP
+            let rotated = fam.supportsRotation   // Ron → true, Tabit → false
             let job = makeJob(order: o,
                               lines: kitchenLines,
-                              rotated: true)     // 👈 here
-            Swift.print("🧑‍🍳 SPLIT-ALL KITCHEN: sending \(job.count) bytes to \(kitchenPrinterIP):\(port)")
-            send(job, via: kitchenTCP, host: kitchenPrinterIP)
+                              rotated: rotated,
+                              family: fam)
+            Swift.print("🧑‍🍳 SPLIT-ALL KITCHEN: sending \(job.count) bytes to \(host):\(port)")
+            send(job, via: kitchenTCP, host: host)
         }
 
         if !bakeryLines.isEmpty {
@@ -769,11 +892,14 @@ final class PrinterManager {
                                lines: bakeryLines,
                                stationLabel: "Bakery (split all)")
 
+            let host = activeBakeryIP
+            let rotated = fam.supportsRotation
             let job = makeJob(order: o,
                               lines: bakeryLines,
-                              rotated: true)     // 👈 here
-            Swift.print("🧁 SPLIT-ALL BAKERY: sending \(job.count) bytes to \(bakeryPrinterIP):\(port)")
-            send(job, via: bakeryTCP, host: bakeryPrinterIP)
+                              rotated: rotated,
+                              family: fam)
+            Swift.print("🧁 SPLIT-ALL BAKERY: sending \(job.count) bytes to \(host):\(port)")
+            send(job, via: bakeryTCP, host: host)
         }
 
         if !barLines.isEmpty {
@@ -781,16 +907,20 @@ final class PrinterManager {
                                lines: barLines,
                                stationLabel: "Bar (split all)")
 
+            let host = activeBarIP
+            let rotated = fam.supportsRotation
             let job = makeJob(order: o,
                               lines: barLines,
-                              rotated: true)     // 👈 here
-            Swift.print("🍹 SPLIT-ALL BAR: sending \(job.count) bytes to \(barPrinterIP):\(port)")
-            send(job, via: barTCP, host: barPrinterIP)
+                              rotated: rotated,
+                              family: fam)
+            Swift.print("🍹 SPLIT-ALL BAR: sending \(job.count) bytes to \(host):\(port)")
+            send(job, via: barTCP, host: host)
         }
     }
 
+    // MARK: - Classification helpers (unchanged)
+
     fileprivate func normalizeCategory(_ s: String) -> String {
-        // Strip emojis and symbols, keep letters/digits/spaces
         let allowed = CharacterSet.letters
             .union(.decimalDigits)
             .union(.whitespaces)
@@ -802,6 +932,7 @@ final class PrinterManager {
         .trimmingCharacters(in: .whitespacesAndNewlines)
         .lowercased()
     }
+
     fileprivate func classifyStation(for line: KDSOrderLine) -> Station {
         let rawCat  = (line.category ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let rawName = line.name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -809,25 +940,21 @@ final class PrinterManager {
         let cat  = normalizeCategory(rawCat)
         let name = rawName.lowercased()
 
-        // 🔔 Hard-coded notes by name
         if rawName.contains("הערה לוטרינה") { return .bakery }
         if rawName.contains("הערה למטבח")  { return .kitchen }
         if rawName.contains("הערה לבר")     { return .bar }
 
-        // Safety: any free-text mention of וטרינה → bakery
         if name.contains("וטרינה") {
             return .bakery
         }
 
-        // 🍽️ CATEGORY-BASED KITCHEN RULES
         let isSaladCategory =
-            cat.contains("סלט")   // ← ONLY category decides "salad"
+            cat.contains("סלט")
 
         let isSandwichToastCategory =
             cat.contains("כריכים") ||
             cat.contains("טוסט")
 
-        // 🧁 CATEGORY-BASED BAKERY
         let isBakeryCategory =
             cat.contains("מאפים מתוקים") ||
             cat.contains("מאפים מלוחים") ||
@@ -836,34 +963,32 @@ final class PrinterManager {
             cat.contains("מאפים")        ||
             cat.contains("מאפה")         ||
             cat.contains("עוגות")        ||
-            cat.contains("עוגה")
+            cat.contains("עוגה")         ||
+            cat.contains("סחוט")
 
-        // 🧑‍🍳 route to KITCHEN
         if isSaladCategory {
             return .kitchen
         }
 
-        // Sandwiches with toast in SAME category STILL go to kitchen only if category says so
         if isSandwichToastCategory && name.contains("טוסט") {
             return .kitchen
         }
 
-        // 🧁 route to BAKERY
         if isBakeryCategory {
             return .bakery
         }
 
-        // Non-toast inside כריכים category → bakery (same as before)
         if isSandwichToastCategory && !name.contains("טוסט") {
             return .bakery
         }
 
-        // 🍹 everything else → BAR
         return .bar
     }
 
+    // MARK: - Low-level send + debug
+
     private func send(_ job: Data, via printer: TCPPrinter, host: String) {
-        // Ignore `printer` and `mode`, just fire one-shot
+        // Still using one-shot behavior
         OneShotPrinter.send(host: host, port: port, data: job)
     }
 
@@ -895,7 +1020,7 @@ final class PrinterManager {
 
         Swift.print("────────────────────────────────────────────\n")
     }
-    
+
     private func removeKeyword(_ keyword: String, from mods: String?) -> String {
         guard var m = mods else { return "" }
 
@@ -904,15 +1029,17 @@ final class PrinterManager {
         return m.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    // MARK: - makeJob core (same logic, now family-aware for rotation)
+
     private func makeJob(order o: KDSAdminOrder,
                          lines: [KDSOrderLine],
-                         rotated: Bool = false) -> Data {
+                         rotated: Bool = false,
+                         family: PrinterFamily) -> Data {
 
-        // ====== STEP 1 – Build raw printable entries with size + cleaned modifiers ======
         struct PrintItem {
             var nameWithSize: String
             var qty: Int
-            var modsClean: String   // modifiers AFTER removing גודל / group titles
+            var modsClean: String
         }
 
         let caution: String = {
@@ -937,17 +1064,14 @@ final class PrinterManager {
             let modsLower = rawModifiers.lowercased()
 
             let nameWithSize: String = {
-                // 1️⃣ Espresso / Macchiato (“כפול” logic)
                 if cleanName == "אספרסו" || cleanName == "מקיאטו" {
                     if modsLower.contains("כפול") {
-                        // Title: אספרסו כפול / מקיאטו כפול
                         return "\(cleanName) כפול"
                     } else {
                         return cleanName
                     }
                 }
 
-                // 2️⃣ Hafuch / Americano (“size” logic)
                 if cleanName == "הפוך" || cleanName == "אמריקנו" {
                     if let size = sizeWord, !size.isEmpty {
                         return "\(cleanName) \(size)"
@@ -956,7 +1080,6 @@ final class PrinterManager {
                     }
                 }
 
-                // 3️⃣ Generic case (use size if exists)
                 if let size = sizeWord, !size.isEmpty {
                     return "\(cleanName) \(size)"
                 }
@@ -964,14 +1087,10 @@ final class PrinterManager {
                 return cleanName
             }()
 
-            // 👇 Build the modifiers string that will actually be printed
             let modsSource: String = {
                 if cleanName == "אספרסו" || cleanName == "מקיאטו" {
-                    // For espresso/macchiato we want to KEEP size (“גודל: ארוך”) and
-                    // other modifiers, but DROP “כפול” from the printed modifiers.
                     return removeKeyword("כפול", from: rawModifiers)
                 } else {
-                    // For all other drinks, keep using modsRest (size already handled)
                     return modsRest
                 }
             }()
@@ -987,7 +1106,6 @@ final class PrinterManager {
             )
         }
 
-        // ====== STEP 2 – Merge items that share the same nameWithSize AND have no modifiers ======
         var mergedItems: [PrintItem] = []
 
         for item in rawItems {
@@ -1000,20 +1118,19 @@ final class PrinterManager {
                     mergedItems.append(item)
                 }
             } else {
-                // items with modifiers never merge
                 mergedItems.append(item)
             }
         }
 
-        // ====== STEP 3 – Build ESC/POS TEXT data ======
         var job = Data()
         job += EscPos.initPrinter
 
-        // Hebrew codepage (Windows-1255)
-        job.append(contentsOf: [0x1B, 0x74, 33])  // ESC t 33
+        // Hebrew codepage per family
+        job += escSelectHebrew(family.codePage)
 
-        // 🔄 Optional 180° rotation
-        if rotated {
+        // Only actually apply ESC { if family supports rotation
+        let shouldRotate = rotated && family.supportsRotation
+        if shouldRotate {
             job += EscPos.rotate180On
         }
 
@@ -1027,37 +1144,34 @@ final class PrinterManager {
             rawService.contains("pickup") ||
             rawService.contains("collection")
 
-        // ===== TOP PADDING =====
-        job += EscPos.feed(2)
+        let modifierIndent = "  "
 
-        let modifierIndent = "   "   // visual left padding for modifiers
+        if shouldRotate {
+            // Rotated layout (same as you had, just gated by shouldRotate)
+            job += EscPos.align(1)
+            job += EscPos.style(doubleHeight: true,
+                                doubleWidth: true,
+                                bold: true)
+            job += asciiLine(orderIdText)
+            job += EscPos.feed(1)
 
-        if rotated {
-            
+            job += EscPos.align(1)
+            job += EscPos.style(doubleHeight: true,
+                                doubleWidth: true,
+                                bold: true)
+            job += hebrewLineData(caution)
+            job += EscPos.feed(1)
+
             if isTakeAwayService {
-                job += EscPos.feed(1)
                 job += EscPos.align(1)
                 job += EscPos.style(doubleHeight: true,
                                     doubleWidth: true,
                                     bold: true)
                 job += asciiLine("** TA **")
-                
                 job += EscPos.align(1)
+                job += EscPos.feed(1)
             }
-            // ============================================================
-            // 🔄 ROTATED VERSION
-            //
-            // ESC order (top→bottom on paper as it prints):
-            //   1. global separator
-            //   2. items (with inner separators)
-            //   3. meta (time, name, order, TA)
-            //
-            // After 180° flip in the printer, visual order (top→bottom) is:
-            //   meta → items → global separator
-            // so items are ABOVE the bottom line as desired.
-            // ============================================================
 
-            // ---- GLOBAL SEPARATOR (will become very bottom after rotation) ----
             job += EscPos.style(doubleHeight: false,
                                 doubleWidth: false,
                                 bold: false)
@@ -1065,12 +1179,8 @@ final class PrinterManager {
             job += asciiLine("------------------------------------------------")
             job += EscPos.feed(1)
 
-            // ---- ITEMS BLOCK ----
             for item in mergedItems.reversed() {
 
-                // ITEM: BIG, BOLD, RIGHT ALIGN
-               
-                // Modifiers
                 if !item.modsClean.isEmpty {
                     job += EscPos.feed(1)
 
@@ -1097,11 +1207,9 @@ final class PrinterManager {
                                     doubleWidth: true,
                                     bold: true)
 
-            
                 let title = "\(item.qty) \(item.nameWithSize)"
                 job += hebrewLineData(title)
 
-                // Per-item separator (between items)
                 job += EscPos.feed(1)
                 job += EscPos.style(doubleHeight: false,
                                     doubleWidth: false,
@@ -1111,33 +1219,11 @@ final class PrinterManager {
                 job += EscPos.feed(1)
             }
 
-            // ---- META BLOCK (will appear at top after rotation) ----
-           // job += EscPos.feed(2)
-
-            // Time/date – small, right
-          //  job += EscPos.align(2)
             job += EscPos.style(doubleHeight: false,
                                 doubleWidth: false,
                                 bold: false)
             job += asciiLine(orderMeta1)
 
-            // Customer name – big, center (Hebrew)
-            job += EscPos.feed(1)
-            job += EscPos.align(1)
-            job += EscPos.style(doubleHeight: true,
-                                doubleWidth: true,
-                                bold: true)
-            job += hebrewLineData(caution)
-
-            // Order ID – big, center
-            job += EscPos.feed(1)
-            job += EscPos.align(1)
-            job += EscPos.style(doubleHeight: true,
-                                doubleWidth: true,
-                                bold: true)
-            job += asciiLine(orderIdText)
-
-            // TA label (if needed)
             if isTakeAwayService {
                 job += EscPos.feed(1)
                 job += EscPos.align(1)
@@ -1148,11 +1234,7 @@ final class PrinterManager {
             }
 
         } else {
-            // ============================================================
-            // ORIGINAL (NON-ROTATED) LAYOUT – unchanged
-            // ============================================================
-
-            // ===== TOP TA BLOCK (only for TA) =====
+            // Non-rotated layout (your original path)
             if isTakeAwayService {
                 job += EscPos.align(1)
                 job += EscPos.style(doubleHeight: true,
@@ -1162,43 +1244,32 @@ final class PrinterManager {
                 job += EscPos.feed(1)
             }
 
-            // ===== ORDER ID – BIG CENTERED =====
             job += EscPos.align(1)
             job += EscPos.style(doubleHeight: true,
                                 doubleWidth: true,
                                 bold: true)
             job += asciiLine(orderIdText)
-
-            // SPACE
             job += EscPos.feed(1)
 
-            // ===== CUSTOMER NAME – BIG CENTERED (HEBREW) =====
             job += hebrewLineData(caution)
-
-            // MORE SPACE BEFORE DATE
             job += EscPos.feed(2)
 
-            // ===== SMALL RIGHT-ALIGNED DATE/TIME =====
             job += EscPos.align(2)
             job += EscPos.style(doubleHeight: true,
                                 doubleWidth: true,
                                 bold: false)
             job += asciiLine(orderMeta1)
 
-            // ===== SEPARATOR =====
             job += EscPos.style(doubleHeight: false,
                                 doubleWidth: false,
                                 bold: false)
             job += EscPos.align(0)
             job += asciiLine("------------------------------------------------")
 
-            // ===== SPACE BEFORE ITEMS =====
             job += EscPos.feed(1)
 
-            // ===== ITEMS – print in reverse to keep original visual order =====
             for item in mergedItems.reversed() {
 
-                // ITEM: BIG, BOLD, RIGHT ALIGN
                 job += EscPos.align(2)
                 job += EscPos.style(doubleHeight: true,
                                     doubleWidth: true,
@@ -1207,17 +1278,14 @@ final class PrinterManager {
                 let title = "\(item.qty) \(item.nameWithSize)"
                 job += hebrewLineData(title)
 
-                // small padding before modifiers
                 if !item.modsClean.isEmpty {
                     job += EscPos.feed(1)
 
-                    // MODIFIERS – doubleWidth only (big but flatter), right aligned
                     job += EscPos.align(2)
                     job += EscPos.style(doubleHeight: false,
                                         doubleWidth: true,
                                         bold: false)
 
-                    // break modifiers into lines if needed
                     let lines = item.modsClean
                         .split(whereSeparator: { $0 == "\n" || $0 == "\r\n" })
                         .map(String.init)
@@ -1231,7 +1299,6 @@ final class PrinterManager {
                     }
                 }
 
-                // SEPARATOR between items
                 job += EscPos.feed(1)
                 job += EscPos.style(doubleHeight: false,
                                     doubleWidth: false,
@@ -1241,14 +1308,6 @@ final class PrinterManager {
                 job += EscPos.feed(1)
             }
 
-            job += EscPos.feed(1)
-            job += EscPos.align(1)
-            job += EscPos.style(doubleHeight: true,
-                                doubleWidth: true,
-                                bold: true)
-            job += hebrewLineData(caution)
-
-            // ===== BOTTOM TA BLOCK (for TA) =====
             if isTakeAwayService {
                 job += EscPos.align(1)
                 job += EscPos.style(doubleHeight: true,
@@ -1258,15 +1317,13 @@ final class PrinterManager {
             }
         }
 
-        // RESET + bottom padding
         job += EscPos.style(doubleHeight: false,
                             doubleWidth: false,
                             bold: false)
         job += EscPos.align(0)
         job += EscPos.feed(6)
 
-        // 🔄 Turn rotation off if it was enabled
-        if rotated {
+        if shouldRotate {
             job += EscPos.rotate180Off
         }
 
@@ -1275,7 +1332,6 @@ final class PrinterManager {
         return job
     }
 }
-
 
 fileprivate func breakModifiers(_ mods: String) -> String {
     mods
@@ -1293,189 +1349,65 @@ fileprivate func breakModifiers(_ mods: String) -> String {
 }
 
 extension PrinterManager {
-    func printHardcodedZ() {
-
-            let z = ZReportData(
-                date: ISO8601DateFormatter().date(from: "2025-12-04T19:17:47Z")!,
-                grossTotal: 19505.00,
-                netTotal:   47213.37,
-                vatTotal:   8498.41,
-                cashTotal:  2568.00,
-                cardTotal:  15774.00,
-                paymentsTotal: 18828.75,
-                totalTips: 0.00,
-                cashTips:  0.00,
-                cardTips:  0.00
-            )
-
-            printZReport(z)
-        }
-    func printZReport(_ z: ZReportData) {
-        
-         var job = Data()
-         job += EscPos.initPrinter
-         job.append(contentsOf: [0x1B, 0x74, 33])  // Hebrew codepage
-
-         let money: (Double) -> String = { value in
-             String(format: "%.2f", value)
-         }
-        
-        
-
-         // --- Date formatting ---
-         let df = DateFormatter()
-         df.locale = Locale(identifier: "he_IL")
-         df.dateFormat = "dd/MM/yyyy HH:mm"
-         let dateText = df.string(from: z.date)
-
-         // ===== HEADER =====
-         job += EscPos.align(1)
-         job += asciiLine("Z REPORT")
-         job += EscPos.align(0)
-         job += makeDebugSeparator()
-
-         job += hebrewLineData("תאריך: \(dateText)")
-         job += makeDebugSeparator()
-         job += EscPos.feed(1)
-
-         // ===== SECTION: מכירות (Net / VAT / Gross) =====
-         job += makeBlackTitle("מכירות", totalWidth: 24)
-         job += EscPos.feed(1)
-         job += makeDebugSeparator()
-
-         // Use your 4-column row, but put everything in the last column (wide)
-         // ללא מע״מ
-         job += makeDebugRow(
-             ["", "", "", "ללא מע\"מ  \(money(z.netTotal))"],
-             align: ["R","R","R","R"]
-         )
-
-         // מע״מ 18%
-         job += makeDebugRow(
-             ["", "", "", "מע\"מ 18%  \(money(z.vatTotal))"],
-             align: ["R","R","R","R"]
-         )
-
-         // סה״כ כולל
-         job += makeDebugRow(
-             ["", "", "", "סה\"כ כולל \(money(z.grossTotal))"],
-             align: ["R","R","R","R"]
-         )
-
-         job += makeDebugSeparator()
-         job += EscPos.feed(1)
-
-         // ===== SECTION: תקבולים (payments) =====
-         job += makeBlackTitle("תקבולים", totalWidth: 24)
-         job += EscPos.feed(1)
-         job += makeDebugSeparator()
-
-         // מזומן
-         job += makeDebugRow(
-             ["", "", "", "מזומן      \(money(z.cashTotal))"],
-             align: ["R","R","R","R"]
-         )
-
-         // אשראי
-         job += makeDebugRow(
-             ["", "", "", "אשראי      \(money(z.cardTotal))"],
-             align: ["R","R","R","R"]
-         )
-
-         // סה״כ תקבולים
-         job += makeDebugRow(
-             ["", "", "", "סה\"כ תקבולים \(money(z.paymentsTotal))"],
-             align: ["R","R","R","R"]
-         )
-
-         job += makeDebugSeparator()
-         job += EscPos.feed(1)
-
-         // ===== SECTION: תשר (tips) =====
-         job += makeBlackTitle("תשר", totalWidth: 24)
-         job += EscPos.feed(1)
-         job += makeDebugSeparator()
-
-         // תשר מזומן
-         job += makeDebugRow(
-             ["", "", "", "תשר מזומן  \(money(z.cashTips))"],
-             align: ["R","R","R","R"]
-         )
-
-         // תשר אשראי
-         job += makeDebugRow(
-             ["", "", "", "תשר אשראי  \(money(z.cardTips))"],
-             align: ["R","R","R","R"]
-         )
-
-         // תשר סה״כ
-         job += makeDebugRow(
-             ["", "", "", "תשר סה\"כ  \(money(z.totalTips))"],
-             align: ["R","R","R","R"]
-         )
-
-         job += makeDebugSeparator()
-
-         // ===== FOOTER =====
-         job += EscPos.feed(3)
-         job += EscPos.cut
-
-         Swift.print("🧾 [PrinterManager] printZReport bytes:", job.count)
-         OneShotPrinter.send(host: kitchenPrinterIP, port: port, data: job)
-     }
-    // MARK: - Hebrew detection
     private func containsHebrew(_ s: String) -> Bool {
-        return s.range(of: "\\p{Hebrew}", options: .regularExpression) != nil
-    }
+           return s.range(of: "\\p{Hebrew}", options: .regularExpression) != nil
+       }
 
-    // MARK: - Hebrew shaping (simple rule: flip entire cell if Hebrew exists)
-    private func flipHebrewOnly(_ raw: String) -> String {
-        return containsHebrew(raw) ? visualHebrew(raw) : raw
-    }
+       // MARK: - Hebrew shaping (simple rule: flip entire cell if Hebrew exists)
+       private func flipHebrewOnly(_ raw: String) -> String {
+           return containsHebrew(raw) ? visualHebrew(raw) : raw
+       }
 
-    // MARK: - Black title bar
-    private func makeBlackTitle(_ text: String, totalWidth: Int = 24) -> Data {
-        let rendered = containsHebrew(text) ? visualHebrew(text) : text
-        var line = rendered
+       // MARK: - Black title bar
+       private func makeBlackTitle(_ text: String, totalWidth: Int = 24) -> Data {
+           let rendered = containsHebrew(text) ? visualHebrew(text) : text
+           var line = rendered
 
-        if line.count < totalWidth {
-            let pad = totalWidth - line.count
-            let left = pad / 2
-            let right = pad - left
-            line = String(repeating: " ", count: left) + line
-                 + String(repeating: " ", count: right)
-        } else if line.count > totalWidth {
-            line = String(line.prefix(totalWidth))
-        }
+           if line.count < totalWidth {
+               let pad = totalWidth - line.count
+               let left = pad / 2
+               let right = pad - left
+               line = String(repeating: " ", count: left) + line
+                    + String(repeating: " ", count: right)
+           } else if line.count > totalWidth {
+               line = String(line.prefix(totalWidth))
+           }
 
-        var d = Data()
+           var d = Data()
 
-        // Double size font
-        d.append(contentsOf: [0x1D, 0x21, 0x11])
+           // Double size font
+           d.append(contentsOf: [0x1D, 0x21, 0x11])
 
-        // Reverse ON (white text on black)
-        d.append(contentsOf: [0x1D, 0x42, 0x01])
+           // Reverse ON (white text on black)
+           d.append(contentsOf: [0x1D, 0x42, 0x01])
 
-        // Print Hebrew (Windows-1255)
-        let enc = CFStringConvertEncodingToNSStringEncoding(
-            CFStringEncoding(CFStringEncodings.windowsHebrew.rawValue)
-        )
-        d += (line as NSString).data(using: enc) ?? Data()
-        d.append(0x0A)
+           // Print Hebrew (Windows-1255)
+           let enc = CFStringConvertEncodingToNSStringEncoding(
+               CFStringEncoding(CFStringEncodings.windowsHebrew.rawValue)
+           )
+           d += (line as NSString).data(using: enc) ?? Data()
+           d.append(0x0A)
 
-        // Reverse OFF
-        d.append(contentsOf: [0x1D, 0x42, 0x00])
+           // Reverse OFF
+           d.append(contentsOf: [0x1D, 0x42, 0x00])
 
-        // Reset font
-        d.append(contentsOf: [0x1D, 0x21, 0x00])
+           // Reset font
+           d.append(contentsOf: [0x1D, 0x21, 0x00])
 
-        return d
-    }
+           return d
+       }
 
+       // MARK: - Table row
     // MARK: - Table row
-    private func makeDebugRow(_ columns: [String], align: [Character]) -> Data {
-        let colWidths = [9, 9, 9, 12]   // columns RTL-reversed
-        let totalCols = 4
+    // MARK: - Table row (supports custom column widths)
+    private func makeDebugRow(
+        _ columns: [String],
+        align: [Character],
+        colWidths: [Int]? = nil
+    ) -> Data {
+        // Default widths (used if no colWidths passed)
+        let widths = colWidths ?? [9, 9, 9, 12]
+        let totalCols = widths.count
         var parts: [String] = []
 
         for i in 0..<totalCols {
@@ -1483,7 +1415,7 @@ extension PrinterManager {
             let alignType = i < align.count   ? align[i]   : "L"
 
             var s = flipHebrewOnly(raw)
-            let colWidth = colWidths[i]
+            let colWidth = widths[i]
 
             if s.count > colWidth {
                 s = String(s.prefix(colWidth))
@@ -1523,41 +1455,533 @@ extension PrinterManager {
         }
     }
 
-    // MARK: - Separator
-    private func makeDebugSeparator() -> Data {
-        let totalChars = 48 // matches 9+9+9+12 + 3 separators*3
+    // MARK: - Separator (supports custom column widths)
+    private func makeDebugSeparator(colWidths: [Int]? = nil) -> Data {
+        let widths = colWidths ?? [9, 9, 9, 12]
+        // each separator is " | " (3 chars)
+        let totalChars = widths.reduce(0, +) + (widths.count - 1) * 3
         let line = String(repeating: "-", count: totalChars)
         return asciiLine(line)
     }
+    struct SalesReportData {
+        // MARK: - מכירות (Sales)
+        var ppaRestaurant: Int          // 26
+        var dinersRestaurant: Int       // 14
+        var totalRestaurantIncVat: Double  // 375.0
+        var ppaRestaurantValue: Double  // 7.713  (the number shown on "מסעדה  7.713")
 
-    // MARK: - MAIN DEMO
-    func printSalesDebugDemo() {
-        Swift.print("=== DEBUG PRINT (מכירות + תקבולים) ===")
+        var ppaTA: Int                  // 22
+        var dinersTA: Int               // 8
+        var totalTAIncVat: Double       // 317.2
+
+        var totalSalesIncVat: Double    // 692.2
+        var tipsTotal: Double           // 7.713
+        var grandTotal: Double          // 699.9
+
+        // MARK: - תקבולים (Collections)
+        var cashAmount: Double          // 250.0
+        var cashCount: Int              // 3
+
+        var cardAmount: Double          // 329.9
+        var cardCount: Int              // 5
+
+        var collectionsTotalAmount: Double  // 579.9
+        var collectionsTotalCount: Int      // 8
+
+        // MARK: - דוח מזומן (Cash report)
+        var closedDrawersAmount: Double     // הד. סגורות
+        var openDrawersAmount: Double       // הד. פתוחות
+        var depositWithdrawAmount: Double   // הפקדה/משיכה
+
+        var drawerTotalAmount: Double       // סהכ במגירת
+        var mainDrawerAmount: Double        // מגירה ראשית
+        var hostStationDrawerAmount: Double // עמדת מארחת
+
+        // MARK: - תשר (Tips)
+        var tipBaseTotal: Double            // row "תשר"
+        var tipRestaurant: Double           // שולחנות מסעדה
+        var tipBarTakeaway: Double          // בר ולקחת
+
+        var extraTipTotal: Double           // עודף טיפ
+        var extraTipRestaurant: Double      // מסעדה
+        var extraTipBar: Double             // בר
+
+        // MARK: - חריגים (Exceptions)
+        var ordersOTHAmount: Double
+        var ordersOTHCount: Int
+
+        var itemsOTHAmount: Double
+        var itemsOTHCount: Int
+
+        var canceledItemsAmount: Double
+        var canceledItemsCount: Int
+
+        var refundedItemsAmount: Double
+        var refundedItemsCount: Int
+
+        var discountsAmount: Double
+        var discountsCount: Int
+
+        var discountsRefundAmount: Double
+        var discountsRefundCount: Int
+
+        // You can add more fields later if the layout grows
+    }
+
+    func printSalesDebugReport(_ data: SalesReportData) {
+        Swift.print("=== DEBUG PRINT (מכירות + תקבולים + דוח מזומן + תשר + חריגים) ===")
 
         var job = Data()
         job += EscPos.initPrinter
-        job.append(contentsOf: [0x1B, 0x74, 33])
+        job += escSelectHebrew(.tabit)  // Hebrew code page
 
-        // ---------- TITLE ----------
+        // ---------- DATE/TIME ----------
+        let now = Date()
+
+        let timeFormatter = DateFormatter()
+        timeFormatter.locale = Locale(identifier: "he_IL")
+        timeFormatter.dateFormat = "HH:mm:ss"
+
+        let dateFormatter = DateFormatter()
+        dateFormatter.locale = Locale(identifier: "he_IL")
+        dateFormatter.dateFormat = "dd/MM/yyyy"
+
+        let timeText = timeFormatter.string(from: now)
+        let dateText = dateFormatter.string(from: now)
+
+        // ---------- TOP HEADER ----------
+
+        // BIG + BOLD "Beit Ha'am"
+        job.append(contentsOf: [0x1B, 0x21, 0x10])   // double height
+        job.append(contentsOf: [0x1B, 0x45, 0x01])   // bold ON
+        job += makeDebugRow(["Beit Ha'am"], align: ["C"], colWidths: [48])
+        job.append(contentsOf: [0x1B, 0x45, 0x00])   // bold OFF
+        job.append(contentsOf: [0x1B, 0x21, 0x00])   // reset font
+
+        job += makeDebugRow(
+            ["בית העם קונדיטוריה ויין בע\"מ"],
+            align: ["C"],
+            colWidths: [48]
+        )
+
+        job += makeDebugRow(
+            ["ח.פ / ע.מ. 516784139"],
+            align: ["C"],
+            colWidths: [48]
+        )
+
+        // Blank line
+        job += EscPos.feed(1)
+
+        // BIG + BOLD "דוח תנועות פעיל X"
+        job.append(contentsOf: [0x1B, 0x21, 0x10])   // double height
+        job.append(contentsOf: [0x1B, 0x45, 0x01])   // bold ON
+        job += makeDebugRow(["דוח תנועות פעיל Z"], align: ["C"], colWidths: [48])
+        job.append(contentsOf: [0x1B, 0x45, 0x00])   // bold OFF
+        job.append(contentsOf: [0x1B, 0x21, 0x00])   // reset
+
+        // BIG + BOLD date (dd/MM/yyyy)
+        job.append(contentsOf: [0x1B, 0x21, 0x10])   // double height
+        job.append(contentsOf: [0x1B, 0x45, 0x01])   // bold ON
+        job += makeDebugRow([dateText], align: ["C"], colWidths: [48])
+        job.append(contentsOf: [0x1B, 0x45, 0x00])   // bold OFF
+        job.append(contentsOf: [0x1B, 0x21, 0x00])   // reset font
+
+        // Blank line
+        job += EscPos.feed(1)
+
+       
+        let headerText = "\(timeText) \(dateText)"
+        job += makeDebugRow(
+            [headerText],
+            align: ["C"],
+            colWidths: [48]
+        )
+
+        job += makeDebugSeparator(colWidths: [48])
+
+        // ---------- מכירות ----------
+        let salesWidths = [5, 5, 8, 21]
+
         job += makeBlackTitle("מכירות", totalWidth: 24)
+        job += EscPos.feed(1)
+        job += makeDebugSeparator(colWidths: salesWidths)
+
+        job += makeDebugRow(
+            ["PPA", "סועד", "כולל מעמ", "ללא מעמ"],
+            align: ["C","C","C","C"],
+            colWidths: salesWidths
+        )
+        job += makeDebugSeparator(colWidths: salesWidths)
+
+        // Row: מסעדה
+        job += makeDebugRow(
+            [
+                "\(data.ppaRestaurant)",
+                String(format: "%02d", data.dinersRestaurant),
+                String(format: "%.1f", data.totalRestaurantIncVat),
+                "מסעדה  " + String(format: "%.3f", data.ppaRestaurantValue)
+            ],
+            align: ["R","R","R","R"],
+            colWidths: salesWidths
+        )
+
+        // Row: TA
+        job += makeDebugRow(
+            [
+                "\(data.ppaTA)",
+                String(format: "%02d", data.dinersTA),
+                String(format: "%.1f", data.totalTAIncVat),
+                String(format: "%.1f", data.totalTAIncVat) + "     TA"
+            ],
+            align: ["R","R","R","R"],
+            colWidths: salesWidths
+        )
+
+        // Row: מכירות total inc VAT
+        job += makeDebugRow(
+            [
+                "",
+                "",
+                String(format: "%.1f", data.totalSalesIncVat),
+                "מכירות " + String(format: "%.3f", data.ppaRestaurantValue)
+            ],
+            align: ["R","R","R","R"],
+            colWidths: salesWidths
+        )
+
+        // Row: תשר total
+        job += makeDebugRow(
+            [
+                "",
+                "",
+                String(format: "%.3f", data.tipsTotal),
+                "תשר    " + String(format: "%.3f", data.tipsTotal)
+            ],
+            align: ["R","R","R","R"],
+            colWidths: salesWidths
+        )
+
+        // Row: Grand total
+        job += makeDebugRow(
+            [
+                "",
+                "",
+                String(format: "%.1f", data.grandTotal),
+                "סהכ    " + String(format: "%.3f", data.tipsTotal)
+            ],
+            align: ["R","R","R","R"],
+            colWidths: salesWidths
+        )
+
+        job += makeDebugSeparator(colWidths: salesWidths)
+
+        // ---------- תקבולים ----------
+        job += makeBlackTitle("תקבולים", totalWidth: 24)
         job += EscPos.feed(1)
         job += makeDebugSeparator()
 
-        // ---------- HEADER ----------
+        job += makeDebugRow(["סכום","תשלום","סוג","כמות"], align: ["C","C","C","C"])
+        job += makeDebugSeparator()
+
+        // Cash
         job += makeDebugRow(
-            ["PPA", "סועד", "כולל מעמ", "ללא מעמ"],
-            align: ["C","C","C","C"]
+            [
+                String(format: "%.2f", data.cashAmount),
+                "מזומן",
+                "-",
+                "\(data.cashCount)"
+            ],
+            align: ["R","C","C","R"]
+        )
+
+        job += makeDebugRow(
+            [
+                String(format: "%.2f", data.cardAmount),
+                "אשראי",
+                "-",
+                "\(data.cardCount)"
+            ],
+            align: ["R","C","C","R"]
+        )
+
+        job += makeDebugSeparator()
+
+        job += makeDebugRow(
+            [
+                String(format: "%.2f", data.collectionsTotalAmount),
+                "סה\"כ",
+                "",
+                "\(data.collectionsTotalCount)"
+            ],
+            align: ["R","C","C","R"]
         )
         job += makeDebugSeparator()
 
-        // ---------- ROWS ----------
-        job += makeDebugRow(["26","14","375.0","מסעדה  7.713"], align: ["R","R","R","R"])
-        job += makeDebugRow(["22","08","317.2","317.2     TA"], align: ["R","R","R","R"])
-        job += makeDebugRow(["","","692.2","מכירות 7.713"], align: ["R","R","R","R"])
-        job += makeDebugRow(["","","7.713","תשר    7.713"], align: ["R","R","R","R"])
-        job += makeDebugRow(["","","699.9","סהכ    7.713"], align: ["R","R","R","R"])
+        // ---------- דוח מזומן ----------
+        let cashReportWidths = [8, 14, 17]
 
-        job += makeDebugSeparator()
+        job += makeBlackTitle("דוח מזומן", totalWidth: 24)
+        job += EscPos.feed(1)
+        job += makeDebugSeparator(colWidths: cashReportWidths)
+
+        job += makeDebugRow(
+            ["סכום", "סוג מגירה", "סוג פעולה"],
+            align: ["C","C","C"],
+            colWidths: cashReportWidths
+        )
+        job += makeDebugSeparator(colWidths: cashReportWidths)
+
+        // Group 1
+        job += makeDebugRow(
+            [String(format: "%.1f", data.closedDrawersAmount), "", "הד. סגורות"],
+            align: ["R","C","R"],
+            colWidths: cashReportWidths
+        )
+        job += makeDebugRow(
+            [String(format: "%.1f", data.openDrawersAmount), "", "הד. פתוחות"],
+            align: ["R","C","R"],
+            colWidths: cashReportWidths
+        )
+        job += makeDebugRow(
+            [String(format: "%.1f", data.depositWithdrawAmount), "", "הפקדה/משיכה"],
+            align: ["R","C","R"],
+            colWidths: cashReportWidths
+        )
+
+        job += makeDebugSeparator(colWidths: cashReportWidths)
+
+        // Group 2
+        job += makeDebugRow(
+            [String(format: "%.1f", data.drawerTotalAmount), "", "סהכ במגירת"],
+            align: ["R","C","R"],
+            colWidths: cashReportWidths
+        )
+        job += makeDebugRow(
+            [String(format: "%.1f", data.mainDrawerAmount), "מגירה ראשית", ""],
+            align: ["R","R","R"],
+            colWidths: cashReportWidths
+        )
+        job += makeDebugRow(
+            [String(format: "%.1f", data.hostStationDrawerAmount), "עמדת מארחת", ""],
+            align: ["R","R","R"],
+            colWidths: cashReportWidths
+        )
+
+        job += makeDebugSeparator(colWidths: cashReportWidths)
+
+        // ---------- תשר ----------
+        let tipsWidths = cashReportWidths  // [8, 14, 17]
+
+        job += makeBlackTitle("תשר", totalWidth: 24)
+        job += EscPos.feed(1)
+        job += makeDebugSeparator(colWidths: tipsWidths)
+
+        // Group 1 – base tips
+        job += makeDebugRow(
+            [String(format: "%.1f", data.tipBaseTotal), "", "תשר"],
+            align: ["R","C","R"],
+            colWidths: tipsWidths
+        )
+        job += makeDebugRow(
+            [String(format: "%.1f", data.tipRestaurant), "שולחנות מסעדה", ""],
+            align: ["R","R","R"],
+            colWidths: tipsWidths
+        )
+        job += makeDebugRow(
+            [String(format: "%.1f", data.tipBarTakeaway), "בר ולקחת", ""],
+            align: ["R","R","R"],
+            colWidths: tipsWidths
+        )
+
+        job += makeDebugSeparator(colWidths: tipsWidths)
+
+        // Group 2 – extra tips
+        job += makeDebugRow(
+            [String(format: "%.1f", data.extraTipTotal), "", "עודף טיפ"],
+            align: ["R","C","R"],
+            colWidths: tipsWidths
+        )
+        job += makeDebugRow(
+            [String(format: "%.1f", data.extraTipRestaurant), "מסעדה", ""],
+            align: ["R","R","R"],
+            colWidths: tipsWidths
+        )
+        job += makeDebugRow(
+            [String(format: "%.1f", data.extraTipBar), "בר", ""],
+            align: ["R","R","R"],
+            colWidths: tipsWidths
+        )
+
+        job += makeDebugSeparator(colWidths: tipsWidths)
+
+        // ---------- חריגים ----------
+        let exceptionsWidths = tipsWidths  // [8, 14, 17]
+
+        job += makeBlackTitle("חריגים", totalWidth: 24)
+        job += EscPos.feed(1)
+        job += makeDebugSeparator(colWidths: exceptionsWidths)
+
+        job += makeDebugRow(
+            [String(format: "%.1f", data.ordersOTHAmount),
+             "\(data.ordersOTHCount)",
+             "הזמנות OTH"],
+            align: ["R","R","R"],
+            colWidths: exceptionsWidths
+        )
+
+        job += makeDebugRow(
+            [String(format: "%.1f", data.itemsOTHAmount),
+             "\(data.itemsOTHCount)",
+             "מנות OTH"],
+            align: ["R","R","R"],
+            colWidths: exceptionsWidths
+        )
+
+        job += makeDebugRow(
+            [String(format: "%.1f", data.canceledItemsAmount),
+             "\(data.canceledItemsCount)",
+             "ביטולי מנות"],
+            align: ["R","R","R"],
+            colWidths: exceptionsWidths
+        )
+
+        job += makeDebugRow(
+            [String(format: "%.1f", data.refundedItemsAmount),
+             "\(data.refundedItemsCount)",
+             "החזרי מנות"],
+            align: ["R","R","R"],
+            colWidths: exceptionsWidths
+        )
+
+        job += makeDebugRow(
+            [String(format: "%.1f", data.discountsAmount),
+             "\(data.discountsCount)",
+             "הנחות"],
+            align: ["R","R","R"],
+            colWidths: exceptionsWidths
+        )
+
+        job += makeDebugRow(
+            [String(format: "%.1f", data.discountsRefundAmount),
+             "\(data.discountsRefundCount)",
+             "החזר הנחות"],
+            align: ["R","R","R"],
+            colWidths: exceptionsWidths
+        )
+
+        job += makeDebugSeparator(colWidths: exceptionsWidths)
+
+        // ---------- END ----------
+        job += EscPos.feed(3)
+        job += EscPos.cut
+
+        Swift.print("SENDING", job.count, "bytes to printer")
+        OneShotPrinter.send(host: activeKitchenIP, port: port, data: job)
+    }
+    // MARK: - MAIN DEMO
+    func printSalesDebugDemo() {
+        Swift.print("=== DEBUG PRINT (מכירות + תקבולים + דוח מזומן + תשר + חריגים) ===")
+
+        var job = Data()
+        job += EscPos.initPrinter
+        job += escSelectHebrew(.tabit)  // Hebrew code page
+
+        // ---------- DATE/TIME PREP ----------
+        let now = Date()
+
+        let timeFormatter = DateFormatter()
+        timeFormatter.locale = Locale(identifier: "he_IL")
+        timeFormatter.dateFormat = "ss:mm:HH"
+
+        let dateFormatter = DateFormatter()
+        dateFormatter.locale = Locale(identifier: "he_IL")
+        dateFormatter.dateFormat = "yyyy/MM/dd"
+
+        let timeText = timeFormatter.string(from: now)
+        let dateText = dateFormatter.string(from: now)
+
+        // ---------- TOP HEADER ----------
+        // Beit Ha'am (Latin)
+        job.append(contentsOf: [0x1B, 0x21, 0x10])   // double-height
+        job.append(contentsOf: [0x1B, 0x45, 0x01])   // bold ON
+        job += makeDebugRow(["Beit Ha'am"], align: ["C"], colWidths: [48])
+        job.append(contentsOf: [0x1B, 0x45, 0x00])   // bold OFF
+        job.append(contentsOf: [0x1B, 0x21, 0x00])   // reset font
+        job += EscPos.feed(1)
+        // בית העם קונדיטוריה ויין בע"מ
+        job += makeDebugRow(
+            ["בית העם קונדיטוריה ויין בע\"מ"],
+            align: ["C"],
+            colWidths: [48]
+        )
+
+        // ח.פ / ע.מ. 516784139
+        job += makeDebugRow(
+            ["ח.פ / ע.מ. 516784139"],
+            align: ["C"],
+            colWidths: [48]
+        )
+
+        // Blank line
+        job += EscPos.feed(1)
+
+        // דוח תנועות פעיל X
+        // BIG + BOLD "דוח תנועות פעיל X"
+        job.append(contentsOf: [0x1B, 0x21, 0x10])   // double height
+        job.append(contentsOf: [0x1B, 0x45, 0x01])   // bold ON
+        job += makeDebugRow(["דוח תנועות פעיל X"], align: ["C"], colWidths: [48])
+        job.append(contentsOf: [0x1B, 0x45, 0x00])   // bold OFF
+        job.append(contentsOf: [0x1B, 0x21, 0x00])   // reset font
+        job += EscPos.feed(1)
+        // Date line: 05/12/2025 style
+        // BIG + BOLD date (dd/MM/yyyy)
+        job.append(contentsOf: [0x1B, 0x21, 0x10])   // double height
+        job.append(contentsOf: [0x1B, 0x45, 0x01])   // bold ON
+        job += makeDebugRow([dateText], align: ["C"], colWidths: [48])
+        job.append(contentsOf: [0x1B, 0x45, 0x00])   // bold OFF
+        job.append(contentsOf: [0x1B, 0x21, 0x00])   // reset font
+
+        // Blank line
+        job += EscPos.feed(1)
+
+        // Line: HH:mm:ss dd/MM/yyyy הופק בתאריך
+        let headerText = "הופק בתאריך \(dateText) \(timeText)"
+        job += makeDebugRow(
+            [headerText],
+            align: ["C"],
+            colWidths: [48]
+        )
+
+        // Separator under header block
+        job += makeDebugSeparator(colWidths: [48])
+
+        // ---------- SALES (מכירות) ----------
+        //  col1 = 5 (PPA)
+        //  col2 = 5 (סועד)
+        //  col3 = 8 (כולל מע״מ)
+        //  col4 = 21 (ללא מע״מ)
+        //  5 + 5 + 8 + 21 = 39   -> + 9 (" | " * 3) = 48 chars
+        let salesWidths = [5, 5, 8, 21]
+
+        job += makeBlackTitle("מכירות", totalWidth: 24)
+        job += EscPos.feed(1)
+        job += makeDebugSeparator(colWidths: salesWidths)
+
+        job += makeDebugRow(
+            ["PPA", "סועד", "כולל מעמ", "ללא מעמ"],
+            align: ["C","C","C","C"],
+            colWidths: salesWidths
+        )
+        job += makeDebugSeparator(colWidths: salesWidths)
+
+        job += makeDebugRow(["26","14","375.0","מסעדה  7.713"], align: ["R","R","R","R"], colWidths: salesWidths)
+        job += makeDebugRow(["22","08","317.2","317.2     TA"], align: ["R","R","R","R"], colWidths: salesWidths)
+        job += makeDebugRow(["","","692.2","מכירות 7.713"],       align: ["R","R","R","R"], colWidths: salesWidths)
+        job += makeDebugRow(["","","7.713","תשר    7.713"],       align: ["R","R","R","R"], colWidths: salesWidths)
+        job += makeDebugRow(["","","699.9","סהכ    7.713"],       align: ["R","R","R","R"], colWidths: salesWidths)
+
+        job += makeDebugSeparator(colWidths: salesWidths)
 
         // ---------- תקבולים ----------
         job += makeBlackTitle("תקבולים", totalWidth: 24)
@@ -1574,12 +1998,87 @@ extension PrinterManager {
         job += makeDebugRow(["579.9","סהכ","","8"], align: ["R","C","C","R"])
         job += makeDebugSeparator()
 
+        // ---------- דוח מזומן ----------
+        // 3 columns (RTL visual order): סכום | סוג מגירה | סוג פעולה
+        // widths: סכום 8 | סוג מגירה 14 | סוג פעולה 17
+        let cashReportWidths = [8, 14, 17]
+
+        job += makeBlackTitle("דוח מזומן", totalWidth: 24)
+        job += EscPos.feed(1)
+        job += makeDebugSeparator(colWidths: cashReportWidths)
+
+        // Header
+        job += makeDebugRow(
+            ["סכום", "סוג מגירה", "סוג פעולה"],
+            align: ["C","C","C"],
+            colWidths: cashReportWidths
+        )
+        job += makeDebugSeparator(colWidths: cashReportWidths)
+
+        // --- Group 1 ---
+        job += makeDebugRow(["0", "", "הד. סגורות"],   align: ["R","C","R"], colWidths: cashReportWidths)
+        job += makeDebugRow(["0", "", "הד. פתוחות"],   align: ["R","C","R"], colWidths: cashReportWidths)
+        job += makeDebugRow(["0", "", "הפקדה/משיכה"], align: ["R","C","R"], colWidths: cashReportWidths)
+
+        job += makeDebugSeparator(colWidths: cashReportWidths)
+
+        // --- Group 2 ---
+        job += makeDebugRow(["0", "", "סהכ במגירת"],      align: ["R","C","R"], colWidths: cashReportWidths)
+        job += makeDebugRow(["0", "מגירה ראשית", ""],     align: ["R","R","R"], colWidths: cashReportWidths)
+        job += makeDebugRow(["0", "עמדת מארחת", ""],      align: ["R","R","R"], colWidths: cashReportWidths)
+
+        job += makeDebugSeparator(colWidths: cashReportWidths)
+
+        // ---------- תשר ----------
+        let tipsWidths = cashReportWidths  // [8, 14, 17]
+
+        job += makeBlackTitle("תשר", totalWidth: 24)
+        job += EscPos.feed(1)
+        job += makeDebugSeparator(colWidths: tipsWidths)
+
+        // Group 1: תשר בסיסי
+        job += makeDebugRow(["0", "", "תשר"],                align: ["R","C","R"], colWidths: tipsWidths)
+        job += makeDebugRow(["0", "שולחנות מסעדה", ""],     align: ["R","R","R"], colWidths: tipsWidths)
+        job += makeDebugRow(["0", "בר ולקחת", ""],          align: ["R","R","R"], colWidths: tipsWidths)
+
+        job += makeDebugSeparator(colWidths: tipsWidths)
+
+        // Group 2: עודף טיפ
+        job += makeDebugRow(["0", "", "עודף טיפ"], align: ["R","C","R"], colWidths: tipsWidths)
+        job += makeDebugRow(["0", "מסעדה", ""],    align: ["R","R","R"], colWidths: tipsWidths)
+        job += makeDebugRow(["0", "בר", ""],       align: ["R","R","R"], colWidths: tipsWidths)
+
+        job += makeDebugSeparator(colWidths: tipsWidths)
+
+        // ---------- חריגים ----------
+        let exceptionsWidths = tipsWidths  // [8, 14, 17]
+
+        job += makeBlackTitle("חריגים", totalWidth: 24)
+        job += EscPos.feed(1)
+        job += makeDebugSeparator(colWidths: exceptionsWidths)
+
+        job += makeDebugRow(["0", "0", "הזמנות OTH"],  align: ["R","R","R"], colWidths: exceptionsWidths)
+        job += makeDebugRow(["0", "0", "מנות OTH"],    align: ["R","R","R"], colWidths: exceptionsWidths)
+        job += makeDebugRow(["0", "0", "ביטולי מנות"], align: ["R","R","R"], colWidths: exceptionsWidths)
+        job += makeDebugRow(["0", "0", "החזרי מנות"],  align: ["R","R","R"], colWidths: exceptionsWidths)
+        job += makeDebugRow(["0", "0", "הנחות"],       align: ["R","R","R"], colWidths: exceptionsWidths)
+        job += makeDebugRow(["0", "0", "החזר הנחות"],  align: ["R","R","R"], colWidths: exceptionsWidths)
+
+        job += makeDebugSeparator(colWidths: exceptionsWidths)
+
+        // ---------- END ----------
         job += EscPos.feed(3)
         job += EscPos.cut
 
         Swift.print("SENDING", job.count, "bytes to printer")
-        OneShotPrinter.send(host: bakeryPrinterIP, port: port, data: job)
+        OneShotPrinter.send(host: activeKitchenIP, port: port, data: job)
     }
+    
+    
+    
+    
+    
+    
     
     func printCashPointSplit(
         orderNumber: Int,

@@ -107,11 +107,17 @@ private struct AutoOrderDTO: Decodable {
     let lines: [AutoLineDTO]
     let status: Int?
 
+    // 👇 NEW
+    let service: String?
+
     enum CodingKeys: String, CodingKey {
         case id, source, bucket, stage, placedAt, scheduledFor,
              customerName, customerDisplayName, totalGBP, itemSummary,
              isDelivery, shortCode, lines, status
         case Status = "Status"
+        // 👇 support both cases, like in BonesOrderDTO
+        case service
+        case Service = "Service"
     }
 
     init(from decoder: Decoder) throws {
@@ -143,6 +149,10 @@ private struct AutoOrderDTO: Decodable {
         } else {
             status = nil
         }
+
+        // 👇 NEW: read service if present, safe if missing
+        service = (try? c.decodeIfPresent(String.self, forKey: .service))
+               ?? (try? c.decodeIfPresent(String.self, forKey: .Service))
     }
 }
 
@@ -189,6 +199,10 @@ final class OrdersAutoPrinter {
         let total: Double
         let placedAt: Date
         let items: [SimpleLine]
+
+        // 👇 NEW
+        let service: String?
+        let isDelivery: Bool
     }
 
     // MARK: - Public API
@@ -234,7 +248,7 @@ final class OrdersAutoPrinter {
 
         // 🔒 Guard per tick: only work when LAN IP is in the allowed prefix
         if let ip = currentLANIPv4() {
-            if !ip.hasPrefix("192.168.68.") {   // <-- home test; in prod use "10.100.10."
+            if !ip.hasPrefix("10.100.10.") {   // <-- home test; in prod use "10.100.10."
                 print("ℹ️ [OrdersAutoPrinter] pollOnce: LAN IP \(ip) not allowed prefix → skipping this poll")
                 return
             }
@@ -336,7 +350,7 @@ final class OrdersAutoPrinter {
                     quantity: max(l.qty, 1),
                     unitPrice: perUnit,
                     category: l.category,
-                    modifiers: l.modifiers         // 👈 pass through
+                    modifiers: l.modifiers
                 )
             }
 
@@ -347,7 +361,9 @@ final class OrdersAutoPrinter {
                 subtitle: dto.itemSummary,
                 total: dto.totalGBP,
                 placedAt: dto.placedAt,
-                items: items
+                items: items,
+                service: dto.service,        // 👈 NEW
+                isDelivery: dto.isDelivery   // 👈 NEW
             )
         }
 
@@ -448,7 +464,31 @@ final class OrdersAutoPrinter {
     }
 
     private func diningMode(for order: SimpleOrder) -> DiningMode {
-        if order.subtitle.contains("לקחת") { return .takeAway }
+        // 1) Explicit service field (from Metadata → API)
+        if let svc = order.service?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            switch svc {
+            case "ta", "takeaway", "take_away", "take-away":
+                return .takeAway
+
+          
+            case "sit", "table", "ls":
+                return .dineIn
+
+            default:
+                break
+            }
+        }
+
+        // 2) Fallback: API isDelivery flag
+       
+
+        // 3) Legacy heuristic from subtitle, for old orders
+        if order.subtitle.contains("לקחת") ||
+           order.subtitle.localizedCaseInsensitiveContains("take away") {
+            return .takeAway
+        }
+
+        // 4) Default
         return .dineIn
     }
 }

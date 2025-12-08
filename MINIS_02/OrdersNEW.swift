@@ -155,8 +155,7 @@ struct BasketItem: Identifiable, Hashable {
 
 
 struct AdminOrdersView: View {
-    @AppStorage("AdminOrders.stationMode")
-    private var stationModeRaw: String = StationViewMode.bar.rawValue
+    @State private var searchText: String = ""
     let onSelectUnpaid: ((AdminOrderItem) -> Void)?
     init(onSelectUnpaid: ((AdminOrderItem) -> Void)? = nil) {
            self.onSelectUnpaid = onSelectUnpaid
@@ -338,26 +337,9 @@ struct AdminOrdersView: View {
     @State private var orders: [AdminOrderItem] = []
     @State private var selectedOrder: AdminOrderItem? = nil
     @State private var isLoading = false
-    @State private var stationMode: StationViewMode = .bar   // 👈 this was missing
+  
 
-    private func stationButton(title: String, mode: StationViewMode) -> some View {
-        Button {
-            stationMode = mode
-        } label: {
-            Text(title)
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundColor(stationMode == mode ? .white : .primary)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 6)
-                .background(
-                    stationMode == mode
-                    ? Color.black
-                    : Color.clear
-                )
-                .clipShape(Capsule())
-        }
-        .buttonStyle(.plain)
-    }
+  
     // 🔁 Poll every 10 seconds
     @State private var pollTimer = Timer
         .publish(every: 10, on: .main, in: .common)
@@ -376,6 +358,34 @@ struct AdminOrdersView: View {
                 .pickerStyle(SegmentedPickerStyle())
                 .padding(.horizontal)
                 .padding(.top, 8)
+                
+                HStack {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundColor(.secondary)
+
+                    TextField("חיפוש בהזמנות…", text: $searchText)
+                        .textFieldStyle(.plain)
+                        .disableAutocorrection(true)
+                        .textInputAutocapitalization(.never)
+
+                    // ❌ CLEAR BUTTON
+                    if !searchText.isEmpty {
+                        Button {
+                            searchText = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.leading, 4)
+                    }
+                }
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+                .background(Color(.systemGray6))
+                .cornerRadius(12)
+                .padding(.horizontal)
+                
 
                 Divider().padding(.top, 8)
 
@@ -385,109 +395,43 @@ struct AdminOrdersView: View {
                     Spacer()
                 } else {
                     ScrollView {
-                        let list   = currentOrders
+                        let list = filteredOrders
 
-                        if selectedTab == .active {
-                            // 🔹 ACTIVE TAB: split into unpaid / paid
-                            let unpaid = list.filter { $0.isUnpaid }
-                            let paid   = list.filter { !$0.isUnpaid }
-
-                            LazyVStack(spacing: 16) {
-                                // 1️⃣ Not paid yet
-                                if !unpaid.isEmpty {
-                                    HStack {
-                                        Text("פתוח")
-                                            .font(.system(size: 15, weight: .semibold))
-                                            .foregroundColor(.secondary)
-                                        Spacer()
+                        LazyVStack(spacing: 16) {
+                            ForEach(list) { order in
+                                AdminOrderRow(
+                                    item: order,
+                                    onPrint: {
+                                        printOrder(order)
+                                    },
+                                    onPrintInvoice: {
+                                        printInvoice(for: order)
                                     }
-                                    .padding(.horizontal)
-
-                                    ForEach(unpaid) { order in
-                                        AdminOrderRow(
-                                            item: order,
-                                            onAdvance: { newStatus in
-                                                update(order: order, to: newStatus)
-                                            }
-                                        )
-                                        .padding(.horizontal)
-                                        .contentShape(Rectangle())
-                                        .onTapGesture {
-                                                // If in Active tab and this is unpaid → bounce to CashPoint
-                                                if selectedTab == .active, order.isUnpaid, let cb = onSelectUnpaid {
-                                                    cb(order)
-                                                } else {
-                                                    selectedOrder = order
-                                                }
-                                            }
-                                    }
-
-                                    Divider()
-                                        .padding(.horizontal)
-                                }
-
-                                // 2️⃣ Paid (but still active, e.g. ready/awaiting collection)
-                                if !paid.isEmpty {
-                                    HStack {
-                                        Text("סגור")
-                                            .font(.system(size: 15, weight: .semibold))
-                                            .foregroundColor(.secondary)
-                                        Spacer()
-                                    }
-                                    .padding(.horizontal)
-
-                                    ForEach(paid) { order in
-                                        AdminOrderRow(
-                                            item: order,
-                                            onAdvance: { newStatus in
-                                                update(order: order, to: newStatus)
-                                            }
-                                        )
-                                        .padding(.horizontal)
-                                        .contentShape(Rectangle())
-                                        .onTapGesture {
-                                                if selectedTab == .active, order.isUnpaid, let cb = onSelectUnpaid {
-                                                    cb(order)
-                                                } else {
-                                                    selectedOrder = order
-                                                }
-                                            }
-                                    }
-                                }
-
-                                if list.isEmpty {
-                                    Text("אין הזמנות פעילות כרגע")
-                                        .foregroundColor(.secondary)
-                                        .padding(.top, 40)
-                                }
-                            }
-                            .padding(.vertical, 16)
-
-                        } else {
-                            // 🔹 HISTORY TAB: regular flat list
-                            LazyVStack(spacing: 16) {
-                                ForEach(list) { order in
-                                    AdminOrderRow(
-                                        item: order,
-                                        onAdvance: { newStatus in
-                                            update(order: order, to: newStatus)
-                                        }
-                                    )
-                                    .padding(.horizontal)
-                                    .contentShape(Rectangle())
-                                    .onTapGesture {
+                                )
+                                .padding(.horizontal)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    if selectedTab == .active,
+                                       order.isUnpaid,
+                                       let cb = onSelectUnpaid {
+                                        cb(order)   // unpaid → bounce to CashPoint
+                                    } else {
                                         selectedOrder = order
                                     }
                                 }
-
-                                if list.isEmpty {
-                                    Text("אין הזמנות בהיסטוריה")
-                                        .foregroundColor(.secondary)
-                                        .padding(.top, 40)
-                                }
                             }
-                            .padding(.vertical, 16)
+
+                            if list.isEmpty {
+                                Text(searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                     ? (selectedTab == .active
+                                        ? "אין הזמנות פתוחות כרגע"
+                                        : "אין הזמנות סגורות כרגע")
+                                     : "אין תוצאות לחיפוש")
+                                    .foregroundColor(.secondary)
+                                    .padding(.top, 40)
+                            }
                         }
+                        .padding(.vertical, 16)
                     }
                 }
             }
@@ -504,36 +448,11 @@ struct AdminOrdersView: View {
                 }
 
                 // Center station selector as Menu (harder to toggle)
-                ToolbarItem(placement: .principal) {
-                    Menu {
-                        Button {
-                            stationMode = .bar
-                        } label: {
-                            Label("עמדת בר",
-                                  systemImage: stationMode == .bar ? "checkmark" : "")
-                        }
-
-                        Button {
-                            stationMode = .kitchen
-                        } label: {
-                            Label("עמדת מטבח",
-                                  systemImage: stationMode == .kitchen ? "checkmark" : "")
-                        }
-                    } label: {
-                        // Capsule-style selector, no chevron
-                        Text(stationMode.title)
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundColor(.primary)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 6)
-                            .background(Color(.systemGray5))
-                            .clipShape(Capsule())
-                    }
-                }
+               
             }
             // 🔹 First load – show spinner
             .task {
-                stationMode = StationViewMode(rawValue: stationModeRaw) ?? .bar
+               
                 await loadOrders(showSpinner: true)
             }
             // 🔹 Poll every 10 seconds – quiet refresh (no spinner)
@@ -543,9 +462,7 @@ struct AdminOrdersView: View {
                 }
             }
         }
-        .onChange(of: stationMode) { newValue in
-            stationModeRaw = newValue.rawValue
-        }
+       
         .sheet(item: $selectedOrder) { order in
             AdminOrderDetailSheet(
                 order: order,
@@ -620,17 +537,50 @@ struct AdminOrdersView: View {
     }
 
     private var currentOrders: [AdminOrderItem] {
-        // 1) Filter by tab (active vs history)
         let base: [AdminOrderItem]
         switch selectedTab {
         case .active:
-            base = orders.filter { $0.status != .collected }
+            // OPEN = all unpaid
+            base = orders.filter { $0.isUnpaid }
         case .history:
-            base = orders.filter { $0.status == .collected }
+            // CLOSED = everything else (paid / settled)
+            base = orders.filter { !$0.isUnpaid }
         }
 
-        // 2) 🔧 NEW: no station filtering – show all orders
         return base.sorted(by: sortRule)
+    }
+    
+    private var filteredOrders: [AdminOrderItem] {
+        let trimmed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // No search → respect tab (פתוח / סגור)
+        guard !trimmed.isEmpty else {
+            return currentOrders
+        }
+
+        let query = trimmed
+            .folding(options: .diacriticInsensitive, locale: .current)
+            .lowercased()
+
+        // With search → search across ALL orders (open + closed), ignoring tab
+        let base = orders
+
+        let result = base.filter { order in
+            let name      = order.customerName
+            let orderId   = order.orderId
+            let subtitle  = order.subtitle
+            let source    = order.source
+            let itemNames = order.items.map { $0.name }.joined(separator: " ")
+
+            let haystack = [name, orderId, subtitle, source, itemNames]
+                .joined(separator: " ")
+                .folding(options: .diacriticInsensitive, locale: .current)
+                .lowercased()
+
+            return haystack.contains(query)
+        }
+
+        return result.sorted(by: sortRule)
     }
 
     // Build invoice line items from AdminOrderItem
@@ -787,10 +737,12 @@ struct AdminOrdersView: View {
 
 struct AdminOrderRow: View {
     let item: AdminOrderItem
-    let onAdvance: (AdminOrderStatus) -> Void
-
+    let onPrint: () -> Void
+    let onPrintInvoice: () -> Void
+    
     private var timeString: String {
-        DateTimeFormatter.cachedFormatter.string(from: item.placedAt)
+        let adjusted = Calendar.current.date(byAdding: .hour, value: 2, to: item.placedAt) ?? item.placedAt
+        return DateTimeFormatter.cachedFormatter.string(from: adjusted)
     }
 
     var body: some View {
@@ -800,14 +752,19 @@ struct AdminOrderRow: View {
                 .frame(width: 80, alignment: .leading)
 
             VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    Text("#\(item.orderId)")
-                        .font(.system(size: 30, weight: .bold))
 
-                    Text(item.customerName.replacingOccurrences(of: "Customer", with: ""))
-                        .font(.system(size: 30, weight: .semibold))
-                }
+                // CUSTOMER NAME AS TITLE
+                Text(item.customerName.replacingOccurrences(of: "Customer", with: ""))
+                    .font(.system(size: 28, weight: .bold))
+                    .lineLimit(1)
 
+                // ORDER NUMBER AS SUBTITLE
+                Text("#\(item.orderId)")
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+
+                // items summary
                 if !item.subtitle.isEmpty {
                     Text(item.subtitle)
                         .font(.system(size: 15))
@@ -815,6 +772,7 @@ struct AdminOrderRow: View {
                         .lineLimit(1)
                 }
 
+                // source tag
                 Text(item.source)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundColor(.primary)
@@ -826,21 +784,30 @@ struct AdminOrderRow: View {
 
             Spacer()
 
-            if !nextButtonTitle.isEmpty {
+            HStack(spacing: 12) {
+
                 Button {
-                    let nextStatus: AdminOrderStatus =
-                        item.status == .received ? .ready :
-                        item.status == .ready    ? .collected :
-                                                   .collected
                     Haptics.light()
-                    onAdvance(nextStatus)
+                    onPrint()
                 } label: {
-                    Text(nextButtonTitle)
+                    Text("הדפס בון")
                         .font(.system(size: 18, weight: .bold))
                         .foregroundColor(.white)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 8)
-                        .background(buttonColor)
+                        .frame(width: 130, height: 48)   // 👈 fat button
+                        .background(Color.black)
+                        .cornerRadius(12)
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    Haptics.light()
+                    onPrintInvoice()
+                } label: {
+                    Text("הדפס חשבונית")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundColor(.white)
+                        .frame(width: 160, height: 48)  // 👈 slightly wider
+                        .background(Color.gray)
                         .cornerRadius(12)
                 }
                 .buttonStyle(.plain)

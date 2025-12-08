@@ -23,39 +23,120 @@ func resetShopUserDefaultsToDefaults() {
     defaults.set("GBP", forKey: "currency")
 }
 
+func disableQuickTypeBar() {
+    let tf = UITextField.appearance()
+    tf.inputAssistantItem.leadingBarButtonGroups = []
+    tf.inputAssistantItem.trailingBarButtonGroups = []
+
+    let tv = UITextView.appearance()
+    tv.inputAssistantItem.leadingBarButtonGroups = []
+    tv.inputAssistantItem.trailingBarButtonGroups = []
+}
+
 @main
 struct MINIS_02App: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     @State var isRtl = true
     @Environment(\.scenePhase) private var scenePhase
+
     @AppStorage("cashPointMode") private var cashPointMode: Bool = true
-    @AppStorage("shopId") private var shopId: String = "0"
+    @AppStorage("shopId") private var shopId: String = "12"
+    @AppStorage("miniAppId") private var miniAppId: Int = 0          // 👈 NEW
     @AppStorage("launchMenuOnce") private var launchMenuOnce: Bool = false
-    @AppStorage("autoPrintEnabled") private var autoPrintEnabled: Bool = true   // 👈 new flag
+    @AppStorage("autoPrintEnabled") private var autoPrintEnabled: Bool = true
 
     init() {
-        // PrinterManager.shared.printSalesDebugDemo()
+      //  PrinterManager.shared.setPrinterSet(.ron)
+        let demoData = PrinterManager.SalesReportData(
+            ppaRestaurant: 26,
+            dinersRestaurant: 14,
+            totalRestaurantIncVat: 375.0,
+            ppaRestaurantValue: 7.713,
+
+            ppaTA: 22,
+            dinersTA: 8,
+            totalTAIncVat: 317.2,
+
+            // 🔄 REVERSED VALUES
+            totalSalesIncVat: 699.9,   // was 692.2
+            tipsTotal: 7.713,
+            grandTotal: 692.2,         // was 699.9
+
+            cashAmount: 250.0,
+            cashCount: 3,
+            cardAmount: 329.9,
+            cardCount: 5,
+            collectionsTotalAmount: 579.9,
+            collectionsTotalCount: 8,
+
+            closedDrawersAmount: 0,
+            openDrawersAmount: 0,
+            depositWithdrawAmount: 0,
+            drawerTotalAmount: 0,
+            mainDrawerAmount: 0,
+            hostStationDrawerAmount: 0,
+
+            tipBaseTotal: 0,
+            tipRestaurant: 0,
+            tipBarTakeaway: 0,
+            extraTipTotal: 0,
+            extraTipRestaurant: 0,
+            extraTipBar: 0,
+
+            ordersOTHAmount: 0, ordersOTHCount: 0,
+            itemsOTHAmount: 0, itemsOTHCount: 0,
+            canceledItemsAmount: 0, canceledItemsCount: 0,
+            refundedItemsAmount: 0, refundedItemsCount: 0,
+            discountsAmount: 0, discountsCount: 0,
+            discountsRefundAmount: 0, discountsRefundCount: 0
+        )
+     //   PrinterManager.shared.printHebrewCodepageProbe(to: "10.100.10.232")
+        PrinterManager.shared.printSalesDebugReport(demoData)
         UIView.appearance().tintColor = UIColor.label
 
         // 🔥 Global RTL for UIKit (menus, alerts, etc.)
         UIView.appearance().semanticContentAttribute = .forceRightToLeft
+
         UISegmentedControl.appearance().setTitleTextAttributes(
-              [.foregroundColor: UIColor.black],
-              for: .selected
-          )
+            [.foregroundColor: UIColor.black],
+            for: .selected
+        )
 
-          // Unselected: white 70% opacity
-          UISegmentedControl.appearance().setTitleTextAttributes(
-              [.foregroundColor: UIColor.white.withAlphaComponent(0.7)],
-              for: .normal
-          )
+        // Unselected: white/black 70% opacity depending on theme
+        let normalTextColor = UIColor { trait in
+            trait.userInterfaceStyle == .dark ? .white.withAlphaComponent(0.7)
+                                              : .black.withAlphaComponent(0.7)
+        }
 
-          // Background for selected segment
-          UISegmentedControl.appearance().selectedSegmentTintColor = UIColor.white
+        let selectedTextColor = UIColor { trait in
+            trait.userInterfaceStyle == .dark ? .black : .white
+        }
 
-          // Transparent background for the whole control
-          UISegmentedControl.appearance().backgroundColor = UIColor.white.withAlphaComponent(0.15)
+        let selectedTint = UIColor { trait in
+            trait.userInterfaceStyle == .dark ? .white : .black
+        }
+
+        let backgroundColor = UIColor { trait in
+            trait.userInterfaceStyle == .dark
+                ? UIColor.white.withAlphaComponent(0.15)
+                : UIColor.black.withAlphaComponent(0.10)
+        }
+
+        // MARK: - Apply
+        UISegmentedControl.appearance().setTitleTextAttributes(
+            [.foregroundColor: normalTextColor],
+            for: .normal
+        )
+
+        UISegmentedControl.appearance().setTitleTextAttributes(
+            [.foregroundColor: selectedTextColor],
+            for: .selected
+        )
+
+        UISegmentedControl.appearance().selectedSegmentTintColor = selectedTint
+        UISegmentedControl.appearance().backgroundColor = backgroundColor
+
         // Clear saved POS name/phone on fresh launch
         UserDefaults.standard.removeObject(forKey: "posSavedName")
         UserDefaults.standard.removeObject(forKey: "posSavedPhone")
@@ -68,7 +149,13 @@ struct MINIS_02App: App {
                     CashPointView()
                         .tint(.primary)
                 } else {
+                    // Use your existing mini UI here.
+                    // If you have a helper:
                     menuView()
+                    //
+                    // For now, to keep it compiling even if you don't:
+                    Text("Mini app view")
+                        .tint(.primary)
                 }
             }
             .environment(\.isRtl, isRtl)
@@ -116,14 +203,39 @@ struct MINIS_02App: App {
         }
     }
 
+    // MARK: - NFC / QR Deep Link Handler
+    // URLs like:
+    //   https://minis.studio/shop/12
+    //   https://minis.studio/fastlane/12
+    // mini type = pathComponents[1] ("shop" / "fastlane")
+    // miniAppId = Int(pathComponents[2])
     private func handleIncoming(url: URL) {
         guard url.host == "minis.studio" else { return }
-        let lastComponent = url.lastPathComponent
-        guard !lastComponent.isEmpty, Int(lastComponent) != nil else { return }
 
+        let components = url.pathComponents
+        // Expect at least: ["/", "shop", "12"]
+        guard components.count >= 3 else { return }
+
+        let miniType = components[1]              // e.g. "shop" or "fastlane"
+        let rawId = components[2]                 // e.g. "12"
+
+        guard let id = Int(rawId) else { return }
+
+        print("🎯 Deep link → type=\(miniType), miniAppId=\(id)")
+
+        // Save mini id
+        miniAppId = id
+        UserDefaults.standard.set(id, forKey: "miniAppId")
+
+        // For now: mirror to shopId for existing logic
+        shopId = rawId
+        UserDefaults.standard.set(rawId, forKey: "shopId")
+
+        // Reset style/theme for the new mini
         resetShopUserDefaultsToDefaults()
-        shopId = lastComponent
-        UserDefaults.standard.set(lastComponent, forKey: "shopId")
+
+        // Force opening Mini side (not POS)
         launchMenuOnce = true
+        cashPointMode = false
     }
 }

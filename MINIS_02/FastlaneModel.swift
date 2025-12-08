@@ -77,13 +77,31 @@ final class MenuApiModel: ObservableObject {
 
     private func parseAndApply(data: Data) async {
         do {
-            // Wrapper { products: [...] } or plain [ProductPayload]
             if let wrapper = try? JSONDecoder().decode(ShopPayload.self, from: data),
                let products = wrapper.products {
+                #if DEBUG
+                if let ceasar = products.first(where: { $0.name.contains("קיסר") }) {
+                    print("🔍 CEASAR RAW GROUPS:")
+                    ceasar.modifiers?.forEach { g in
+                        print("  • title=\(g.title ?? "?"), type=\(g.type ?? "nil"), mode=\(g.selection?.mode ?? "nil")")
+                    }
+                }
+                #endif
                 await apply(mapProducts(products))
                 return
             }
+
             let products = try JSONDecoder().decode([ProductPayload].self, from: data)
+
+            #if DEBUG
+            if let ceasar = products.first(where: { $0.name.contains("קיסר") }) {
+                print("🔍 CEASAR RAW GROUPS:")
+                ceasar.modifiers?.forEach { g in
+                    print("  • title=\(g.title ?? "?"), type=\(g.type ?? "nil"), mode=\(g.selection?.mode ?? "nil")")
+                }
+            }
+            #endif
+
             await apply(mapProducts(products))
         } catch {
             await MainActor.run {
@@ -119,13 +137,33 @@ final class MenuApiModel: ObservableObject {
 
     private func mapModifiers(from apiGroups: [ApiModifierGroup]?) -> [ModifierGroup]? {
         guard let apiGroups, !apiGroups.isEmpty else { return nil }
+
         let groups = apiGroups.compactMap { g -> ModifierGroup? in
             let items = (g.items ?? []).map {
                 ModifierItem(name: $0.optionName ?? "", extraPrice: $0.extraPrice ?? 0)
             }
-            let type: ModifierGroup.GroupType = (g.type?.lowercased() == "additions") ? .additions : .options
+
+            let rawType       = g.type?.lowercased()
+            let selectionMode = g.selection?.mode?.lowercased()
+
+            let type: ModifierGroup.GroupType
+            if rawType == "additions" {
+                type = .additions
+            } else if rawType == "options" {
+                type = .options
+            } else if selectionMode == "multi" {
+                type = .additions
+            } else {
+                type = .options
+            }
+
+            #if DEBUG
+            print("🧩 mapModifiers: title=\(g.title ?? "?"), rawType=\(rawType ?? "nil"), mode=\(selectionMode ?? "nil") → \(type)")
+            #endif
+
             return ModifierGroup(type: type, title: g.title ?? "בחירה", items: items)
         }
+
         return groups.isEmpty ? nil : groups
     }
 }
@@ -176,16 +214,23 @@ struct ProductPayload: Decodable {
         }
     }
 }
+struct ApiSelection: Decodable {
+    let mode: String?
+    let min: Int?
+    let max: Int?
+}
 
 struct ApiModifierGroup: Decodable {
     let type: String?
     let title: String?
     let items: [ApiModifierItem]?
+    let selection: ApiSelection?      // 👈 NEW
 
     enum CodingKeys: String, CodingKey {
-        case type = "Type"
-        case title = "Title"
-        case items = "Items"
+        case type      = "Type"
+        case title     = "Title"
+        case items     = "Items"
+        case selection = "Selection"
     }
 }
 
@@ -569,9 +614,21 @@ enum Haptics {
 }
 
 struct ZCreditResult {
-    let approved: Bool
+    enum Status {
+        case approved        // gateway clearly approved
+        case declined        // gateway clearly declined
+        case unknown         // unclear (network error, timeout, device busy, etc.)
+    }
+
+    let status: Status
     let message: String
     let referenceNumber: String?
+    let transactionId: String?
+    let rawPath: String?        // e.g. "commit_final", "status_exhausted"
+    let rawReturnCode: String?  // e.g. "0", "-80", etc.
+
+    /// Convenience flag so old code `if result.approved` keeps working
+    var approved: Bool { status == .approved }
 }
 
 final class ZCreditPaymentHandler {
@@ -579,6 +636,8 @@ final class ZCreditPaymentHandler {
 
     private let baseURL = URL(string: "https://minis.studio")!
 
+    // timers are no longer used for polling, but we keep them + invalidate
+    // in case you later reintroduce some periodic logic
     private var statusTimer: Timer?
     private var timeoutTimer: Timer?
 
@@ -587,21 +646,145 @@ final class ZCreditPaymentHandler {
     private var currentSessionId: String?
     private var currentPinpadId: String?
 
+    // MARK: - Helper: map backend JSON → tri-state ZCreditResult
+
+    private func finishFromResponse(
+        json: [String: Any],
+        completion: @escaping (ZCreditResult) -> Void
+    ) {
+        let pathRaw   = json["path"] as? String
+        let resultRaw = json["resultStatus"] as? String
+
+        let path      = pathRaw?.lowercased()
+        let resultStr = resultRaw?.lowercased()
+
+        let reference = json["referenceNumber"] as? String
+        let txId      = json["transactionId"] as? String
+        let rc        = (json["invoiceReturnCode"] as? String) ?? (json["returnCode"] as? String)
+
+        let msg = (json["invoiceReturnMessage"] as? String) ??
+                  (json["ZCreditMessage"] as? String) ??
+                  (json["message"] as? String) ??
+                  ""
+
+        // ------- CLASSIFICATION (similar spirit to old parseEnvelope) -------
+
+        // Explicit “device busy” code → decline with a clear message
+        if rc == "-50101" {
+            let status: ZCreditResult.Status = .declined
+
+            invalidateTimers()
+            currentCorrelationId      = nil
+            currentReferenceOrSession = nil
+            currentSessionId          = nil
+
+            let result = ZCreditResult(
+                status: status,
+                message: msg.isEmpty
+                         ? "מכשיר הסליקה עסוק בתהליך אחר. ודאו שהמסוף במסך המתנה ונסו שוב."
+                         : msg,
+                referenceNumber: reference,
+                transactionId: txId,
+                rawPath: pathRaw,
+                rawReturnCode: rc
+            )
+            DispatchQueue.main.async { completion(result) }
+            return
+        }
+
+        // Old -80 = "keep waiting" → here we treat as UNKNOWN (caller can show 'payment not completed')
+        if rc == "-80" {
+            let status: ZCreditResult.Status = .unknown
+
+            invalidateTimers()
+            currentCorrelationId      = nil
+            currentReferenceOrSession = nil
+            currentSessionId          = nil
+
+            let result = ZCreditResult(
+                status: status,
+                message: msg.isEmpty ? "התשלום לא הושלם במסוף" : msg,
+                referenceNumber: reference,
+                transactionId: txId,
+                rawPath: pathRaw,
+                rawReturnCode: rc
+            )
+            DispatchQueue.main.async { completion(result) }
+            return
+        }
+
+        // Path-based decline signals (cancel / explicit decline)
+        let isDeclinedPath = (
+            path == "commit_declined" ||
+            path == "status_declined" ||
+            path == "no_reference" ||
+            path == "commit_cancelled" ||
+            path == "status_cancelled"
+        )
+
+        let isApprovedPath = (
+            path == "commit_final" ||
+            path == "status_final" ||
+            path == "commit_approved"
+        )
+
+        let isApprovedStatus = (resultStr == "approved")
+        let isDeclinedStatus = (resultStr == "declined")
+
+        let isApprovedCode = (rc == "0" || rc == "000" || rc == "00")   // typical “OK” codes
+        let hasAnyCode     = (rc?.isEmpty == false)
+
+        let finalStatus: ZCreditResult.Status
+
+        if isApprovedStatus || isApprovedPath || isApprovedCode {
+            finalStatus = .approved
+        } else if isDeclinedStatus || isDeclinedPath || (hasAnyCode && !isApprovedCode) {
+            // any non-0 code (except the special cases handled above) → decline
+            finalStatus = .declined
+        } else {
+            // no clear signal → unknown
+            finalStatus = .unknown
+        }
+
+        // -------------------------------------------------------------------
+
+        invalidateTimers()
+        currentCorrelationId      = nil
+        currentReferenceOrSession = nil
+        currentSessionId          = nil
+
+        let result = ZCreditResult(
+            status: finalStatus,
+            message: msg,
+            referenceNumber: reference,
+            transactionId: txId,
+            rawPath: pathRaw,
+            rawReturnCode: rc
+        )
+
+        DispatchQueue.main.async {
+            completion(result)
+        }
+    }
+    // MARK: - Main entry point
+
     func pay(amount: Double,
              orderId: Int?,
              completion: @escaping (ZCreditResult) -> Void) {
 
-           // UserDefaults.standard.set("48796294", forKey: "pinpadId")   // cashpoint 1
-            //UserDefaults.standard.set("48796855", forKey: "pinpadId")   // cashpoint 2
-      UserDefaults.standard.set("48796856", forKey: "pinpadId")   // cashpoint 3
-        let cp = CashpointID(rawValue: UserDefaults.standard.integer(forKey: "cashpointID")) ?? .one
-        
-        let safeAmount = max(0, amount)
-        let pinpadId = UserDefaults.standard.string(forKey: "pinpadId") ?? "48796294"
+        // You still hard-code pinpads – leaving your logic as-is
+    //  UserDefaults.standard.set("48796294", forKey: "pinpadId")   // cashpoint 1
+         UserDefaults.standard.set("48796855", forKey: "pinpadId")   // cashpoint 2
+      // UserDefaults.standard.set("48796856", forKey: "pinpadId")      // cashpoint 3
+
+        let _ = CashpointID(rawValue: UserDefaults.standard.integer(forKey: "cashpointID")) ?? .one
+
+        let safeAmount   = max(0, amount)
+        let pinpadId     = UserDefaults.standard.string(forKey: "pinpadId") ?? "48796294"
         let correlationId = UUID().uuidString
 
         currentCorrelationId = correlationId
-        currentPinpadId = pinpadId
+        currentPinpadId      = pinpadId
 
         let startBody: [String: Any] = [
             "amount": safeAmount,
@@ -612,13 +795,21 @@ final class ZCreditPaymentHandler {
         ]
 
         guard let startURL = URL(string: "/payments/zcredit/start", relativeTo: baseURL) else {
-            completion(.init(approved: false,
-                             message: "שגיאה בכתובת השרת",
-                             referenceNumber: nil))
+            let result = ZCreditResult(
+                status: .unknown,
+                message: "שגיאה בכתובת השרת",
+                referenceNumber: nil,
+                transactionId: nil,
+                rawPath: "client_bad_url",
+                rawReturnCode: nil
+            )
+            DispatchQueue.main.async {
+                completion(result)
+            }
             return
         }
 
-        var req = URLRequest(url: startURL, timeoutInterval: 45)
+        var req = URLRequest(url: startURL, timeoutInterval: 60)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue(correlationId, forHTTPHeaderField: "x-correlation-id")
@@ -632,153 +823,62 @@ final class ZCreditPaymentHandler {
         URLSession.shared.dataTask(with: req) { [weak self] data, resp, error in
             guard let self = self else { return }
 
+            // Network / transport error → unknown
             if let error = error {
-                self.finish(approved: false,
-                            message: "שגיאה בתחילת עסקה במסוף: \(error.localizedDescription)",
-                            referenceNumber: nil,
-                            completion: completion)
+                let json: [String: Any] = [
+                    "ok": false,
+                    "path": "commit_http_error",
+                    "message": "שגיאה בתחילת עסקה במסוף: \(error.localizedDescription)"
+                ]
+                self.finishFromResponse(json: json, completion: completion)
                 return
             }
 
-            guard
-                let http = resp as? HTTPURLResponse,
-                let data = data,
-                http.statusCode == 200,
-                let txt = String(data: data, encoding: .utf8),
-                !txt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            guard let http = resp as? HTTPURLResponse,
+                  let data = data,
+                  http.statusCode == 200,
+                  !data.isEmpty
             else {
-                self.finish(approved: false,
-                            message: "שגיאה בתחילת עסקה במסוף",
-                            referenceNumber: nil,
-                            completion: completion)
+                let json: [String: Any] = [
+                    "ok": false,
+                    "path": "commit_http_non_200",
+                    "message": "שגיאה בתחילת עסקה במסוף"
+                ]
+                self.finishFromResponse(json: json, completion: completion)
                 return
             }
 
-            var sessionId: String?
-            var referenceNumber: String?
-
-            if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                sessionId =
-                    obj["sessionId"] as? String ??
-                    obj["SessionId"] as? String
-                referenceNumber =
-                    obj["referenceNumber"] as? String ??
-                    obj["ReferenceNumber"] as? String
-            }
-
-            guard let sid = sessionId else {
-                self.finish(approved: false,
-                            message: "חסר מזהה עסקה מהמסוף",
-                            referenceNumber: nil,
-                            completion: completion)
+            guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                let json: [String: Any] = [
+                    "ok": false,
+                    "path": "client_parse_error",
+                    "message": "תגובה לא תקינה מהמסוף"
+                ]
+                self.finishFromResponse(json: json, completion: completion)
                 return
             }
 
-            let idForStatus = referenceNumber ?? sid
-            self.currentReferenceOrSession = idForStatus
-            self.currentSessionId = sid
-
-            DispatchQueue.main.async {
-                self.startStatusPolling(id: idForStatus,
-                                        correlationId: correlationId,
-                                        completion: completion)
+            // Stash session info for potential /cancel
+            if let sid = (obj["sessionId"] as? String) ?? (obj["SessionId"] as? String) {
+                self.currentSessionId = sid
             }
+            if let ref = (obj["referenceNumber"] as? String) ?? (obj["ReferenceNumber"] as? String) {
+                self.currentReferenceOrSession = ref
+            }
+
+            // ✅ Let the helper map json → ZCreditResult (approved / declined / unknown)
+            self.finishFromResponse(json: obj, completion: completion)
+
         }.resume()
     }
 
-    private func startStatusPolling(id: String,
-                                    correlationId: String,
-                                    completion: @escaping (ZCreditResult) -> Void) {
-
-        invalidateTimers()
-
-        guard let statusURL = URL(string: "/payments/zcredit/status/\(id)", relativeTo: baseURL) else {
-            finish(approved: false,
-                   message: "שגיאה בכתובת השרת",
-                   referenceNumber: nil,
-                   completion: completion)
-            return
-        }
-
-        statusTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-
-            var req = URLRequest(url: statusURL, timeoutInterval: 10)
-            req.httpMethod = "GET"
-            req.setValue("application/json", forHTTPHeaderField: "Accept")
-            req.setValue(correlationId, forHTTPHeaderField: "x-correlation-id")
-
-            URLSession.shared.dataTask(with: req) { data, resp, _ in
-                guard let data = data,
-                      let http = resp as? HTTPURLResponse,
-                      http.statusCode == 200,
-                      !data.isEmpty
-                else { return }
-
-                let env = self.parseEnvelope(data: data)
-
-                if env.code == "-80" {
-                    return
-                }
-
-                if env.code == "-50101" {
-                    self.finish(approved: false,
-                                message: "מכשיר הסליקה עסוק בתהליך אחר. ודאו שהמסוף במסך המתנה ונסו שוב.",
-                                referenceNumber: env.ref,
-                                completion: completion)
-                    return
-                }
-
-                if env.code == "0" {
-                    self.finish(approved: true,
-                                message: env.msg.isEmpty ? "אושר" : env.msg,
-                                referenceNumber: env.ref,
-                                completion: completion)
-                    return
-                }
-
-                if !env.code.isEmpty {
-                    self.finish(approved: false,
-                                message: env.msg.isEmpty ? "העסקה לא אושרה" : env.msg,
-                                referenceNumber: env.ref,
-                                completion: completion)
-                    return
-                }
-
-            }.resume()
-        }
-
-        timeoutTimer = Timer.scheduledTimer(withTimeInterval: 60.0, repeats: false) { [weak self] _ in
-            guard let self = self else { return }
-            self.finish(approved: false,
-                        message: "זמן מקסימלי עבר ללא תגובה מהמסוף",
-                        referenceNumber: nil,
-                        completion: completion)
-        }
-    }
+    // MARK: - Cancel
 
     private func invalidateTimers() {
         statusTimer?.invalidate()
         timeoutTimer?.invalidate()
         statusTimer = nil
         timeoutTimer = nil
-    }
-
-    private func finish(approved: Bool,
-                        message: String,
-                        referenceNumber: String?,
-                        completion: @escaping (ZCreditResult) -> Void) {
-        invalidateTimers()
-        currentCorrelationId = nil
-        currentReferenceOrSession = nil
-        currentSessionId = nil
-
-        let result = ZCreditResult(approved: approved,
-                                   message: message,
-                                   referenceNumber: referenceNumber)
-        DispatchQueue.main.async {
-            completion(result)
-        }
     }
 
     func cancelCurrent() {
@@ -805,43 +905,6 @@ final class ZCreditPaymentHandler {
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
         URLSession.shared.dataTask(with: req).resume()
-    }
-    
-    private func parseEnvelope(data: Data) -> (code: String, msg: String, ref: String?) {
-        do {
-            let topAny = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
-            let rawAny: Any
-            if let rawStr = topAny["raw"] as? String,
-               let rawData = rawStr.data(using: .utf8),
-               let obj = try? JSONSerialization.jsonObject(with: rawData) {
-                rawAny = obj
-            } else {
-                rawAny = topAny
-            }
-
-            let raw = rawAny as? [String: Any] ?? [:]
-
-            let code: String
-            if let c = raw["ReturnCode"] {
-                code = String(describing: c)
-            } else {
-                code = ""
-            }
-
-            let msg =
-                (raw["ReturnMessage"] as? String ??
-                 raw["ZCreditMessage"] as? String ??
-                 raw["message"] as? String ??
-                 "").trimmingCharacters(in: .whitespacesAndNewlines)
-
-            let ref =
-                raw["ReferenceNumber"] as? String ??
-                raw["referenceNumber"] as? String
-
-            return (code, msg, ref)
-        } catch {
-            return ("", "", nil)
-        }
     }
 }
 
@@ -1129,6 +1192,7 @@ final class ZCreditApplePayHandler: NSObject, PKPaymentAuthorizationControllerDe
     if let data = try? JSONEncoder().encode(referrals) {
         defaults?.set(data, forKey: "miniReferralsJSON")
     }
+     
 }
 
 // GLOBAL helper – accessible from anywhere
@@ -1180,4 +1244,16 @@ struct ZReportData: Decodable {
     let cardTips: Double
 }
 
+
+enum KeyboardCustomization {
+    static func disableQuickTypeBar() {
+        let tf = UITextField.appearance()
+        tf.inputAssistantItem.leadingBarButtonGroups = []
+        tf.inputAssistantItem.trailingBarButtonGroups = []
+
+        let tv = UITextView.appearance()
+        tv.inputAssistantItem.leadingBarButtonGroups = []
+        tv.inputAssistantItem.trailingBarButtonGroups = []
+    }
+}
 

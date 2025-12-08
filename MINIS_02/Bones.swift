@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import UIKit
 
 struct DigitalBonesView: View {
     // MARK: - UI Bone model
@@ -16,13 +17,13 @@ struct DigitalBonesView: View {
         }
     }
     struct Bone: Identifiable, Equatable {
-        let id = UUID()
+        let id: Int          // 👈 stable id == orderId
         var orderId: Int
-        var orderNumber: String      // "650"
-        var customerName: String     // "אריאל"
-        var items: [String]          // "1 הפוך גדול", "   + חלב סויה"
-        var timeText: String         // "12:34   29/11/2025"
-        var serviceText: String?     // "לשבת" / "TA" / nil
+        var orderNumber: String
+        var customerName: String
+        var items: [String]
+        var timeText: String
+        var serviceText: String?
     }
 
     // Station selection (for this view only – now visual only)
@@ -65,6 +66,26 @@ struct DigitalBonesView: View {
 
     init(onRefundToCashPoint: ((Bone) -> Void)? = nil) {
         self.onRefundToCashPoint = onRefundToCashPoint
+
+        let segmented = UISegmentedControl.appearance()
+
+        // Background of whole control (keeps it dark)
+        segmented.backgroundColor = UIColor.white.withAlphaComponent(0.10)
+
+        // Selected tab background (brighter dark-mode highlight)
+        segmented.selectedSegmentTintColor = UIColor.white.withAlphaComponent(0.25)
+
+        // Unselected text
+        segmented.setTitleTextAttributes([
+            .foregroundColor: UIColor.white.withAlphaComponent(0.7),
+            .font: UIFont.systemFont(ofSize: 15, weight: .regular)
+        ], for: .normal)
+
+        // Selected text
+        segmented.setTitleTextAttributes([
+            .foregroundColor: UIColor.white,
+            .font: UIFont.systemFont(ofSize: 15, weight: .semibold)
+        ], for: .selected)
     }
 
     // MARK: - Map BoneOrder -> [BasketEntry] for reprinting
@@ -165,114 +186,362 @@ struct DigitalBonesView: View {
 
                     VStack(spacing: 0) {
                         // 🔹 Tab picker
-                        HStack {
+                        HStack(spacing: 12) {
+                            // Close chevron
+                            Button {
+                                dismiss()
+                            } label: {
+                                Image(systemName: "chevron.right")
+                                    .foregroundColor(.white)
+                                    .font(.system(size: 18, weight: .semibold))
+                                    .padding(.trailing, 4)
+                            }
+                            
+                            // Segmented tabs
                             Picker("", selection: $selectedTab) {
                                 ForEach(Tab.allCases, id: \.self) { tab in
                                     Text(tab.title).tag(tab)
                                 }
                             }
                             .pickerStyle(.segmented)
+                            .frame(maxWidth: .infinity)   // 👈 take all remaining width
+                            .layoutPriority(1)
+                            
+                            Spacer(minLength: 8)
+                            
+                            // 🔍 Search bar (global for both tabs)
+                            HStack(spacing: 8) {
+                                Image(systemName: "magnifyingglass")
+                                    .foregroundColor(.white.opacity(0.7))
+                                
+                                ZStack(alignment: .leading) {
+                                    if searchText.isEmpty {
+                                        Text("חיפוש הזמנה")
+                                            .foregroundColor(.white.opacity(0.55))  // 👈 visible placeholder
+                                            .padding(.leading, 2)
+                                    }
+                                    
+                                    TextField("", text: $searchText)
+                                        .textFieldStyle(.plain)
+                                        .foregroundColor(.white)
+                                        .accentColor(.white)
+                                        .keyboardType(.default)                 // normal keyboard
+                                        .textInputAutocapitalization(.never)    // no auto-cap
+                                        .autocorrectionDisabled(true)           // iOS 15+ – disable autocorrect & suggestions
+                                        .textContentType(.none)
+                                        .disableAutocorrection(true)
+                                        .textInputAutocapitalization(.never)
+                                        .tint(.white)
+                                }
+                                
+                                if !searchText.isEmpty {
+                                    Button {
+                                        searchText = ""
+                                    } label: {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .foregroundColor(.white.opacity(0.6))
+                                            .font(.system(size: 16, weight: .semibold))
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .frame(width: 220)
+                            .background(Color.white.opacity(0.15))
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            
+                            // Station picker (also shared for active & history)
+                            Button {
+                                showStationPicker = true
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Text(selectedStation.rawValue)
+                                        .font(.system(size: 16, weight: .semibold))
+                                    Image(systemName: "chevron.down")
+                                        .font(.system(size: 13, weight: .semibold))
+                                }
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 14)
+                                .frame(width: 130)
+                                .padding(.vertical, 6)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                        .fill(Color.white.opacity(0.16))
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                                .stroke(Color.white.opacity(0.25), lineWidth: 1)
+                                        )
+                                )
+                            }
                         }
                         .padding(.horizontal, 24)
                         .padding(.top, 8)
-                        .padding(.bottom, 4)
-
-                        if selectedTab == .active {
-                            // === ACTIVE TAB: original top/bottom layout ===
-                           VStack(spacing: 0) {
-                                // ===== TOP HALF (selector + search + "בהכנה" + incoming bones) =====
-                                VStack(spacing: 0) {
-                                    // Header row (close + title + search + station pill)
-                                    HStack(spacing: 12) {
-                                        // Close chevron
-                                        Button {
-                                            dismiss()
-                                        } label: {
-                                            Image(systemName: "chevron.right")
-                                                .foregroundColor(.white)
-                                                .font(.system(size: 18, weight: .semibold))
-                                                .padding(.trailing, 4)
-                                        }
-
-                                        // Title
-                                        Text("בהכנה")
-                                            .font(.system(size: 22, weight: .bold))
+                        
+                        .padding(.bottom, 6)
+                        
+                        let hasQuery = !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        
+                        if hasQuery {
+                            // ============================
+                            // SEARCH MODE: show both active + history results
+                            // ============================
+                            VStack(alignment: .leading, spacing: 8) {
+                                
+                                // --- ACTIVE RESULTS (received/ready) ---
+                                if !toPrepare.isEmpty || !readyBones.isEmpty {
+                                    HStack {
+                                        Text("פעיל – תוצאות חיפוש")
+                                            .font(.system(size: 18, weight: .bold))
                                             .foregroundColor(.white)
-
                                         Spacer()
-
-                                        // 🔍 Search bar
-                                        HStack(spacing: 8) {
-                                            Image(systemName: "magnifyingglass")
-                                                .foregroundColor(.white.opacity(0.7))
-
-                                            TextField("חיפוש הזמנה…", text: $searchText)
-                                                .textFieldStyle(.plain)
-                                                .foregroundColor(.white)
-                                                .accentColor(.white)
-                                                .disableAutocorrection(true)
-                                                .textInputAutocapitalization(.never)
-
-                                            if !searchText.isEmpty {
-                                                Button {
-                                                    searchText = ""
-                                                } label: {
-                                                    Image(systemName: "xmark.circle.fill")
-                                                        .foregroundColor(.white.opacity(0.6))
-                                                        .font(.system(size: 16, weight: .semibold))
-                                                }
-                                                .buttonStyle(.plain)
-                                            }
-                                        }
-                                        .padding(.horizontal, 10)
-                                        .padding(.vertical, 6)
-                                        .frame(width: 220)
-                                        .background(Color.white.opacity(0.15))
-                                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-
-                                        // Station picker
-                                        Button {
-                                            showStationPicker = true
-                                        } label: {
-                                            HStack(spacing: 6) {
-                                                Text(selectedStation.rawValue)
-                                                    .font(.system(size: 16, weight: .semibold))
-                                                Image(systemName: "chevron.down")
-                                                    .font(.system(size: 13, weight: .semibold))
-                                            }
-                                            .foregroundColor(.white)
-                                            .padding(.horizontal, 14)
-                                            .padding(.vertical, 6)
-                                            .background(
-                                                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                                                    .fill(Color.white.opacity(0.16))
-                                                    .overlay(
-                                                        RoundedRectangle(cornerRadius: 18, style: .continuous)
-                                                            .stroke(Color.white.opacity(0.25), lineWidth: 1)
-                                                    )
-                                            )
-                                        }
                                     }
                                     .padding(.horizontal, 24)
-                                    .padding(.top, 8)
-                                    .padding(.bottom, 6)
-
+                                    .padding(.top, 4)
+                                    
+                                    ScrollView(.horizontal, showsIndicators: false) {
+                                        HStack(alignment: .top, spacing: hSpacing) {
+                                            // received / בהכנה
+                                            ForEach(toPrepare) { bone in
+                                                BoneCardView(
+                                                    bone: bone,
+                                                    slotLabel: nil,
+                                                    actionTitle: "פרטים",
+                                                    actionColor: brandColor,
+                                                    maxTicketHeight: max(topMaxTicketHeight, bottomMaxTicketHeight)
+                                                ) {
+                                                    withAnimation {
+                                                        selectedBone = bone
+                                                    }
+                                                }
+                                                .frame(width: cardWidth)
+                                                .onTapGesture {
+                                                    withAnimation {
+                                                        selectedBone = bone
+                                                    }
+                                                }
+                                            }
+                                            
+                                            // ready (if you want, but it's already flattened into readyBones)
+                                            ForEach(readyBones) { bone in
+                                                BoneCardView(
+                                                    bone: bone,
+                                                    slotLabel: nil,
+                                                    actionTitle: "פרטים",
+                                                    actionColor: brandColor,
+                                                    maxTicketHeight: max(topMaxTicketHeight, bottomMaxTicketHeight)
+                                                ) {
+                                                    withAnimation {
+                                                        selectedBone = bone
+                                                    }
+                                                }
+                                                .frame(width: cardWidth)
+                                                .onTapGesture {
+                                                    withAnimation {
+                                                        selectedBone = bone
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        .padding(.horizontal, horizontalPadding)
+                                        .padding(.vertical, 12)
+                                    }
+                                }
+                                
+                                // --- HISTORY RESULTS (collected) ---
+                                if !historyBones.isEmpty {
+                                    HStack {
+                                        Text("היסטוריה – תוצאות חיפוש")
+                                            .font(.system(size: 18, weight: .bold))
+                                            .foregroundColor(.white)
+                                        Spacer()
+                                    }
+                                    .padding(.horizontal, 24)
+                                    .padding(.top, 4)
+                                    
+                                    ScrollView(.horizontal, showsIndicators: false) {
+                                        HStack(alignment: .top, spacing: hSpacing) {
+                                            ForEach(historyBones) { bone in
+                                                BoneCardView(
+                                                    bone: bone,
+                                                    slotLabel: nil,
+                                                    actionTitle: "פרטים",
+                                                    actionColor: brandColor,
+                                                    maxTicketHeight: max(topMaxTicketHeight, bottomMaxTicketHeight)
+                                                ) {
+                                                    withAnimation {
+                                                        selectedBone = bone
+                                                    }
+                                                }
+                                                .frame(width: cardWidth)
+                                                .onTapGesture {
+                                                    withAnimation {
+                                                        selectedBone = bone
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        .padding(.horizontal, horizontalPadding)
+                                        .padding(.vertical, 12)
+                                    }
+                                }
+                                
+                                // --- No results ---
+                                if toPrepare.isEmpty && readyBones.isEmpty && historyBones.isEmpty {
+                                    Text("אין תוצאות חיפוש")
+                                        .font(.system(size: 16))
+                                        .foregroundColor(.white.opacity(0.6))
+                                        .padding(.horizontal, 24)
+                                        .padding(.top, 16)
+                                }
+                                
+                                Spacer()
+                            }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            
+                        } else if selectedTab == .active {
+                            // ============================
+                            // ACTIVE TAB (as we had before, with BAR/KITCHEN split)
+                            // ============================
+                            if selectedStation == .bar {
+                                // --- BAR: single full-height row ---
+                                VStack(spacing: 0) {
+                                    HStack {
+                                        Text("פתוחים")
+                                            .font(.system(size: 22, weight: .bold))
+                                            .foregroundColor(.white)
+                                        Spacer()
+                                    }
+                                    .padding(.horizontal, 24)
+                                    .padding(.top, 4)
+                                    .padding(.bottom, 4)
+                                    
                                     if isLoading && toPrepare.isEmpty && readyBones.isEmpty {
                                         Spacer()
                                         ProgressView().tint(.white)
                                         Spacer()
                                     } else {
                                         ScrollView(.horizontal, showsIndicators: false) {
-                                            HStack(alignment: .top, spacing: 20) {
-                                                ForEach(toPrepare) { bone in
+                                            // all open bones: ready + received
+                                            let openBones = (readyBones + toPrepare)
+                                                .sorted { $0.orderId > $1.orderId }   // newest first, optional
+
+                                            HStack(alignment: .top, spacing: hSpacing) {
+                                                ForEach(openBones) { bone in
                                                     BoneCardView(
                                                         bone: bone,
                                                         slotLabel: nil,
-                                                        actionTitle: "שליחת SMS",
-                                                        actionColor: brandColor,
-                                                        maxTicketHeight: topMaxTicketHeight
+                                                        actionTitle: "מוכן",
+                                                        actionColor: brandColor,          // 👈 single brand color
+                                                        maxTicketHeight: geo.size.height
                                                     ) {
-                                                        markReadyUI(bone)
+                                                        markBarReadyAndCollected(bone)   // 👈 new helper
+                                                    }
+                                                    .frame(width: cardWidth)
+                                                    .frame(maxHeight: .infinity)
+                                                    .onTapGesture {
+                                                        withAnimation(.easeInOut(duration: 0.25)) {
+                                                            selectedBone = bone
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            .padding(.horizontal, horizontalPadding)
+                                            .padding(.vertical, 12)
+                                        }
+                                    }
+                                    
+                                    Spacer(minLength: 0)
+                                }
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                
+                            } else {
+                                // --- KITCHEN: original 2-row layout ---
+                                VStack(spacing: 0) {
+                                    // TOP HALF – בהכנה
+                                    VStack(spacing: 0) {
+                                        HStack {
+                                            Text("בהכנה")
+                                                .font(.system(size: 22, weight: .bold))
+                                                .foregroundColor(.white)
+                                            Spacer()
+                                        }
+                                        .padding(.horizontal, 24)
+                                        .padding(.top, 4)
+                                        .padding(.bottom, 4)
+                                        
+                                        if isLoading && toPrepare.isEmpty && readyBones.isEmpty {
+                                            Spacer()
+                                            ProgressView().tint(.white)
+                                            Spacer()
+                                        } else {
+                                            ScrollView(.horizontal, showsIndicators: false) {
+                                                HStack(alignment: .top, spacing: 20) {
+                                                    ForEach(toPrepare) { bone in
+                                                        BoneCardView(
+                                                            bone: bone,
+                                                            slotLabel: nil,
+                                                            actionTitle: "שליחת SMS",
+                                                            actionColor: brandColor,
+                                                            maxTicketHeight: topMaxTicketHeight,
+                                                            action: {
+                                                                // READY (4) – send SMS / notifications
+                                                                markReadyUI(bone)
+                                                            },
+                                                            secondaryTitle: "נאסף",
+                                                            secondaryAction: {
+                                                                // DIRECT COLLECTED (5)
+                                                                markKitchenCollectedDirect(bone)
+                                                            }
+                                                        )
+                                                        .frame(width: cardWidth)
+                                                        .onTapGesture {
+                                                            withAnimation(.easeInOut(duration: 0.2)) {
+                                                                selectedBone = bone
+                                                            }
+                                                        }
+                                                        .frame(width: cardWidth)
+                                                        .onTapGesture {
+                                                            withAnimation(.easeInOut(duration: 0.2)) {
+                                                                selectedBone = bone
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                .padding(.horizontal, 24)
+                                            }
+                                        }
+                                        
+                                        Spacer()
+                                    }
+                                    .frame(height: halfHeight)
+                                    
+                                    Divider()
+                                        .background(Color.white.opacity(0.2))
+                                    
+                                    // BOTTOM HALF – מוכן לאיסוף
+                                    VStack(spacing: 0) {
+                                        HStack {
+                                            Text("מוכן לאיסוף")
+                                                .font(.system(size: 20, weight: .bold))
+                                                .foregroundColor(.white)
+                                            Spacer()
+                                        }
+                                        .padding(.horizontal, 24)
+                                        .padding(.top, 8)
+                                        .padding(.bottom, 4)
+                                        
+                                        HStack(alignment: .top, spacing: hSpacing) {
+                                            ForEach(readySlots.indices, id: \.self) { index in
+                                                if let bone = readySlots[index] {
+                                                    BoneCardView(
+                                                        bone: bone,
+                                                        slotLabel: "עמדה \(index + 1)",
+                                                        actionTitle: "נאסף",
+                                                        actionColor: brandColor,
+                                                        maxTicketHeight: bottomMaxTicketHeight
+                                                    ) {
+                                                        markCollectedUI(at: index)
                                                     }
                                                     .frame(width: cardWidth)
                                                     .onTapGesture {
@@ -280,72 +549,33 @@ struct DigitalBonesView: View {
                                                             selectedBone = bone
                                                         }
                                                     }
+                                                } else {
+                                                    EmptySlotView(index: index, width: cardWidth)
                                                 }
                                             }
-                                            .padding(.horizontal, 24)
                                         }
-                                    }
-
-                                    Spacer()
-                                }
-                                .frame(height: halfHeight)
-
-                                Divider()
-                                    .background(Color.white.opacity(0.2))
-
-                                // ===== BOTTOM HALF ("מוכן לאיסוף" + ready slots) =====
-                                VStack(spacing: 0) {
-                                    HStack {
-                                        Text("מוכן לאיסוף")
-                                            .font(.system(size: 20, weight: .bold))
-                                            .foregroundColor(.white)
+                                        .padding(.horizontal, horizontalPadding)
+                                        
                                         Spacer()
                                     }
-                                    .padding(.horizontal, 24)
-                                    .padding(.top, 8)
-                                    .padding(.bottom, 4)
-
-                                    HStack(alignment: .top, spacing: hSpacing) {
-                                        ForEach(readySlots.indices, id: \.self) { index in
-                                            if let bone = readySlots[index] {
-                                                BoneCardView(
-                                                    bone: bone,
-                                                    slotLabel: "עמדה \(index + 1)",
-                                                    actionTitle: "נאסף",
-                                                    actionColor: brandColor,
-                                                    maxTicketHeight: bottomMaxTicketHeight
-                                                ) {
-                                                    markCollectedUI(at: index)
-                                                }
-                                                .frame(width: cardWidth)
-                                                .onTapGesture {
-                                                    withAnimation(.easeInOut(duration: 0.2)) {
-                                                        selectedBone = bone
-                                                    }
-                                                }
-                                            } else {
-                                                EmptySlotView(index: index, width: cardWidth)
-                                            }
-                                        }
-                                    }
-                                    .padding(.horizontal, horizontalPadding)
-
-                                    Spacer()
+                                    .frame(height: halfHeight)
                                 }
-                                .frame(height: halfHeight)
                             }
-                        }else {
-                            // === HISTORY LAYOUT ===
+                            
+                        } else {
+                            // ============================
+                            // HISTORY TAB (same as before, just using full height)
+                            // ============================
                             VStack(alignment: .leading, spacing: 8) {
                                 HStack {
-                                    Text("היסטוריית הזמנות (נאספו)")
+                                    Text("הסטוריית הזמנות")
                                         .font(.system(size: 18, weight: .bold))
                                         .foregroundColor(.white)
                                     Spacer()
                                 }
                                 .padding(.horizontal, 24)
                                 .padding(.top, 8)
-
+                                
                                 if historyBones.isEmpty {
                                     Text("אין הזמנות בהיסטוריה לעמדה זו")
                                         .font(.system(size: 16))
@@ -362,18 +592,14 @@ struct DigitalBonesView: View {
                                                     slotLabel: nil,
                                                     actionTitle: "פרטים",
                                                     actionColor: brandColor,
-                                                    maxTicketHeight: max(topMaxTicketHeight, bottomMaxTicketHeight)
+                                                    maxTicketHeight: geo.size.height
                                                 ) {
-                                                    // tap "פרטים" → show overlay
-                                                    withAnimation(.easeInOut(duration: 0.2)) {
-                                                        selectedBone = bone
-                                                    }
+                                                    withAnimation { selectedBone = bone }
                                                 }
                                                 .frame(width: cardWidth)
+                                                .frame(maxHeight: .infinity)
                                                 .onTapGesture {
-                                                    withAnimation(.easeInOut(duration: 0.2)) {
-                                                        selectedBone = bone
-                                                    }
+                                                    withAnimation { selectedBone = bone }
                                                 }
                                             }
                                         }
@@ -413,7 +639,7 @@ struct DigitalBonesView: View {
                                         let total = fullOrder.invoiceItems.reduce(0) { $0 + $1.lineTotal }
 
                                         let mode: DiningMode = {
-                                            if fullOrder.bone.serviceText == "**TA**" {
+                                            if fullOrder.bone.serviceText?.uppercased() == "TA" {
                                                 return .takeAway
                                             } else {
                                                 return .dineIn
@@ -518,8 +744,31 @@ struct DigitalBonesView: View {
         guard readySlots.indices.contains(index),
               let bone = readySlots[index] else { return }
 
+        // 1) Remove from ready slots immediately
         readySlots[index] = nil
 
+        // 2) Update local allOrders status → .collected
+        if let orderIndex = allOrders.firstIndex(where: { $0.id == bone.orderId }) {
+            let order = allOrders[orderIndex]
+
+            let updated = BoneOrder(
+                id: order.id,
+                bone: order.bone,
+                status: .collected,          // 👈 move to collected
+                placedAt: order.placedAt,
+                stations: order.stations,
+                invoiceItems: order.invoiceItems,
+                stationItems: order.stationItems,
+                lines: order.lines
+            )
+
+            allOrders[orderIndex] = updated
+        }
+
+        // 3) Rebuild UI lists so it appears in history immediately
+        rebuildBonesFromOrders()
+
+        // 4) Tell backend (async, doesn't block UI)
         Task {
             let ok = await setStatus(orderId: bone.orderId, to: 5, miniAppId: miniAppId)
             if !ok {
@@ -527,7 +776,115 @@ struct DigitalBonesView: View {
             }
         }
     }
+    private func markBarReadyAndCollected(_ bone: Bone) {
+        // 1) Update local model → treat as collected so it jumps to history immediately
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+            if let idx = allOrders.firstIndex(where: { $0.id == bone.orderId }) {
+                let order = allOrders[idx]
 
+                let updated = BoneOrder(
+                    id: order.id,
+                    bone: order.bone,
+                    status: .collected,      // 👈 go straight to history in UI
+                    placedAt: order.placedAt,
+                    stations: order.stations,
+                    invoiceItems: order.invoiceItems,
+                    stationItems: order.stationItems,
+                    lines: order.lines
+                )
+
+                allOrders[idx] = updated
+            }
+
+            // Rebuild lists: removed from toPrepare/readyBones, added to historyBones
+            rebuildBonesFromOrders()
+        }
+
+        // 2) Backend: first READY (4) so notifications fire, then after 1s mark COLLECTED (5)
+        Task {
+            let ok4 = await setStatus(orderId: bone.orderId, to: 4, miniAppId: miniAppId)
+            if !ok4 {
+                print("❌ BAR: Failed to setStatus READY(4) for order \(bone.orderId)")
+            } else {
+                print("✅ BAR: setStatus READY(4) for order \(bone.orderId)")
+            }
+
+            // wait 1 second
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+
+            let ok5 = await setStatus(orderId: bone.orderId, to: 5, miniAppId: miniAppId)
+            if !ok5 {
+                print("❌ BAR: Failed to setStatus COLLECTED(5) for order \(bone.orderId)")
+            } else {
+                print("✅ BAR: setStatus COLLECTED(5) for order \(bone.orderId)")
+            }
+        }
+    }
+    private func markBarSetReady(_ bone: Bone) {
+        // 1) Update local allOrders → status = .ready
+        if let idx = allOrders.firstIndex(where: { $0.id == bone.orderId }) {
+            let order = allOrders[idx]
+
+            let updated = BoneOrder(
+                id: order.id,
+                bone: order.bone,
+                status: .ready,
+                placedAt: order.placedAt,
+                stations: order.stations,
+                invoiceItems: order.invoiceItems,
+                stationItems: order.stationItems,
+                lines: order.lines
+            )
+
+            allOrders[idx] = updated
+        }
+
+        // 2) Rebuild lists so this order moves from toPrepare → readyBones
+        rebuildBonesFromOrders()
+
+        // 3) Backend: set status 4 (READY) so notifications go out
+        Task {
+            let ok = await setStatus(orderId: bone.orderId, to: 4, miniAppId: miniAppId)
+            if !ok {
+                print("❌ BAR: Failed to setStatus READY(4) for order \(bone.orderId)")
+            } else {
+                print("✅ BAR: setStatus READY(4) for order \(bone.orderId)")
+            }
+        }
+    }
+
+    private func markBarSetCollected(_ bone: Bone) {
+        // 1) Update local allOrders → status = .collected
+        if let idx = allOrders.firstIndex(where: { $0.id == bone.orderId }) {
+            let order = allOrders[idx]
+
+            let updated = BoneOrder(
+                id: order.id,
+                bone: order.bone,
+                status: .collected,
+                placedAt: order.placedAt,
+                stations: order.stations,
+                invoiceItems: order.invoiceItems,
+                stationItems: order.stationItems,
+                lines: order.lines
+            )
+
+            allOrders[idx] = updated
+        }
+
+        // 2) Rebuild lists so this order moves from readyBones → historyBones
+        rebuildBonesFromOrders()
+
+        // 3) Backend: set status 5 (COLLECTED)
+        Task {
+            let ok = await setStatus(orderId: bone.orderId, to: 5, miniAppId: miniAppId)
+            if !ok {
+                print("❌ BAR: Failed to setStatus COLLECTED(5) for order \(bone.orderId)")
+            } else {
+                print("✅ BAR: setStatus COLLECTED(5) for order \(bone.orderId)")
+            }
+        }
+    }
     // MARK: - Rebuild bones arrays from allOrders (show ALL stations, filtered by search)
 
     private func rebuildBonesFromOrders() {
@@ -559,16 +916,16 @@ struct DigitalBonesView: View {
 
         let received = relevant
             .filter { $0.status == .received }
-            .sorted { $0.placedAt > $1.placedAt }
+            .sorted { $0.id > $1.id }
 
         let ready = relevant
             .filter { $0.status == .ready }
-            .sorted { $0.placedAt > $1.placedAt }
+            .sorted { $0.id > $1.id }
 
-        // 👇 NEW: collected for history
+        // collected for history
         let collected = relevant
             .filter { $0.status == .collected }
-            .sorted { $0.placedAt > $1.placedAt }
+            .sorted { $0.id > $1.id }
 
         // Top row – בהכנה
         toPrepare = received.map { stationBone(from: $0) }
@@ -620,11 +977,21 @@ struct DigitalBonesView: View {
         let lines: [BonesLineDTO]
         let status: Int?
 
+        // 👇 NEW
+        let currency: String?
+        let service: String?          // "ta" / "sit"
+        let paymentMethod: String?    // "paid" / "unpaid" etc.
+
         enum CodingKeys: String, CodingKey {
             case id, ticketNumber, source, bucket, stage, placedAt, scheduledFor,
                  customerName, customerDisplayName, totalGBP, itemSummary,
                  isDelivery, shortCode, lines, status
             case Status = "Status"
+
+            // 👇 NEW KEYS (match JSON)
+            case currency
+            case service
+            case paymentMethod
         }
 
         init(from decoder: Decoder) throws {
@@ -644,6 +1011,7 @@ struct DigitalBonesView: View {
             shortCode    = try? c.decodeIfPresent(String.self, forKey: .shortCode)
             lines        = try c.decode([BonesLineDTO].self, forKey: .lines)
 
+            // existing status fallback logic
             if let s = try? c.decodeIfPresent(Int.self, forKey: .status) {
                 status = s
             } else if let sStr = try? c.decodeIfPresent(String.self, forKey: .status),
@@ -656,6 +1024,59 @@ struct DigitalBonesView: View {
                 status = sInt
             } else {
                 status = nil
+            }
+
+            // 👇 NEW FIELD DECODING
+            currency      = try? c.decodeIfPresent(String.self, forKey: .currency)
+            service       = try? c.decodeIfPresent(String.self, forKey: .service)
+            paymentMethod = try? c.decodeIfPresent(String.self, forKey: .paymentMethod)
+        }
+    }
+    
+    private func markKitchenCollectedDirect(_ bone: Bone) {
+        // 1) Remove from toPrepare
+        if let idx = toPrepare.firstIndex(of: bone) {
+            toPrepare.remove(at: idx)
+        }
+
+        // 2) Also remove from readyBones / slots if it happens to be there
+        if let idx = readyBones.firstIndex(of: bone) {
+            readyBones.remove(at: idx)
+        }
+        for i in readySlots.indices {
+            if readySlots[i]?.orderId == bone.orderId {
+                readySlots[i] = nil
+            }
+        }
+
+        // 3) Update local allOrders → status = .collected
+        if let orderIndex = allOrders.firstIndex(where: { $0.id == bone.orderId }) {
+            let order = allOrders[orderIndex]
+
+            let updated = BoneOrder(
+                id: order.id,
+                bone: order.bone,
+                status: .collected,
+                placedAt: order.placedAt,
+                stations: order.stations,
+                invoiceItems: order.invoiceItems,
+                stationItems: order.stationItems,
+                lines: order.lines
+            )
+
+            allOrders[orderIndex] = updated
+        }
+
+        // 4) Rebuild UI so it moves to history
+        rebuildBonesFromOrders()
+
+        // 5) Backend: status 5 (COLLECTED)
+        Task {
+            let ok = await setStatus(orderId: bone.orderId, to: 5, miniAppId: miniAppId)
+            if !ok {
+                print("❌ KITCHEN: Failed to setStatus COLLECTED(5) for order \(bone.orderId)")
+            } else {
+                print("✅ KITCHEN: setStatus COLLECTED(5) for order \(bone.orderId)")
             }
         }
     }
@@ -695,6 +1116,7 @@ struct DigitalBonesView: View {
 
     private func mapOrder(_ dto: BonesOrderDTO) -> BoneOrder {
         // Map overall status
+        
         let status: BoneOrderStatus = {
             switch dto.status ?? 0 {
             case 4:  return .ready
@@ -720,7 +1142,22 @@ struct DigitalBonesView: View {
         let timeText = df.string(from: israelTime)
 
         // Service text (TA or sit)
-        let serviceText: String? = dto.itemSummary.contains("לקחת") ? "**TA**" : nil
+        // Service text (TA / delivery etc.) based on dto.service
+        let serviceText: String? = {
+            let raw = dto.service?.lowercased() ?? ""
+
+            if raw == "ta" || raw == "takeaway" {
+                return "TA"
+            }
+
+            // If you ever want a label for delivery:
+            if dto.isDelivery {
+                return "DELIVERY"
+            }
+
+            // Sit-in → no label
+            return nil
+        }()
 
         // --- Build raw entries for: all, and per-station ---
 
@@ -830,14 +1267,14 @@ struct DigitalBonesView: View {
         let displayNumber = dto.ticketNumber ?? dto.id
 
         let bone = Bone(
+            id: dto.id,   // 👈 stable
             orderId: dto.id,
-            orderNumber:  String(displayNumber),
+            orderNumber: String(displayNumber),
             customerName: displayName.replacingOccurrences(of: "Customer", with: ""),
             items: boneAllItems,
             timeText: timeText,
             serviceText: serviceText
         )
-
         return BoneOrder(
             id: dto.id,
             bone: bone,
@@ -877,6 +1314,7 @@ struct DigitalBonesView: View {
                 print("❌ bones HTTP \(http.statusCode)\n\(body)")
                 return
             }
+          
 
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .custom { dec in
@@ -958,9 +1396,17 @@ private func makeRenderLines(from items: [String]) -> [RenderLine] {
 
         if raw.hasPrefix("MOD:") {
             isModifier = true
-            displayText = String(raw.dropFirst("MOD:".count))
-                .trimmingCharacters(in: .whitespaces)
-        } else {
+
+            let rawValue = String(raw.dropFirst("MOD:".count)).trimmingCharacters(in: .whitespaces)
+
+            // NEW: strip title before colon → keep only the value
+            if let colonIndex = rawValue.firstIndex(of: ":") {
+                let afterColon = rawValue[rawValue.index(after: colonIndex)...]
+                displayText = afterColon.trimmingCharacters(in: .whitespaces)
+            } else {
+                displayText = rawValue
+            }
+        }else {
             let trimmed = raw.trimmingCharacters(in: .whitespaces)
             if trimmed.hasPrefix("+") {
                 isModifier = true
@@ -1008,6 +1454,10 @@ private struct BoneCardView: View {
     let maxTicketHeight: CGFloat
     let action: () -> Void
 
+    // 👇 NEW – optional secondary button
+    var secondaryTitle: String? = nil
+    var secondaryAction: (() -> Void)? = nil
+
     var body: some View {
         VStack(spacing: 8) {
             if let slotLabel {
@@ -1018,30 +1468,29 @@ private struct BoneCardView: View {
 
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(alignment: .trailing, spacing: 6) {
-                    if let service = bone.serviceText,
-                       !service.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        Text(service)
-                            .font(.system(size: 20, weight: .bold, design: .monospaced))
+                    if bone.serviceText?.uppercased() == "TA" {
+                        Text("** TA **")
+                            .font(.system(size: 24, weight: .heavy, design: .monospaced))
                             .foregroundColor(.black)
                             .frame(maxWidth: .infinity, alignment: .center)
-                            .multilineTextAlignment(.center)
+                            .padding(.bottom, 4)
                     }
 
                     let name = bone.customerName.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "Customer", with: "")
                     Text(name.isEmpty ? "שם לקוח" : name)
-                        .font(.system(size: 20, weight: .bold, design: .monospaced))
-                        .foregroundColor(.black)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .multilineTextAlignment(.center)
-
-                    Text("#\(bone.orderNumber)")
                         .font(.system(size: 24, weight: .bold, design: .monospaced))
                         .foregroundColor(.black)
                         .frame(maxWidth: .infinity, alignment: .center)
                         .multilineTextAlignment(.center)
 
+                    Text("#\(bone.orderNumber)")
+                        .font(.system(size: 20, weight: .bold, design: .monospaced))
+                        .foregroundColor(.black)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .multilineTextAlignment(.center)
+
                     Text(bone.timeText)
-                        .font(.system(size: 11, weight: .regular, design: .monospaced))
+                        .font(.system(size: 16, weight: .regular, design: .monospaced))
                         .foregroundColor(.black)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .multilineTextAlignment(.leading)
@@ -1072,10 +1521,11 @@ private struct BoneCardView: View {
                                 .padding(.vertical, 2)
                             } else if line.isModifier {
                                 Text(verbatim: line.text)
-                                    .font(.system(size: 16, weight: .regular, design: .monospaced))
-                                    .foregroundColor(.black.opacity(0.85))
+                                    .font(.system(size: 20, weight: .regular, design: .monospaced))
+                                    .foregroundColor(.black.opacity(1.0))
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .multilineTextAlignment(.leading)
+                                    .padding(.leading, 25)
                             } else {
                                 Text(verbatim: line.text)
                                     .font(.system(size: 20, weight: .bold, design: .monospaced))
@@ -1103,14 +1553,39 @@ private struct BoneCardView: View {
                     .stroke(Color.black.opacity(0.3), lineWidth: 1)
             )
 
-            Button(action: action) {
-                Text(actionTitle)
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundColor(.white)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 28)
-                    .background(actionColor)
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            // 👇 NEW: one or two buttons horizontally
+            if let secondaryTitle, let secondaryAction {
+                HStack(spacing: 8) {
+                    Button(action: action) {
+                        Text(actionTitle)
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 35)
+                            .background(actionColor)
+                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    }
+
+                    Button(action: secondaryAction) {
+                        Text(secondaryTitle)
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 35)
+                            .background(Color.gray.opacity(0.9))
+                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    }
+                }
+            } else {
+                Button(action: action) {
+                    Text(actionTitle)
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 35)
+                        .background(actionColor)
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                }
             }
         }
         .environment(\.layoutDirection, .rightToLeft)
@@ -1138,12 +1613,12 @@ private struct InvoiceOverlayView: View {
 
             ScrollView {
                 VStack(alignment: .trailing, spacing: 6) {
-                    if let service = bone.serviceText,
-                       !service.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        Text(service)
-                            .font(.system(size: 26, weight: .bold, design: .monospaced))
+                    if bone.serviceText?.uppercased() == "TA" {
+                        Text("** TA **")
+                            .font(.system(size: 28, weight: .heavy, design: .monospaced))
                             .foregroundColor(.black)
                             .frame(maxWidth: .infinity, alignment: .center)
+                            .padding(.bottom, 6)
                     }
 
                     let name = bone.customerName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1250,6 +1725,7 @@ private struct InvoiceOverlayView: View {
         .environment(\.layoutDirection, .rightToLeft)
     }
 }
+
 
 // MARK: - Empty slot
 

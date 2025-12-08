@@ -10,7 +10,7 @@
 		<false/>
 	</dict>
 	<key>NSAppClipRequestEphemeralUserNotification</key>
-	<string>true</string>
+	<true/>
 	<key>UIAppFonts</key>
 	<array>
 		<string>primaries-demibold-aaa.otf</string>
