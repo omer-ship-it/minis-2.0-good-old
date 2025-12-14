@@ -14,16 +14,30 @@ final class MenuApiModel: ObservableObject {
     @Published var version: Int = 0
 
     func load(shopId explicit: String? = nil, skipCache: Bool = false) {
-        let shopId = "12"
+        let miniAppIdFromDefaults = UserDefaults.standard.integer(forKey: "miniAppId")
+        let storedShopId = UserDefaults.standard.string(forKey: "shopId")
+
+        let shopId: String
+        if let explicit = explicit, !explicit.isEmpty {
+            shopId = explicit
+        } else if miniAppIdFromDefaults > 0 {
+            shopId = String(miniAppIdFromDefaults)
+        } else if let storedShopId, !storedShopId.isEmpty {
+            shopId = storedShopId
+        } else {
+            print("❌ MenuApiModel.load → no explicit, no miniAppId, no stored shopId → aborting load")
+            errorMessage = "No shop selected"
+            return
+        }
+
+        print("🛒 MenuApiModel.load → using shopId=\(shopId) (explicit=\(explicit ?? "nil"), miniAppId=\(miniAppIdFromDefaults), storedShopId=\(storedShopId ?? "nil"))")
+
         let t = Int(Date().timeIntervalSince1970)
         guard let url = URL(string: "https://minis.studio/json/\(shopId).json?\(t)") else {
             errorMessage = "Invalid URL"
             return
         }
 
-        // 🔹 Two caches:
-        // 1) UserDefaults (primary, fast)
-        // 2) File in Caches (fallback, legacy)
         let cacheKey = "MenuJSON_\(shopId)"
         let cacheURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
             .appendingPathComponent("shop_\(shopId).json")
@@ -31,7 +45,6 @@ final class MenuApiModel: ObservableObject {
         isLoading = true
         errorMessage = nil
 
-        // 0️⃣ Try to show cached data immediately (unless caller explicitly skips cache)
         if !skipCache, items.isEmpty {
             if let cachedData = UserDefaults.standard.data(forKey: cacheKey) {
                 Task { await parseAndApply(data: cachedData) }
@@ -45,10 +58,7 @@ final class MenuApiModel: ObservableObject {
 
             if let err = err {
                 Task { @MainActor in
-                    // Network failed → keep whatever we already have (cached),
-                    // just show error for debugging.
                     self.isLoading = false
-                    // Only show error if we don't have any items at all
                     if self.items.isEmpty {
                         self.errorMessage = err.localizedDescription
                     }
@@ -66,36 +76,50 @@ final class MenuApiModel: ObservableObject {
                 return
             }
 
-            // 1️⃣ Persist JSON in both UserDefaults and file cache
             UserDefaults.standard.set(data, forKey: cacheKey)
             try? data.write(to: cacheURL)
 
-            // 2️⃣ Parse + apply to UI
             Task { await self.parseAndApply(data: data) }
         }.resume()
     }
 
+
     private func parseAndApply(data: Data) async {
+        // 0️⃣ First, extract customization (title, subtitle, image, font, direction, currency)
+        applyMiniCustomization(from: data)
+
         do {
-            if let wrapper = try? JSONDecoder().decode(ShopPayload.self, from: data),
-               let products = wrapper.products {
-                #if DEBUG
-                if let ceasar = products.first(where: { $0.name.contains("קיסר") }) {
-                    print("🔍 CEASAR RAW GROUPS:")
-                    ceasar.modifiers?.forEach { g in
-                        print("  • title=\(g.title ?? "?"), type=\(g.type ?? "nil"), mode=\(g.selection?.mode ?? "nil")")
+            let decoder = JSONDecoder()
+
+            // 1️⃣ Try wrapper: { theme: {...}, products: [...] }
+            if let wrapper = try? decoder.decode(ShopPayload.self, from: data) {
+                if let products = wrapper.products {
+                    print("📦 parseAndApply → ShopPayload wrapper with \(products.count) products")
+                    #if DEBUG
+                    if let ceasar = products.first(where: { $0.name.contains("קיסר") }) {
+                        ceasar.modifiers?.forEach { g in
+                            print("  • title=\(g.title ?? "?"), type=\(g.type ?? "nil"), mode=\(g.selection?.mode ?? "nil")")
+                        }
                     }
+                    #endif
+
+                    await apply(mapProducts(products))
+                    // save referral after successful product load
+                    saveReferralForCurrentShop(kind: .fastlane)
+                    return
+                } else {
+                    print("📦 parseAndApply → ShopPayload decoded but products == nil")
                 }
-                #endif
-                await apply(mapProducts(products))
-                return
+            } else {
+                print("📦 parseAndApply → ShopPayload decode FAILED, trying plain array")
             }
 
-            let products = try JSONDecoder().decode([ProductPayload].self, from: data)
+            // 2️⃣ Fallback: plain [ProductPayload] (old simple format)
+            let products = try decoder.decode([ProductPayload].self, from: data)
+            print("📦 parseAndApply → decoded plain [ProductPayload] with \(products.count) products")
 
             #if DEBUG
             if let ceasar = products.first(where: { $0.name.contains("קיסר") }) {
-                print("🔍 CEASAR RAW GROUPS:")
                 ceasar.modifiers?.forEach { g in
                     print("  • title=\(g.title ?? "?"), type=\(g.type ?? "nil"), mode=\(g.selection?.mode ?? "nil")")
                 }
@@ -103,7 +127,10 @@ final class MenuApiModel: ObservableObject {
             #endif
 
             await apply(mapProducts(products))
+            saveReferralForCurrentShop(kind: .fastlane)
+
         } catch {
+            print("❌ parseAndApply JSON error:", error.localizedDescription)
             await MainActor.run {
                 errorMessage = "JSON parse error: \(error.localizedDescription)"
                 isLoading = false
@@ -157,10 +184,7 @@ final class MenuApiModel: ObservableObject {
                 type = .options
             }
 
-            #if DEBUG
-            print("🧩 mapModifiers: title=\(g.title ?? "?"), rawType=\(rawType ?? "nil"), mode=\(selectionMode ?? "nil") → \(type)")
-            #endif
-
+           
             return ModifierGroup(type: type, title: g.title ?? "בחירה", items: items)
         }
 
@@ -169,9 +193,14 @@ final class MenuApiModel: ObservableObject {
 }
 
 struct ShopPayload: Decodable {
+    struct Theme: Decodable {
+        let direction: String?   // "rtl" / "ltr" / nil
+        let currency: String?    // "ILS", "GBP", etc. (optional)
+    }
+
+    let theme: Theme?
     let products: [ProductPayload]?
 }
-
 struct ProductPayload: Decodable {
     let productId: Int
     let name: String
@@ -284,6 +313,20 @@ struct ShellMenuItem: Identifiable {
         self.description = description
         self.status = status
         self.stockQuantity = stockQuantity
+    }
+}
+
+extension ShellMenuItem {
+    var isAvailable: Bool {
+        // 0 = out of stock → hide
+        if let status = status, status == 0 {
+            return false
+        }
+        // Optional: also hide if stockQuantity is known and <= 0
+        if let stock = stockQuantity, stock <= 0 {
+            return false
+        }
+        return true
     }
 }
 
@@ -430,7 +473,7 @@ enum OrderAPI {
     }
 
     static func submitOrder(
-        orderId: Int? = nil,                     // 👈 NEW
+        orderId: Int? = nil,
         entries: [BasketEntry],
         total: Double,
         diningMode: DiningMode,
@@ -442,10 +485,31 @@ enum OrderAPI {
         ticketNumber: Int? = nil,
         completion: @escaping (Result<Int, Error>) -> Void
     ) {
-        let shopId = 12
-        let uuid = UserDefaults.standard.string(forKey: "anonUUID") ?? UUID().uuidString
-        let defaultEmail = UserDefaults.standard.string(forKey: "userEmail") ?? "customer@example.com"
-        let defaultName  = UserDefaults.standard.string(forKey: "userName")  ?? "Customer"
+        let defaults = UserDefaults.standard
+
+        // 🔥 Resolve miniAppId / shopId dynamically
+        let miniAppIdFromDefaults = defaults.integer(forKey: "miniAppId")
+        let storedShopIdString    = defaults.string(forKey: "shopId")
+
+        let miniAppId: Int
+        if miniAppIdFromDefaults > 0 {
+            miniAppId = miniAppIdFromDefaults
+        } else if
+            let s = storedShopIdString,
+            let v = Int(s)
+        {
+            miniAppId = v
+        } else {
+            // No id at all → fail clearly instead of silently using 12
+            completion(.failure(SubmitError(message: "No miniAppId / shopId selected for this order")))
+            return
+        }
+
+        print("🧾 OrderAPI.submitOrder → miniAppId=\(miniAppId) (miniAppIdFromDefaults=\(miniAppIdFromDefaults), storedShopId=\(storedShopIdString ?? "nil"))")
+
+        let uuid         = defaults.string(forKey: "anonUUID")    ?? UUID().uuidString
+        let defaultEmail = defaults.string(forKey: "userEmail")   ?? "customer@example.com"
+        let defaultName  = defaults.string(forKey: "userName")    ?? "Customer"
 
         let effectiveName: String = {
             let trimmed = customerName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -464,7 +528,7 @@ enum OrderAPI {
             ]
         }
 
-        let apnsToken = UserDefaults.standard.string(forKey: "apnsToken") ?? ""
+        let apnsToken = defaults.string(forKey: "apnsToken") ?? ""
 
         let serviceValue: String = {
             switch diningMode {
@@ -477,7 +541,7 @@ enum OrderAPI {
             "uuid": uuid,
             "email": defaultEmail,
             "name": effectiveName,
-            "miniAppId": shopId,
+            "miniAppId": miniAppId,        // 👈 now dynamic
             "total": total,
             "basket": basketPayload,
             "diningMode": diningMode.rawValue,
@@ -487,17 +551,17 @@ enum OrderAPI {
                 "token": apnsToken
             ]
         ]
-        
+
         if let orderId = orderId {
             payload["orderId"] = orderId
         }
-        
+
         if let ticketNumber = ticketNumber {
-            payload["ticketNumber"] = ticketNumber   // 👈 NEW: save local slip id in DB
+            payload["ticketNumber"] = ticketNumber   // save local slip id in DB
         }
+
         // 🧾 Optional: rich payment summary
         if let payment {
-            // Clamp to 2 decimals just to be safe
             func r2(_ x: Double) -> Double {
                 (x * 100).rounded() / 100
             }
@@ -528,7 +592,6 @@ enum OrderAPI {
         var finalMeta: [String: Any] = zcreditMeta ?? [:]
 
         if let payment {
-            // Don’t overwrite if caller explicitly set paymentMethod
             if finalMeta["paymentMethod"] == nil {
                 finalMeta["paymentMethod"] = payment.method.rawValue
             }
@@ -773,9 +836,9 @@ final class ZCreditPaymentHandler {
              completion: @escaping (ZCreditResult) -> Void) {
 
         // You still hard-code pinpads – leaving your logic as-is
-    //  UserDefaults.standard.set("48796294", forKey: "pinpadId")   // cashpoint 1
-         UserDefaults.standard.set("48796855", forKey: "pinpadId")   // cashpoint 2
-      // UserDefaults.standard.set("48796856", forKey: "pinpadId")      // cashpoint 3
+      //    UserDefaults.standard.set("48796294", forKey: "pinpadId")   // cashpoint 1
+        UserDefaults.standard.set("48796855", forKey: "pinpadId")   // cashpoint 2
+       //UserDefaults.standard.set("48796856", forKey: "pinpadId")      // cashpoint 3
 
         let _ = CashpointID(rawValue: UserDefaults.standard.integer(forKey: "cashpointID")) ?? .one
 
@@ -1140,47 +1203,134 @@ final class ZCreditApplePayHandler: NSObject, PKPaymentAuthorizationControllerDe
         }
     }
 }
- func saveReferralForCurrentShop(kind: MiniKind = .fastlane) {
-    guard let shopIdString = UserDefaults.standard.string(forKey: "shopId"),
-          let shopId = Int(shopIdString) else {
+
+struct MiniCustomization: Decodable {
+    struct Mini: Decodable {
+        let miniAppType: String?
+        let miniAppId: Int?
+        let title: String?
+        let subtitle: String?
+        let miniImage: String?
+    }
+
+    struct Theme: Decodable {
+        let direction: String?
+        let currency: String?
+        let fontName: String?   // 👈 NEW
+    }
+
+    let mini: Mini?
+    let theme: Theme?
+}
+
+func applyMiniCustomization(from data: Data) {
+    let decoder = JSONDecoder()
+    guard let cfg = try? decoder.decode(MiniCustomization.self, from: data) else {
         return
     }
 
+    let std = UserDefaults.standard
+
+    if let mini = cfg.mini {
+        if let title = mini.title, !title.isEmpty {
+            std.set(title, forKey: "miniTitle")
+        }
+        if let subtitle = mini.subtitle {
+            std.set(subtitle, forKey: "miniSubtitle")
+        }
+        if let img = mini.miniImage, !img.isEmpty {
+            std.set(img, forKey: "miniImage")
+        }
+        if let id = mini.miniAppId {
+            std.set(id, forKey: "miniAppId")
+            std.set(String(id), forKey: "shopId")
+        }
+    }
+
+    if let theme = cfg.theme {
+        if let dirRaw = theme.direction?.lowercased() {
+            let resolved = (dirRaw == "rtl") ? "rtl" : "ltr"
+            std.set(resolved, forKey: "direction")
+            print("🌍 applyMiniCustomization → theme.direction=\(dirRaw) → stored=\(resolved)")
+        }
+
+        if let currency = theme.currency {
+            std.set(currency, forKey: "currency")
+        }
+
+        if let fontName = theme.fontName, !fontName.isEmpty {
+            std.set(fontName, forKey: "fontName")
+            print("🔤 applyMiniCustomization → theme.fontName=\(fontName)")
+        }
+    }
+}
+func appFont(size: CGFloat, weight: Font.Weight = .regular) -> Font {
+    let name = UserDefaults.standard.string(forKey: "fontName") ?? "System"
+
+    if name == "System" {
+        return .system(size: size, weight: weight)
+    } else {
+        // Weight handling for custom fonts is a bit looser, but good enough for now
+        return .custom(name, size: size)
+    }
+}
+
+
+func saveReferralForCurrentShop(kind: MiniKind = .fastlane) {
+    let std = UserDefaults.standard
+
+    // 1️⃣ Resolve the current mini id
+    let miniIdFromDefaults = std.integer(forKey: "miniAppId")
+    let miniId: Int
+
+    if miniIdFromDefaults > 0 {
+        miniId = miniIdFromDefaults
+    } else if
+        let shopIdString = std.string(forKey: "shopId"),
+        let parsed = Int(shopIdString)
+    {
+        miniId = parsed
+    } else {
+        print("⚠️ saveReferralForCurrentShop → no miniAppId / shopId in defaults, aborting")
+        return
+    }
+
+    // 2️⃣ Resolve dynamic title / subtitle / image from JSON / customization
+    //    (set these keys when you load your mini’s JSON/customizations)
+    let title    = std.string(forKey: "miniTitle")    ?? "Mini"
+    let subtitle = std.string(forKey: "miniSubtitle") ?? ""
+    let imageURL = std.string(forKey: "miniImage")    ?? ""
+
+    print("💾 saveReferralForCurrentShop → miniAppId=\(miniId), kind=\(kind), title=\(title)")
+
+    // 3️⃣ Load existing referrals from the app group
     let defaults = UserDefaults(suiteName: "group.minis")
     var referrals: [MiniReferral] = []
 
-    // Load existing
     if let data = defaults?.data(forKey: "miniReferralsJSON"),
        let decoded = try? JSONDecoder().decode([MiniReferral].self, from: data) {
         referrals = decoded
     }
 
-    // HARD-CODED referral data
-    let title = "בית העם"
-    let subtitle = "תפריט בוקר"
-    let imageURL = "https://img.mako.co.il/2024/11/24/beithaam_vitrina_re_autoOrient_i.jpg"
-
-    if let idx = referrals.firstIndex(where: { $0.miniAppId == shopId && $0.kind == kind }) {
-
+    // 4️⃣ Upsert (update if exists, else insert) for this miniId+kind
+    if let idx = referrals.firstIndex(where: { $0.miniAppId == miniId && $0.kind == kind }) {
         let old = referrals.remove(at: idx)
 
         let updated = MiniReferral(
             title: title,
             subtitle: subtitle,
-            miniAppId: shopId,
+            miniAppId: miniId,
             imageURL: imageURL,
-            sharedAt: Date(),     // refresh timestamp
+            sharedAt: Date(),   // refresh timestamp
             kind: old.kind
         )
 
         referrals.insert(updated, at: 0)
-
     } else {
-
         let newReferral = MiniReferral(
             title: title,
             subtitle: subtitle,
-            miniAppId: shopId,
+            miniAppId: miniId,
             imageURL: imageURL,
             sharedAt: Date(),
             kind: kind
@@ -1192,7 +1342,6 @@ final class ZCreditApplePayHandler: NSObject, PKPaymentAuthorizationControllerDe
     if let data = try? JSONEncoder().encode(referrals) {
         defaults?.set(data, forKey: "miniReferralsJSON")
     }
-     
 }
 
 // GLOBAL helper – accessible from anywhere
@@ -1254,6 +1403,125 @@ enum KeyboardCustomization {
         let tv = UITextView.appearance()
         tv.inputAssistantItem.leadingBarButtonGroups = []
         tv.inputAssistantItem.trailingBarButtonGroups = []
+    }
+}
+
+func resetShopUserDefaultsToDefaults() {
+    let defaults = UserDefaults.standard
+    defaults.set("#f7f5f1", forKey: "bg")
+    defaults.set("#000000", forKey: "categorySelectedTextColor")
+    defaults.set("#000000", forKey: "categoryTextColor")
+    defaults.removeObject(forKey: "priceColor")
+    defaults.removeObject(forKey: "selectedCategoryColor")
+    defaults.set("#000000", forKey: "brandColor")
+    defaults.set("ltr", forKey: "direction")
+    defaults.set("#000000", forKey: "basketBadgeTextColor")
+    defaults.set("#000000", forKey: "priceTextColor")
+    defaults.set("#FFFFFF", forKey: "basketBadgeBackground")
+    defaults.set("#FFFFFF", forKey: "badgeTextColor")
+    defaults.set("#000000", forKey: "buttonColor")
+    defaults.set("#FFFFFF", forKey: "buttonTextColor")
+    defaults.set("System", forKey: "fontName")
+    defaults.set("false", forKey: "isDelivery")
+    defaults.set("GBP", forKey: "currency")
+}
+
+func disableQuickTypeBar() {
+    let tf = UITextField.appearance()
+    tf.inputAssistantItem.leadingBarButtonGroups = []
+    tf.inputAssistantItem.trailingBarButtonGroups = []
+
+    let tv = UITextView.appearance()
+    tv.inputAssistantItem.leadingBarButtonGroups = []
+    tv.inputAssistantItem.trailingBarButtonGroups = []
+}
+
+
+import Foundation
+import PassKit
+
+final class StripeApplePayHandler: NSObject, PKPaymentAuthorizationControllerDelegate {
+
+    private var controller: PKPaymentAuthorizationController?
+    private var completion: ((Result<PKPayment, Error>) -> Void)?
+    private var didAuthorize = false
+    private var authorizedPayment: PKPayment?
+
+    func start(
+        merchantId: String,
+        countryCode: String = "GB",
+        currencyCode: String = "GBP",
+        label: String = "Order",
+        total: Double,
+        completion: @escaping (Result<PKPayment, Error>) -> Void
+    ) {
+        self.completion = completion
+        self.didAuthorize = false
+        self.authorizedPayment = nil
+
+        guard PKPaymentAuthorizationController.canMakePayments(usingNetworks: [.visa, .masterCard, .amex]) else {
+            completion(.failure(NSError(domain: "applepay", code: -1, userInfo: [
+                NSLocalizedDescriptionKey: "Apple Pay not available on this device."
+            ])))
+            return
+        }
+
+        let req = PKPaymentRequest()
+        req.merchantIdentifier = merchantId
+        req.countryCode = countryCode
+        req.currencyCode = currencyCode
+        req.merchantCapabilities = [.capability3DS]
+        req.supportedNetworks = [.visa, .masterCard, .amex]
+
+        let amount = NSDecimalNumber(value: total)
+        req.paymentSummaryItems = [
+            PKPaymentSummaryItem(label: label, amount: amount, type: .final)
+        ]
+
+        let ctrl = PKPaymentAuthorizationController(paymentRequest: req)
+        ctrl.delegate = self
+        self.controller = ctrl
+
+        ctrl.present { ok in
+            if !ok {
+                completion(.failure(NSError(domain: "applepay", code: -2, userInfo: [
+                    NSLocalizedDescriptionKey: "Failed to present Apple Pay sheet."
+                ])))
+            }
+        }
+    }
+
+    // MARK: - PKPaymentAuthorizationControllerDelegate
+
+    func paymentAuthorizationController(
+        _ controller: PKPaymentAuthorizationController,
+        didAuthorizePayment payment: PKPayment,
+        handler completion: @escaping (PKPaymentAuthorizationResult) -> Void
+    ) {
+        didAuthorize = true
+        authorizedPayment = payment
+
+        // For now we approve locally (no charge)
+        completion(PKPaymentAuthorizationResult(status: .success, errors: nil))
+    }
+
+    func paymentAuthorizationControllerDidFinish(_ controller: PKPaymentAuthorizationController) {
+        controller.dismiss {
+            defer {
+                self.controller = nil
+                self.completion = nil
+                self.authorizedPayment = nil
+                self.didAuthorize = false
+            }
+
+            if self.didAuthorize, let pay = self.authorizedPayment {
+                self.completion?(.success(pay))
+            } else {
+                self.completion?(.failure(NSError(domain: "applepay", code: -999, userInfo: [
+                    NSLocalizedDescriptionKey: "Cancelled"
+                ])))
+            }
+        }
     }
 }
 

@@ -611,7 +611,6 @@ struct PriceTextField: UIViewRepresentable {
     }
 }
 
-import UIKit
 
 extension UIImage {
     /// Scale proportionally so that max(width, height) == maxDimension

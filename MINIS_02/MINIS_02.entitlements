@@ -13,7 +13,11 @@
 	</array>
 	<key>com.apple.developer.in-app-payments</key>
 	<array>
+		<string>merchant.Hood</string>
+		<string>merchant.hood.uk</string>
+		<string>merchant.minis.sandbox</string>
 		<string>merchant.minis.zcredit</string>
+		<string>merchant.hood23</string>
 	</array>
 	<key>com.apple.security.app-sandbox</key>
 	<true/>

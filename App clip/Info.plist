@@ -13,6 +13,7 @@
 	<true/>
 	<key>UIAppFonts</key>
 	<array>
+		<string>Oswald-VariableFont_wght.ttf</string>
 		<string>primaries-demibold-aaa.otf</string>
 	</array>
 </dict>

@@ -41,7 +41,8 @@ struct CashPointView: View {
     @State private var printSuccessScale: CGFloat = 0.6
     @State private var printSuccessOpacity: Double = 0
     @State private var unpaidOrderId: Int? = nil
-   
+    @State private var hasPrintedFromSwipe: Bool = false   // already sent to kitchen?
+    @State private var pendingTicketNumber: Int? = nil     // ticket used by swipe + completeOrder
     @State private var reportPreviewText: String = ""
     private func buildSalesReportData(for type: ReportType) -> PrinterManager.SalesReportData {
 
@@ -1129,7 +1130,35 @@ struct CashPointView: View {
     }
     
     
-    
+    /// Set stock of all products in the selected category to 0 (out of stock)
+    private func clearStockForSelectedCategory() {
+        // No category / notes pseudo-category → do nothing
+        guard !selectedCategory.isEmpty,
+              selectedCategory != "✏️ הערות"
+        else { return }
+
+        // All items in this category
+        let itemsInCategory = api.items.filter { $0.category == selectedCategory }
+        guard !itemsInCategory.isEmpty else { return }
+
+        for item in itemsInCategory {
+            let pid = item.id
+
+            // 0 = out of stock
+            stockAdjustments[pid] = 0
+
+            // Update toggle so UI immediately shows as out of stock
+            stockToggles.binding(for: pid).wrappedValue = false
+
+            // Mark for API sync
+            dirtyStockIds.insert(pid)
+        }
+
+        print("📦 clearStockForSelectedCategory: '\(selectedCategory)' → \(itemsInCategory.count) items set to 0")
+
+        // Commit to server after debounce
+        scheduleStockCommit()
+    }
     private func bumpStockAmount(productId: Int, delta: Int) {
         var currentOpt = stockAdjustments[productId]  // Int? (nil = ∞ / untracked)
 
@@ -1765,58 +1794,69 @@ struct CashPointView: View {
     }
 
     private var filteredItems: [ShellMenuItem] {
-        // 1) If search is active → global search, ignore categories
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !query.isEmpty {
-            let q = query
-                .folding(options: .diacriticInsensitive, locale: .current)
-                .lowercased()
+           // 1) If search is active → global search (all categories)
+           let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+           if !query.isEmpty {
+               let q = query
+                   .folding(options: .diacriticInsensitive, locale: .current)
+                   .lowercased()
 
-            return api.items.filter { item in
-                item.name
-                    .folding(options: .diacriticInsensitive, locale: .current)
-                    .lowercased()
-                    .contains(q)
-            }
-        }
+               let base = api.items.filter { item in
+                   item.name
+                       .folding(options: .diacriticInsensitive, locale: .current)
+                       .lowercased()
+                       .contains(q)
+               }
 
-        // 2) No search → regular category behaviour
-        guard !selectedCategory.isEmpty else { return [] }
+               // 🔹 Sort: active first, then by `sort`, then name
+               return base.sorted { lhs, rhs in
+                   productSortKey(lhs) < productSortKey(rhs)
+               }
+           }
 
-        if selectedCategory == "✏️ הערות" {
-            return [
-                ShellMenuItem(
-                    id: -1001,
-                    name: "הערה לבר",
-                    price: 0,
-                    category: "✏️ הערות",
-                    modifiers: nil,
-                    imageURL: nil,
-                    description: nil
-                ),
-                ShellMenuItem(
-                    id: -1002,
-                    name: "הערה למטבח",
-                    price: 0,
-                    category: "✏️ הערות",
-                    modifiers: nil,
-                    imageURL: nil,
-                    description: nil
-                ),
-                ShellMenuItem(
-                    id: -1003,
-                    name: "הערה לוטרינה",   // 👈 NEW bakery note
-                    price: 0,
-                    category: "✏️ הערות",
-                    modifiers: nil,
-                    imageURL: nil,
-                    description: nil
-                )
-            ]
-        }
+           // 2) No search → regular category behaviour
+           guard !selectedCategory.isEmpty else { return [] }
 
-        return api.items.filter { $0.category == selectedCategory }
-    }
+           // Notes category stays as-is (no stock / sort logic needed)
+           if selectedCategory == "✏️ הערות" {
+               return [
+                   ShellMenuItem(
+                       id: -1001,
+                       name: "הערה לבר",
+                       price: 0,
+                       category: "✏️ הערות",
+                       modifiers: nil,
+                       imageURL: nil,
+                       description: nil
+                   ),
+                   ShellMenuItem(
+                       id: -1002,
+                       name: "הערה למטבח",
+                       price: 0,
+                       category: "✏️ הערות",
+                       modifiers: nil,
+                       imageURL: nil,
+                       description: nil
+                   ),
+                   ShellMenuItem(
+                       id: -1003,
+                       name: "הערה לוטרינה",
+                       price: 0,
+                       category: "✏️ הערות",
+                       modifiers: nil,
+                       imageURL: nil,
+                       description: nil
+                   )
+               ]
+           }
+
+           let base = api.items.filter { $0.category == selectedCategory }
+
+           // 🔹 Sort: active first, then by `sort`, then name
+           return base.sorted { lhs, rhs in
+               productSortKey(lhs) < productSortKey(rhs)
+           }
+       }
     // MARK: - Side menu
 
     // MARK: - Side menu (animated)
@@ -2062,10 +2102,10 @@ struct CashPointView: View {
                                 // Row 1: Title + Stock
                                 HStack(spacing: 12) {
                                     Button {
-                                            withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
-                                                showSideMenu.toggle()
-                                            }
-                                        } label: {
+                                        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                                            showSideMenu.toggle()
+                                        }
+                                    } label: {
                                         Image(systemName: "line.3.horizontal")
                                             .font(.system(size: 20, weight: .bold))
                                             .padding(8)
@@ -2075,22 +2115,41 @@ struct CashPointView: View {
 
                                     Spacer()
                                     
-                                    Button {
-                                        isStockEditMode.toggle()
-                                        if isStockEditMode {
-                                            stockEditWorkItem?.cancel()
-                                            stockEditWorkItem = nil
-                                            editingStockProductId = nil
+                                    HStack(spacing: 8) {
+                                        if isStockEditMode,
+                                           !selectedCategory.isEmpty,
+                                           selectedCategory != "✏️ הערות" {
+                                            Button {
+                                                clearStockForSelectedCategory()
+                                            } label: {
+                                                Text("אפס")
+                                                    .font(.system(size: 14, weight: .semibold))
+                                                    .padding(.horizontal, 10)
+                                                    .padding(.vertical, 6)
+                                                    .background(Color(.systemGray5))
+                                                    .clipShape(Capsule())
+                                            }
                                         }
-                                    } label: {
-                                        Text(isRtl
-                                             ? (isStockEditMode ? "סיים" : "מלאי")
-                                             : (isStockEditMode ? "Done" : "Stock"))
-                                        .font(.system(size: 14, weight: .semibold))
-                                        .padding(.horizontal, 12)
-                                        .padding(.vertical, 6)
-                                        .background(Color(.systemGray5))
-                                        .clipShape(Capsule())
+
+                                        Button {
+                                            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                                                isStockEditMode.toggle()
+                                                if isStockEditMode {
+                                                    stockEditWorkItem?.cancel()
+                                                    stockEditWorkItem = nil
+                                                    editingStockProductId = nil
+                                                }
+                                            }
+                                        } label: {
+                                            Text(isRtl
+                                                 ? (isStockEditMode ? "סיים" : "מלאי")
+                                                 : (isStockEditMode ? "Done" : "Stock"))
+                                                .font(.system(size: 14, weight: .semibold))
+                                                .padding(.horizontal, 12)
+                                                .padding(.vertical, 6)
+                                                .background(Color(.systemGray5))
+                                                .clipShape(Capsule())
+                                        }
                                     }
                                 }
                                 
@@ -2157,7 +2216,7 @@ struct CashPointView: View {
                                         Image(systemName: "line.3.horizontal")
                                             .font(.system(size: 20, weight: .bold))
                                             .padding(8)
-                                            .background(Color(.systemGray5))
+                                            
                                             .clipShape(Circle())
                                     }
                                     
@@ -2222,13 +2281,29 @@ struct CashPointView: View {
                                     .clipShape(Capsule())
                                 }
                                 
+                                if isStockEditMode,
+                                   !selectedCategory.isEmpty,
+                                   selectedCategory != "✏️ הערות" {
+                                    Button {
+                                        clearStockForSelectedCategory()
+                                    } label: {
+                                        Text("אפס")
+                                            .font(.system(size: 14, weight: .semibold))
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 6)
+                                            .background(Color(.systemGray5))
+                                            .clipShape(Capsule())
+                                    }
+                                }
                                 // Stock mode toggle
                                 Button {
-                                    isStockEditMode.toggle()
-                                    if isStockEditMode {
-                                        stockEditWorkItem?.cancel()
-                                        stockEditWorkItem = nil
-                                        editingStockProductId = nil
+                                    withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                                        isStockEditMode.toggle()
+                                        if isStockEditMode {
+                                            stockEditWorkItem?.cancel()
+                                            stockEditWorkItem = nil
+                                            editingStockProductId = nil
+                                        }
                                     }
                                 } label: {
                                     Text(isRtl
@@ -2636,52 +2711,56 @@ struct CashPointView: View {
                         }
                         .frame(maxWidth: .infinity)
                         .sheet(isPresented: $showMessageSheet) {
-                            MessageSheet(
-                                isRtl: isRtl,
-                                targetIsKitchen: messageTargetIsKitchen,
-                                targetIsBakery: messageTargetIsBakery,
-                                text: $messageText,
-                                priceText: $messagePrice
-                            ) { text, price in
-                                let name: String
-                                if messageTargetIsKitchen {
-                                    name = "הערה למטבח"
-                                } else if messageTargetIsBakery {
-                                    name = "הערה לוטרינה"
-                                } else {
-                                    name = "הערה לבר"
-                                }
+                                                 MessageSheet(
+                                                     isRtl: isRtl,
+                                                     targetIsKitchen: messageTargetIsKitchen,
+                                                     targetIsBakery: messageTargetIsBakery,
+                                                     text: $messageText,
+                                                     priceText: $messagePrice
+                                                 ) { text, price in
+                                                     let name: String
+                                                     if messageTargetIsKitchen {
+                                                         name = "הערה למטבח"
+                                                     } else if messageTargetIsBakery {
+                                                         name = "הערה לוטרינה"
+                                                     } else {
+                                                         name = "הערה לבר"
+                                                     }
 
-                                let item = ShellMenuItem(
-                                    id: Int.random(in: -9000 ... -8000),
-                                    name: name,
-                                    price: price,
-                                    category: "הערות",
-                                    modifiers: nil,
-                                    imageURL: nil,
-                                    description: nil
-                                )
+                                                     let item = ShellMenuItem(
+                                                         id: Int.random(in: -9000 ... -8000),
+                                                         name: name,
+                                                         price: price,
+                                                         category: "הערות",
+                                                         modifiers: nil,
+                                                         imageURL: nil,
+                                                         description: nil
+                                                     )
 
-                                addToBasket(
-                                    item: item,
-                                    quantity: 1,
-                                    subtitle: text,
-                                    unitPrice: price
-                                )
+                                                     addToBasket(
+                                                         item: item,
+                                                         quantity: 1,
+                                                         subtitle: text,
+                                                         unitPrice: price
+                                                     )
 
-                                messageTargetIsKitchen = false
-                                messageTargetIsBakery  = false
-                            }
-                            .presentationDetents([.height(280)])
-                            .presentationDragIndicator(.hidden)
-                        }
-                        
+                                                     messageTargetIsKitchen = false
+                                                     messageTargetIsBakery  = false
+                                                 }
+                                                 .presentationDetents([.height(280)])
+                                                 .presentationDragIndicator(.hidden)
+                                             }
                         Divider()
                         
-                        if !isPhone && !isStockEditMode {
-                            Divider()
-                            basketPanel(inline: true)
-                        }
+                        if !isPhone {
+                                                   if !isStockEditMode {
+                                                       basketPanel(inline: true)
+                                                           .transition(
+                                                               .move(edge: isRtl ? .leading : .trailing)
+                                                               .combined(with: .opacity)
+                                                           )
+                                                   }
+                                               }
                     }
                 }
                 .navigationBarHidden(true)
@@ -2703,7 +2782,7 @@ struct CashPointView: View {
                         VStack(spacing: 16) {
                             ZStack {
                                 Circle()
-                                    .fill(Color.green)
+                                    .fill(.primary)
                                     .frame(width: 110, height: 110)
                                 
                                 Image(systemName: "checkmark")
@@ -2781,6 +2860,7 @@ struct CashPointView: View {
                 )
                 .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
             }
+            
             .fullScreenCover(isPresented: $showBones) {
                 DigitalBonesView(onRefundToCashPoint: { bone in
                     // Refund into current basket
@@ -2874,6 +2954,87 @@ struct CashPointView: View {
             }
             .fullScreenCover(isPresented: $showOrderFlow) {
                 OrderFlowView(
+                    onSendToKitchen: {
+                        // 🔥 1. PRINT ONLY ONCE PER ORDER
+                        guard !hasPrintedFromSwipe else { return }
+
+                        let entriesArray = basketEntriesSorted
+                        guard !entriesArray.isEmpty else { return }
+
+                        let totalForPrint = finalTotal
+
+                        // 🔢 Shared ticket number for slip + server
+                        let ticketNumber: Int = {
+                            if let existing = unpaidOrderId {
+                                // If server already gave us an id for this order (slider used before)
+                                return existing
+                            }
+                            if let pending = pendingTicketNumber {
+                                return pending
+                            }
+                            let new = nextLocalTicketNumber()
+                            pendingTicketNumber = new
+                            return new
+                        }()
+
+                        // Clean customer name for slip
+                        let safeName: String? = {
+                            let n = posSavedName
+                                .trimmingCharacters(in: .whitespacesAndNewlines)
+                                .replacingOccurrences(of: "Customer", with: "")
+                            return n.isEmpty ? nil : n
+                        }()
+
+                        // 🖨️ PRINT – once
+                        PrinterManager.shared.printCashPointSplit(
+                            orderNumber: ticketNumber,
+                            entries: entriesArray,
+                            total: totalForPrint,
+                            diningMode: diningMode,
+                            customerName: safeName
+                        )
+
+                        hasPrintedFromSwipe = true
+
+                        // 🧾 2. FIRST SUBMIT – UNPAID SNAPSHOT
+                        let unpaidSummary = OrderAPI.PaymentSummary(
+                            method: .unpaid,
+                            cashAmount: 0,
+                            cardAmount: 0
+                        )
+
+                        // Optional meta to match your curl
+                        let meta: [String: Any] = [
+                            "paymentMethod": "unpaid",
+                            "cashAmount": 0,
+                            "cardAmount": 0
+                        ]
+
+                        OrderAPI.submitOrder(
+                            orderId: nil,                    // new order
+                            entries: entriesArray,
+                            total: totalForPrint,
+                            diningMode: diningMode,
+                            source: "cashpoint",
+                            customerName: safeName,
+                            customerPhone: nil,
+                            payment: unpaidSummary,
+                            zcreditMeta: meta,
+                            ticketNumber: ticketNumber
+                        ) { result in
+                            DispatchQueue.main.async {
+                                switch result {
+                                case .success(let serverOrderId):
+                                    // Save so completeOrder can UPDATE this order
+                                    unpaidOrderId = serverOrderId
+                                    print("🟢 slider unpaid submit → orderId=\(serverOrderId) ticket=\(ticketNumber)")
+                                case .failure(let error):
+                                    print("❌ slider unpaid submit failed:", error)
+                                    // here you could show a small warning if you want
+                                }
+                            }
+                        }
+                    },
                     total: finalTotal,
                     isRtl: isRtl,
                     diningMode: $diningMode,
@@ -2897,11 +3058,11 @@ struct CashPointView: View {
                     allowPayLater: (!isPayLaterMode) || hasAddedLinesInPayLater,
                     skipServiceStep: hasChosenServiceMode,
                     onServiceChosen: {
-                        hasChosenServiceMode = true      // 👈 mark as chosen from inside flow
+                        hasChosenServiceMode = true   // mark service step as chosen from inside flow
                     }
                 )
             }
-            .sheet(item: $adminDraft) { draft in
+            .fullScreenCover(item: $adminDraft) { draft in
                 AdminProductEditorView(
                     draft: draft,
                     mode: draft.productId == nil ? .create : .edit,
@@ -3032,7 +3193,8 @@ struct CashPointView: View {
         let phoneSnapshot = customerPhone
 
         // If this started as an unpaid order → reuse that id as ticket number
-        let existingIdForPayLater: Int? = (isPayLaterMode ? unpaidOrderId : nil)
+        // If we already created an unpaid order (slider) or a pay-later order → reuse its id
+        let existingIdForPayLater: Int? = unpaidOrderId
 
         let ticketNumber: Int = {
             if let existing = existingIdForPayLater {
@@ -3058,7 +3220,7 @@ struct CashPointView: View {
         }
 
         // ✅ PRINT *IMMEDIATELY* with the local ticketNumber
-        if !printerEntries.isEmpty {
+        if !hasPrintedFromSwipe, !printerEntries.isEmpty {
             PrinterManager.shared.printCashPointSplit(
                 orderNumber: ticketNumber,
                 entries: printerEntries,
@@ -3067,7 +3229,9 @@ struct CashPointView: View {
                 customerName: nameSnapshot
             )
         }
-
+        // inside submitOrder success case in completeOrder
+        hasPrintedFromSwipe = false
+        pendingTicketNumber = nil
         // Clear basket & close the flow immediately in the UI
         basket.removeAll()
         showOrderFlow   = false
@@ -3153,7 +3317,19 @@ struct CashPointView: View {
             }
         }
     }
+    
+    
+    private func productSortKey(_ item: ShellMenuItem) -> (Int, Int, String) {
+        // Active = 0, Inactive = 1 → active items always come first
+        let isActive = stockToggles.isOn(item.id)
+        let activeRank = isActive ? 0 : 1
 
+        // Use the index in api.items as "sort" value
+        let originalIndex = api.items.firstIndex(where: { $0.id == item.id }) ?? Int.max
+
+        return (activeRank, originalIndex, item.name)
+    }
+    
     private func addToBasket(item: ShellMenuItem, quantity: Int, subtitle: String?, unitPrice: Double) {
         // 1) Always squeeze / collapse the previously expanded row
         withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
@@ -3356,6 +3532,172 @@ struct CashPointView: View {
         )
     }
     
+     struct SwipeToSendOrderView: View {
+        let isRtl: Bool
+        let hasSent: Bool
+        let onSend: () -> Void
+
+        @State private var dragOffset: CGFloat = 0
+        @State private var showFlame: Bool = false
+        @State private var flameScale: CGFloat = 0.5
+        @State private var flameOpacity: Double = 0
+        @State private var flameOffsetY: CGFloat = 12
+        @State private var flameRotation: Double = 0
+        @State private var flameHorizontalOffset: CGFloat = 0
+
+        var body: some View {
+            // 👇 **Smaller slider width**
+            let totalWidth: CGFloat = 250
+            let thumbDiameter: CGFloat = 40
+
+            // 👇 Thumb movement = entire track minus thumb space
+            let horizontalPadding: CGFloat = 8      // for left/right breathing room
+            let maxTravel = totalWidth - thumbDiameter - horizontalPadding
+
+            let threshold = maxTravel * 0.70        // commit swipe when crossing 70%
+
+            let trackColor = hasSent ? Color(.systemGray4) : Color(.systemGray5)
+            let thumbColor = hasSent ? Color(.systemGray3) : Color.black
+            let titleText  = hasSent
+                ? (isRtl ? "הזמנה נשלחה" : "Order sent")
+                : (isRtl ? "שלח הזמנה"   : "Send order")
+
+            VStack(spacing: 6) {
+
+                // 🔥 BLACK FLAME ABOVE SLIDER
+                ZStack {
+                    if showFlame {
+                        ZStack {
+                            Image(systemName: "flame.fill")
+                                .font(.system(size: 58))
+                                .foregroundColor(Color.black.opacity(0.9))
+                                .scaleEffect(flameScale)
+                                .opacity(flameOpacity)
+                                .offset(x: flameHorizontalOffset, y: flameOffsetY)
+                                .rotationEffect(.degrees(flameRotation))
+
+                            Image(systemName: "flame.fill")
+                                .font(.system(size: 34))
+                                .foregroundColor(Color.white.opacity(0.9))
+                                .scaleEffect(flameScale * 0.75)
+                                .opacity(flameOpacity * 0.95)
+                                .offset(x: flameHorizontalOffset * 0.6,
+                                        y: flameOffsetY + 4)
+                                .rotationEffect(.degrees(flameRotation * 0.8))
+                        }
+                    }
+                }
+                .frame(height: 40)
+
+                // SLIDER BAR
+                ZStack {
+
+                    RoundedRectangle(cornerRadius: 24)
+                        .fill(trackColor)
+                        .frame(width: totalWidth, height: 48)
+                        .overlay(
+                            Text(titleText)
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(.secondary)
+                        )
+
+                    HStack {
+                        if isRtl { Spacer() }
+
+                        Circle()
+                            .fill(thumbColor)
+                            .frame(width: thumbDiameter, height: thumbDiameter)
+                            .offset(x: isRtl ? -dragOffset : dragOffset)
+                            .gesture(
+                                DragGesture()
+                                    .onChanged { value in
+                                        guard !hasSent else { return }
+                                        let dir: CGFloat = isRtl ? -1 : 1
+                                        let translation = value.translation.width * dir
+
+                                        // 👇 clamp movement to full width
+                                        dragOffset = max(0, min(translation, maxTravel))
+                                    }
+                                    .onEnded { _ in
+                                        guard !hasSent else { return }
+
+                                        if dragOffset >= threshold {
+                                            triggerFlameAnimation()
+                                            onSend()
+
+                                            // Animate thumb to the end, then back
+                                            withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
+                                                dragOffset = maxTravel
+                                            }
+                                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                                                withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
+                                                    dragOffset = 0
+                                                }
+                                            }
+                                        } else {
+                                            withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
+                                                dragOffset = 0
+                                            }
+                                        }
+                                    }
+                            )
+
+                        if !isRtl { Spacer() }
+                    }
+                    .padding(.horizontal, horizontalPadding / 2)
+                }
+            }
+            .frame(width: totalWidth, height: 110)
+        }
+
+        private func triggerFlameAnimation() {
+            showFlame = true
+            flameScale = 0.3
+            flameOpacity = 0.0
+            flameOffsetY = 10
+            flameRotation = 0
+            flameHorizontalOffset = 0
+
+            // Stage 1 – pop
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.6)) {
+                flameScale = 1.4
+                flameOpacity = 1.0
+                flameOffsetY = -6
+            }
+
+            // Stage 2 – wobble
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    flameRotation = isRtl ? -9 : 9
+                    flameHorizontalOffset = isRtl ? -6 : 6
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        flameRotation = isRtl ? 6 : -6
+                        flameHorizontalOffset = isRtl ? 4 : -4
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+                        withAnimation(.easeInOut(duration: 0.16)) {
+                            flameRotation = 0
+                            flameHorizontalOffset = 0
+                        }
+                    }
+                }
+            }
+
+            // Stage 3 – fade out
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) {
+                withAnimation(.easeOut(duration: 0.3)) {
+                    flameOpacity = 0.0
+                    flameOffsetY = -20
+                    flameScale = 1.0
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    showFlame = false
+                }
+            }
+        }
+    }
     
     private struct MessageSheet: View {
         let isRtl: Bool
@@ -4767,6 +5109,7 @@ struct CashProductTile: View {
 }
 
 struct OrderFlowView: View {
+    let onSendToKitchen: () -> Void      // injected from CashPointView
     enum Step {
         case service
         case name
@@ -4774,6 +5117,15 @@ struct OrderFlowView: View {
         case charge
     }
     
+   
+    @State private var hasSentToKitchenFromCash: Bool = false
+    private func sendOrderToKitchenFromCash() {
+        guard !hasSentToKitchenFromCash else { return }
+        onSendToKitchen()                 // 👈 this closure should print & mark "printed"
+        hasSentToKitchenFromCash = true   // so we don’t allow swipe again
+    }
+    
+   
     
     private func goToNextStepAfterService() {
         let hasName = name.trimmingCharacters(in: .whitespacesAndNewlines).count >= 2
@@ -4800,7 +5152,12 @@ struct OrderFlowView: View {
     }
     @State private var cashPaid: Bool = false
     @State private var studentDiscountActive: Bool = false
-    
+
+    // 💁‍♂️ Tip state
+    @State private var tipPercent: Double? = nil      // e.g. 10, 12, 15, 20
+    @State private var tipFixedAmount: Double? = nil  // ₪ amount override
+    @State private var showTipSheet: Bool = false
+
     @State private var hasApprovedCardPayment: Bool = false
     @State private var cardPaidTotal: Double = 0
     @State private var cashPaidTotal: Double = 0
@@ -4910,6 +5267,32 @@ struct OrderFlowView: View {
         }
 
         return max(roundedShekels, 0)
+    }
+    
+    private var baseToCharge: Double {
+        effectiveTotal
+    }
+    
+    // How much we want to collect in total (used when no partial payments yet)
+    private var initialPaymentTarget: Double {
+        totalWithTip
+    }
+
+    // Computed tip amount (either % of base or fixed amount)
+    private var tipAmount: Double {
+        if let p = tipPercent {
+            let v = baseToCharge * (p / 100.0)
+            return max(0, (v * 100).rounded() / 100.0) // round to 2 decimals
+        }
+        if let fixed = tipFixedAmount {
+            return max(0, fixed)
+        }
+        return 0
+    }
+
+    // Final total INCLUDING tip (this is what we actually charge)
+    private var totalWithTip: Double {
+        baseToCharge + tipAmount
     }
     // SPLIT MODEL
     struct SplitPart: Identifiable, Equatable {
@@ -5115,10 +5498,22 @@ struct OrderFlowView: View {
                 case .charge:
                
                     chargeStep
+                        .safeAreaInset(edge: .bottom) {
+                                    HStack {
+                                        Spacer()
+                                        CashPointView.SwipeToSendOrderView(
+                                            isRtl: isRtl,
+                                            hasSent: hasSentToKitchenFromCash,
+                                            onSend: { sendOrderToKitchenFromCash() }
+                                        )
+                                        Spacer()
+                                    }
+                                    .padding(.bottom, 0)
+                                }
                         .onAppear {
                                     // Initialize outstanding amount on first visit
                                     if remainingToPay == 0 {
-                                        remainingToPay = effectiveTotal
+                                        remainingToPay = initialPaymentTarget
                                     }
 
                                     // Auto-start ZCredit only for full-card flow (no split, no cash, no manual amount)
@@ -5140,7 +5535,7 @@ struct OrderFlowView: View {
                     VStack(spacing: 16) {
                         ZStack {
                             Circle()
-                                .fill(Color.green)
+                                .fill(.primary)
                                 .frame(width: 110, height: 110)
 
                             Image(systemName: "checkmark")
@@ -5179,6 +5574,16 @@ struct OrderFlowView: View {
         .sheet(isPresented: $showSplitSheet) {
             splitSheetView
         }
+        .fullScreenCover(isPresented: $showTipSheet) {
+            TipSheetView(
+                isRtl: isRtl,
+                currency: currency,
+                baseAmount: baseToCharge,
+                tipPercent: $tipPercent,
+                tipFixedAmount: $tipFixedAmount,
+                isPresented: $showTipSheet
+            )
+        }
         // Split amount pad
         .sheet(isPresented: $showSplitAmountPad) {
             if let idx = splitAmountPadIndex,
@@ -5199,15 +5604,33 @@ struct OrderFlowView: View {
             }
         }
         // Pay-on-the-bill pad
-        .sheet(isPresented: $showOnBillPad) {
+        .fullScreenCover(isPresented: $showOnBillPad) {
             OnBillPadView(
                 isRtl: isRtl,
                 currency: currency,
                 currentRemaining: remainingToPay > 0 ? remainingToPay : total,
                 input: $onBillInput,
                 onCard: { amount in
-                    payOnBillWithCard(amount: amount)
-                    showOnBillPad = false
+                    guard amount > 0 else { return }
+
+                    // 1️⃣ Cancel any current ZCredit transaction
+                    if !AppConfig.isDemoMode {
+                        ZCreditPaymentHandler.shared.cancelCurrent()
+                    }
+
+                    // 2️⃣ Show spinner & clear error
+                    isPaying = true
+                    payError = nil
+
+                    // 3️⃣ Wait 2 seconds, then start card payment for the *partial* amount
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                        payOnBillWithCard(amount: amount) { _ in
+                                            // 4️⃣ Always close the sheet so the charge screen is visible.
+                                            // If there was an error, `payError` is already set
+                                            // and chargeStep will show it under the amount.
+                                            showOnBillPad = false
+                                        }
+                    }
                 },
                 onCash: { amount in
                     manualCashTargetAmount = amount
@@ -5226,9 +5649,12 @@ struct OrderFlowView: View {
                     showOnBillPad = false
                 }
             )
+            .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
         }
     }
 
+    
+    
     // MARK: - Inline split panel (like the demo)
 
     private var splitPanel: some View {
@@ -5303,7 +5729,7 @@ struct OrderFlowView: View {
                         if part.isPaid {
                             Text(isRtl ? "שולם" : "Paid")
                                 .font(.system(size: 16, weight: .semibold))
-                                .foregroundColor(.green)
+                                .foregroundColor(.primary)
                         } else {
                             // Credit card for this split row
                             Button {
@@ -5392,6 +5818,43 @@ struct OrderFlowView: View {
         splitParts = buildSplitParts()
         // ❌ do NOT touch remainingToPay here
     }
+    
+    /// Called after the tip sheet closes to restart ZCredit with the new total (including tip)
+    private func restartPaymentAfterTipChangeIfNeeded() {
+        // Only relevant on the charge step
+        guard step == .charge else { return }
+
+        // 1) Cancel any in-flight ZCredit transaction
+        if !AppConfig.isDemoMode {
+            ZCreditPaymentHandler.shared.cancelCurrent()
+        }
+
+        // 2) Reset payment UI state
+        isPaying = false
+        payError = nil
+
+        // 3) Only auto-restart if this is a simple full-card flow:
+        //    - not paying cash
+        //    - no split
+        //    - no manual partial-cash target
+        guard !payingWithCash,
+              !isSplitMode,
+              manualCashTargetAmount == nil
+        else {
+            // In other flows we just update remainingToPay and let the waiter trigger payment manually
+            remainingToPay = initialPaymentTarget   // uses totalWithTip internally
+            return
+        }
+
+        // 4) Reset remainingToPay to the new total WITH tip
+        remainingToPay = initialPaymentTarget      // == totalWithTip
+
+        // 5) After a short delay, start a new ZCredit charge with the adjusted amount
+        paymentStarted = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            startPayment()
+        }
+    }
     // MARK: - Step: Charge (card OR cash)
     private func toggleStudentDiscount() {
         // 1️⃣ Flip discount flag
@@ -5410,7 +5873,7 @@ struct OrderFlowView: View {
         if !isSplitMode,
            manualCashTargetAmount == nil,
            activeSplitIndex == nil {
-            remainingToPay = effectiveTotal
+            remainingToPay = initialPaymentTarget
         }
 
         // 5️⃣ Only auto-restart ZCredit if this is a clean full-card flow
@@ -5438,8 +5901,14 @@ struct OrderFlowView: View {
                     .font(.system(size: 18, weight: .medium))
                     .foregroundColor(.secondary)
 
-                // Big amount (if split mode, show remaining; else effectiveTotal)
-                let displayAmount = remainingToPay > 0 ? remainingToPay : effectiveTotal
+                // 🔢 Big amount:
+                // - If we already started paying, show remainingToPay
+                // - Otherwise, show full total WITH TIP
+                let baseWithTip   = totalWithTip
+                         let alreadyPaid   = cardPaidTotal + cashPaidTotal
+                         let displayAmount = max(baseWithTip - alreadyPaid, 0)
+
+
                 let studentDiscountValue = max(total - effectiveTotal, 0)
 
                 VStack(spacing: 4) {
@@ -5455,9 +5924,23 @@ struct OrderFlowView: View {
                         .font(.system(size: 13))
                         .foregroundColor(.secondary)
                     }
+
+                    // 💁‍♂️ Show tip line if any
+                    if tipAmount > 0 {
+                        Text(
+                            String(
+                                format: isRtl
+                                    ? "טיפ: \(currency)%.2f"
+                                    : "Tip: \(currency)%.2f",
+                                tipAmount
+                            )
+                        )
+                        .font(.system(size: 13))
+                        .foregroundColor(.secondary)
+                    }
                 }
 
-                // Row: Split / Pay on the bill / Student discount
+                // Row: Split / Pay on the bill / Student discount / Tip
                 HStack(spacing: 12) {
                     // Split button → inline gray panel
                     Button {
@@ -5465,8 +5948,8 @@ struct OrderFlowView: View {
                     } label: {
                         HStack(spacing: 8) {
                             Image(systemName: "plus.circle.fill")
-                                .font(.system(size: 18, weight: .semibold))
-                            Text(isRtl ? "פיצול שווה": "Split")
+                                .font(.system(size: 19, weight: .semibold))
+                            Text(isRtl ? "פיצול שווה" : "Split")
                                 .font(.system(size: 18, weight: .semibold))
                         }
                         .padding(.horizontal, 16)
@@ -5487,20 +5970,22 @@ struct OrderFlowView: View {
                         splitParts.removeAll()
                         activeSplitIndex = nil
 
-                        // Important: keep remainingToPay as-is if you've already paid partially.
-                        // If this is the first payment, remainingToPay is still 0,
-                        // and the OnBillPad will use `effectiveTotal` as the base via currentRemaining.
+                        // Keep remainingToPay as-is if we’ve already paid partially.
                         onBillInput = ""
                         payError = nil
                         isPaying = false
                         showOnBillPad = true
                     } label: {
-                        Text(isRtl ?"תשלום חלקי": "Pay on the bill")
-                            .font(.system(size: 18, weight: .semibold))
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 10)
-                            .background(Color(.secondarySystemBackground))
-                            .clipShape(Capsule())
+                        HStack(spacing: 6) {
+                            Image(systemName: "rectangle.split.2x1.fill")
+                            Text(isRtl ? "תשלום חלקי" : "Pay on the bill")
+                                .font(.system(size: 18, weight: .semibold))
+                               
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(Color(.secondarySystemBackground))
+                        .clipShape(Capsule())
                     }
                     .disabled(total <= 0)
 
@@ -5512,18 +5997,36 @@ struct OrderFlowView: View {
                             Image(systemName: "graduationcap.fill")
                                 .font(.system(size: 16, weight: .semibold))
                             Text(isRtl ? "הנחת סטודנט 10%" : "Student 10%")
-                                .font(.system(size: 15, weight: .semibold))
+                                .font(.system(size: 18, weight: .semibold))
                         }
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
                         .background(
                             studentDiscountActive
-                            ?.black.opacity(0.15)
+                            ? Color.black.opacity(0.15)
                             : Color(.secondarySystemBackground)
                         )
-                        .foregroundColor(
-                            studentDiscountActive ?.black : .primary
-                        )
+                        .foregroundColor(studentDiscountActive ? .black : .primary)
+                        .clipShape(Capsule())
+                    }
+                    .disabled(total <= 0 || isSplitMode)
+
+                    // Tip button
+                    Button {
+                        // Don’t allow tips while doing split payments for now
+                        guard !isSplitMode else { return }
+                        showTipSheet = true
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "figure.surfing")
+                                .font(.system(size: 17, weight: .semibold))
+                            Text(isRtl ? "טיפ" : "Tip")
+                                .font(.system(size: 18, weight: .semibold))
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color(.secondarySystemBackground))
+                        .foregroundColor(.primary)
                         .clipShape(Capsule())
                     }
                     .disabled(total <= 0 || isSplitMode)
@@ -5542,7 +6045,7 @@ struct OrderFlowView: View {
 
                 // Card error
                 if let err = payError {
-                    Text(err)
+                    Text(isRtl ? "התשלום נכשל, נסה שוב..." : "Payment failed, please try again.")
                         .foregroundColor(.red)
                         .font(.system(size: 16, weight: .semibold))
                         .multilineTextAlignment(.center)
@@ -5551,18 +6054,16 @@ struct OrderFlowView: View {
 
                 // Card spinner
                 if isPaying {
-                    ProgressView()
-                        .scaleEffect(1.3)
-                        .padding(.top, 8)
+                  //  ProgressView()
+                    //    .scaleEffect(1.3)
+                     //   .padding(.top, 8)
                 }
 
                 // Card / Cash buttons
-                // Card / Cash buttons
                 VStack(spacing: 12) {
-                    // 🔹 Always show "Pay by card" (תשלום באשראי), not only on error
+                    // "Pay by card"
                     if shouldShowCardButton {
                         Button {
-                            // Cancel any in-flight transaction before starting a new one
                             if !AppConfig.isDemoMode {
                                 ZCreditPaymentHandler.shared.cancelCurrent()
                             }
@@ -5574,13 +6075,15 @@ struct OrderFlowView: View {
                                 .font(.system(size: 18, weight: .semibold))
                                 .foregroundColor(.white)
                                 .frame(width: 240, height: 50)
-                                .background(.black)
+                                .background(Color.black)
                                 .clipShape(RoundedRectangle(cornerRadius: 18))
                         }
                         .disabled(isPaying || hasApprovedCardPayment)
                     }
+
                     if hasApprovedCardPayment {
-                        Text(isRtl ? "כבר התקבל אישור באשראי להזמנה זו" : "Card payment already approved for this order")
+                        Text(isRtl ? "כבר התקבל אישור באשראי להזמנה זו"
+                                   : "Card payment already approved for this order")
                             .font(.system(size: 13))
                             .foregroundColor(.secondary)
                     }
@@ -5590,7 +6093,7 @@ struct OrderFlowView: View {
                         payingWithCash = true
                         payError = nil
                         isPaying = false
-                        paymentStarted = false      // allow card to be started again later
+                        paymentStarted = false
                         cashInput = ""
                         manualCashTargetAmount = nil   // full total
 
@@ -5616,8 +6119,7 @@ struct OrderFlowView: View {
                                 .frame(width: 220, height: 44)
                         }
                     }
-
-                    
+                /*
                     Button {
                         cancelPayment()
                     } label: {
@@ -5626,10 +6128,12 @@ struct OrderFlowView: View {
                             .foregroundColor(.secondary)
                             .frame(width: 220, height: 44)
                     }
+                 */
                 }
                 .padding(.top, 8)
             }
             .padding(.horizontal, 28)
+            .padding(.top, 80)
 
             Spacer()
         }
@@ -5701,7 +6205,7 @@ struct OrderFlowView: View {
                                 if part.isPaid {
                                     Text(isRtl ? "שולם" : "Paid")
                                         .font(.system(size: 16, weight: .semibold))
-                                        .foregroundColor(.green)
+                                        .foregroundColor(.primary)
                                 } else {
                                     // Card
                                     Button {
@@ -5852,6 +6356,257 @@ struct OrderFlowView: View {
         splitParts[index].isPaid = true
         remainingToPay = max(remainingToPay - amount, 0)
     }
+    
+    
+    private struct TipSheetView: View {
+        let isRtl: Bool
+        let currency: String
+        let baseAmount: Double      // baseToCharge
+        @Binding var tipPercent: Double?
+        @Binding var tipFixedAmount: Double?
+        @Binding var isPresented: Bool
+
+        @State private var modeIsPercent: Bool = true
+        @State private var input: String = ""
+
+        // 💰 Computed tip amount from input
+        private var currentTipAmount: Double {
+            if modeIsPercent {
+                let p = Double(input.filter(\.isNumber)) ?? (tipPercent ?? 0)
+                let v = baseAmount * (p / 100.0)
+                return max(0, (v * 100).rounded() / 100.0)
+            } else {
+                let raw = input.replacingOccurrences(of: ",", with: ".")
+                return max(0, Double(raw) ?? (tipFixedAmount ?? 0))
+            }
+        }
+
+        // 👁‍🗨 Text shown in the big “input box” above the keypad
+        private var displayInputText: String {
+            if modeIsPercent {
+                let digits = input.filter(\.isNumber)
+                if !digits.isEmpty {
+                    return "\(digits)%"
+                }
+                if let p = tipPercent, p > 0 {
+                    return "\(Int(p.rounded()))%"
+                }
+                return "0%"
+            } else {
+                if !input.isEmpty {
+                    let raw = input.replacingOccurrences(of: ",", with: ".")
+                    let val = Double(raw) ?? 0
+                    return String(format: "\(currency)%.0f", val)
+                }
+                if let a = tipFixedAmount, a > 0 {
+                    return String(format: "\(currency)%.0f", a)
+                }
+                return String(format: "\(currency)%.0f", 0)
+            }
+        }
+
+        var body: some View {
+            NavigationStack {
+                ZStack {
+                    Color(.systemBackground).ignoresSafeArea()
+
+                    VStack(spacing: 0) {
+                        // 🔺 Top close button like cash view
+                        HStack {
+                            if isRtl { Spacer() }
+
+                            Button {
+                                isPresented = false
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 18, weight: .bold))
+                                    .padding(10)
+                                    .background(Color(.systemGray5))
+                                    .clipShape(Circle())
+                            }
+
+                            if !isRtl { Spacer() }
+                        }
+                        .padding(.horizontal, 20)
+                        .padding(.top, 12)
+
+                        Spacer()
+
+                        let maxWidth: CGFloat = 260
+
+                        // 🔹 Center block – same spirit as cashFullScreen
+                        VStack(spacing: 18) {
+                            // Title
+                            Text(isRtl ? "טיפ" : "Add a tip")
+                                .font(.system(size: 24, weight: .bold))
+                                .multilineTextAlignment(.center)
+
+                            // Base amount line
+                            Text(
+                                String(
+                                    format: isRtl
+                                        ? "סכום ללא טיפ: \(currency)%.2f"
+                                        : "Base amount: \(currency)%.2f",
+                                    baseAmount
+                                )
+                            )
+                            .font(.system(size: 16))
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+
+                            // Quick % buttons (same width as keypad)
+                            HStack(spacing: 8) {
+                                ForEach([10, 12, 15, 20], id: \.self) { p in
+                                    Button {
+                                        modeIsPercent = true
+                                        input = "\(p)"
+                                    } label: {
+                                        Text("\(p)%")
+                                            .font(.system(size: 16, weight: .semibold))
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 6)
+                                            .background(
+                                                modeIsPercent && input == "\(p)"
+                                                ? Color.black
+                                                : Color(.secondarySystemBackground)
+                                            )
+                                            .foregroundColor(
+                                                modeIsPercent && input == "\(p)" ? .white : .primary
+                                            )
+                                            .clipShape(Capsule())
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                            .frame(width: maxWidth)
+
+                            // Percent / Amount picker
+                            Picker("", selection: $modeIsPercent) {
+                                Text(isRtl ? "אחוז" : "Percent").tag(true)
+                                Text(isRtl ? "סכום" : "Amount").tag(false)
+                            }
+                            .pickerStyle(.segmented)
+                            .frame(width: maxWidth)
+
+                            // Current tip label + box
+                            VStack(spacing: 6) {
+                                Text(isRtl ? "טיפ נוכחי" : "Current tip")
+                                    .font(.system(size: 14))
+                                    .foregroundColor(.secondary)
+
+                                // Text "box" like the cash amount field
+                                ZStack {
+                                    RoundedRectangle(cornerRadius: 12)
+                                        .fill(Color(.secondarySystemBackground))
+
+                                    Text(displayInputText)
+                                        .font(.system(size: 22, weight: .bold, design: .monospaced))
+                                        .foregroundColor(.primary)
+                                }
+                                .frame(width: maxWidth, height: 52)
+
+                                // And numeric calculated tip amount under it
+                                Text(
+                                    String(
+                                        format: isRtl
+                                            ? "שווי טיפ: \(currency)%.2f"
+                                            : "Tip value: \(currency)%.2f",
+                                        currentTipAmount
+                                    )
+                                )
+                                .font(.system(size: 13))
+                                .foregroundColor(.secondary)
+                            }
+
+                            // Keypad
+                            tipKeypad
+                                .frame(width: maxWidth)
+
+                            // Apply button – same width as keypad
+                            Button {
+                                if modeIsPercent {
+                                    let p = Double(input.filter(\.isNumber)) ?? 0
+                                    tipPercent = p > 0 ? p : nil
+                                    tipFixedAmount = nil
+                                } else {
+                                    let raw = input.replacingOccurrences(of: ",", with: ".")
+                                    let a = Double(raw) ?? 0
+                                    tipFixedAmount = a > 0 ? a : nil
+                                    tipPercent = nil
+                                }
+                                isPresented = false
+                            } label: {
+                                Text(isRtl ? "הוסף טיפ" : "Apply tip")
+                                    .font(.system(size: 18, weight: .bold))
+                                    .foregroundColor(.white)
+                                    .frame(width: maxWidth, height: 50)
+                                    .background(currentTipAmount > 0 ? Color.black : Color.gray.opacity(0.4))
+                                    .clipShape(RoundedRectangle(cornerRadius: 16))
+                            }
+                            .disabled(currentTipAmount <= 0)
+                            .padding(.top, 4)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .multilineTextAlignment(.center)
+                        .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
+
+                        Spacer()
+                    }
+                }
+            }
+            .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
+            .onAppear {
+                if let p = tipPercent, modeIsPercent {
+                    input = p == 0 ? "" : String(Int(p.rounded()))
+                } else if let a = tipFixedAmount, !modeIsPercent {
+                    input = String(Int(a.rounded()))
+                }
+            }
+        }
+
+        // simple 0–9 / C / backspace keypad – same style as before
+        private var tipKeypad: some View {
+            // Rows arranged in the *opposite* horizontal direction
+            // (3-2-1 / 6-5-4 / 9-8-7 / ⌫-0-C)
+            let rows: [[String]] = [
+                ["3", "2", "1"],
+                ["6", "5", "4"],
+                ["9", "8", "7"],
+                ["⌫", "0", "C"]
+            ]
+
+            let cols = Array(repeating: GridItem(.flexible(), spacing: 10), count: 3)
+
+            return LazyVGrid(columns: cols, spacing: 10) {
+                ForEach(rows, id: \.self) { row in
+                    ForEach(row, id: \.self) { key in
+                        Button {
+                            tapKey(key)
+                        } label: {
+                            Text(key)
+                                .font(.system(size: key == "⌫" ? 22 : 24, weight: .bold))
+                                .frame(width: 80, height: 64)
+                                .background(Color(.secondarySystemBackground))
+                                .clipShape(RoundedRectangle(cornerRadius: 14))
+                        }
+                    }
+                }
+            }
+        }
+        private func tapKey(_ key: String) {
+            switch key {
+            case "C":
+                input = ""
+            case "⌫":
+                if !input.isEmpty { input.removeLast() }
+            default:
+                guard key.allSatisfy(\.isNumber) else { return }
+                if input.count < 4 { // up to 9999
+                    input.append(contentsOf: key)
+                }
+            }
+        }
+    }
 
     /// Two-row style amount application (for now).
     private func applySplitAmount(newValue: String, index: Int) {
@@ -5889,13 +6644,18 @@ struct OrderFlowView: View {
 
     // MARK: - Pay on bill helpers
 
-    private func payOnBillWithCard(amount: Double) {
+    private func payOnBillWithCard(
+        amount: Double,
+        onCompletion: ((_ approved: Bool) -> Void)? = nil
+    ) {
         guard amount > 0 else { return }
 
         if AppConfig.isDemoMode {
+            // Demo behaviour – pretend it worked
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
                 self.cardPaidTotal += amount
                 self.remainingToPay = max(self.remainingToPay - amount, 0)
+                onCompletion?(true)
                 if self.remainingToPay <= 0 {
                     self.playSuccessAndCompleteOrder()
                 }
@@ -5911,33 +6671,41 @@ struct OrderFlowView: View {
 
             switch result.status {
             case .approved:
-                self.lastResultWasUnknown = false
-                hasApprovedCardPayment = true
+                self.lastResultWasUnknown   = false
+                self.hasApprovedCardPayment = true
+
+                // 🔹 Update totals
                 self.cardPaidTotal += amount
                 self.remainingToPay = max(self.remainingToPay - amount, 0)
+
+                // Close sheet / update UI
+                onCompletion?(true)
 
                 if self.remainingToPay <= 0 {
                     self.playSuccessAndCompleteOrder()
                 }
-                self.lastResultWasUnknown = false
 
             case .declined:
-                let fallback = isRtl
-                    ? "התשלום נדחה, נסה שוב או בחר אמצעי תשלום אחר."
+                let msg = isRtl
+                    ? "התשלום נדחה. נסה שוב או בחר אמצעי תשלום אחר."
                     : "Payment was declined. Try again or choose another method."
-                self.payError = result.message.isEmpty ? fallback : result.message
-                
+                self.payError = msg
+
+                // Let caller close the sheet so error is visible on charge screen
+                onCompletion?(false)
 
             case .unknown:
-          
-                let fallback = isRtl
-                    ?  "מצב העסקה לא ברור —  חייב את שאר החלקים ולאחר מכן לחץ ‘תשלום מאוחר יותר’ והודע למנהל לבדיקה"
-                    : "Payment status is unclear (connection issue). Check the terminal. If it shows Approved, mark as paid."
-
-                self.payError = result.message.isEmpty ? fallback : result.message
+                let msg = isRtl
+                    ? "מצב העסקה לא ברור. בדוק את הטרמינל או בחר אמצעי תשלום אחר."
+                    : "Payment status is unclear. Check the terminal or choose another method."
+                self.payError = msg
                 self.lastResultWasUnknown = true
+
+                // Same – caller can close sheet → see error
+                onCompletion?(false)
             }
         }
+    
     }
 
     // MARK: - Success
@@ -6079,7 +6847,7 @@ struct OrderFlowView: View {
         // 🔹 Decide how much to charge:
         // - If there’s an outstanding balance (after cash or previous card), charge that.
         // - Otherwise (first charge) charge the full effective total.
-        let baseTotal      = effectiveTotal
+        let baseTotal      = initialPaymentTarget
         let amountToCharge = (remainingToPay > 0) ? remainingToPay : baseTotal
 
         ZCreditPaymentHandler.shared.pay(amount: amountToCharge, orderId: nil) { result in
@@ -6168,14 +6936,16 @@ struct OrderFlowView: View {
 
         } else {
             // No manual, no split:
-            // 👉 use what the waiter typed into the cash keypad as the actual cash taken.
-            // If they didn't type anything, assume exact outstanding.
-            let entered = cashAmount   // parsed from cashInput
+            // waiter types how much cash was RECEIVED (e.g. 200),
+            // but the actual payment we apply to the order is capped by what is still due.
+            let target  = (remainingToPay > 0 ? remainingToPay : initialPaymentTarget)
+            let entered = cashAmount   // money handed to cashier
 
             if entered > 0 {
-                thisCash = entered
+                // e.g. order 90, customer gives 200 → apply 90, give 110 change
+                thisCash = min(entered, target)
             } else {
-                let target = (remainingToPay > 0 ? remainingToPay : effectiveTotal)
+                // no input → assume exact amount due
                 thisCash = target
             }
         }
@@ -6212,8 +6982,7 @@ struct OrderFlowView: View {
 
         // 3️⃣ Simple non-split cash (may be partial!)
         if remainingToPay == 0 {
-            // If we never initialised it (edge case), start from full total
-            remainingToPay = effectiveTotal
+            remainingToPay = initialPaymentTarget
         }
 
         remainingToPay = max(remainingToPay - thisCash, 0)
@@ -6292,9 +7061,7 @@ struct OrderFlowView: View {
                     }
                     // 3️⃣ Normal full-order cash
                     else {
-                        // Show remainingToPay if we already paid part of the order,
-                        // otherwise show the full effectiveTotal.
-                        let amountToPay = remainingToPay > 0 ? remainingToPay : effectiveTotal
+                        let amountToPay = remainingToPay > 0 ? remainingToPay : initialPaymentTarget
 
                         VStack(spacing: 4) {
                             Text(isRtl ? "סכום לתשלום" : "Amount to pay")
@@ -6320,6 +7087,9 @@ struct OrderFlowView: View {
                     cashKeypad
                         .environment(\.layoutDirection, .leftToRight)
 
+                    // 🔹 NEW: swipe-to-send order bar
+                   
+
                 } else {
                     // 💸 AFTER "שולם" – hide keypad, show big change only
                     VStack(spacing: 12) {
@@ -6338,12 +7108,10 @@ struct OrderFlowView: View {
 
                 // BUTTON AREA
                 if !cashPaid {
-                    // 🔹 NEW: exact amount button above "Paid"
+                    // 🔹 Exact-amount button
                     Button {
-                        // Fill the exact target amount into the cash input
                         let target = currentTargetAmount
                         cashInput = String(Int(target.rounded()))
-                        // we keep justUsedBills logic as-is; this simply overwrites the field
                     } label: {
                         Text(isRtl ? "שולם בדיוק" : "Exact amount")
                             .font(.system(size: 16, weight: .semibold))
@@ -6357,7 +7125,7 @@ struct OrderFlowView: View {
                     .frame(maxWidth: 300)
                     .padding(.top, 8)
 
-                    // 🔘 Existing "Paid" button
+                    // 🔘 "Paid" button
                     Button {
                         PrinterManager.shared.openCashDrawer()
                         cashPaid = true
@@ -6379,31 +7147,7 @@ struct OrderFlowView: View {
                 } else {
                     // ✅ AFTER PAID – show two buttons: Print invoice + Finish
                     HStack(spacing: 12) {
-                        Button {
-                            let customer = name.trimmingCharacters(in: .whitespacesAndNewlines)
-                            let safeCustomer = customer.isEmpty ? "לקוח" : customer
-
-                            let invoiceItem = InvoiceItem(
-                                name: isRtl ? "תשלום במזומן" : "Cash payment",
-                                quantity: 1,
-                                unitPrice: currentTargetAmount
-                            )
-                            PrinterManager.shared.printTaxInvoice(
-                                invoiceNumber: Int(Date().timeIntervalSince1970), // TEMP: replace with real order id
-                                date: Date(),
-                                customerName: safeCustomer,
-                                items: [invoiceItem],
-                                vatRate: 0.17
-                            )
-                        } label: {
-                            Text(isRtl ? "הדפס חשבונית" : "Print invoice")
-                                .font(.system(size: 16, weight: .semibold))
-                                .foregroundColor(.primary)
-                                .frame(maxWidth: .infinity)
-                                .frame(height: 50)
-                                .background(Color(.systemGray5))
-                                .clipShape(RoundedRectangle(cornerRadius: 16))
-                        }
+                      
 
                         Button {
                             completeWithCash()
@@ -6439,58 +7183,95 @@ struct OrderFlowView: View {
         let onCard: (Double) -> Void
         let onCash: (Double) -> Void
         let onCancel: () -> Void
-
+        
         private var amount: Double {
             let raw = input.filter(\.isNumber)
             let value = Double(raw) ?? 0
             return min(value, currentRemaining)
         }
-
+        
+        private let padWidth: CGFloat = 260
+        
         var body: some View {
-            NavigationStack {
-                VStack(spacing: 20) {
+            ZStack {
+                Color(.systemBackground).ignoresSafeArea()
+                
+                // MARK: - TOP BAR (fixed at top)
+                VStack {
+                    HStack {
+                        if isRtl { Spacer() }
+                        
+                        Button {
+                            onCancel()
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 18, weight: .bold))
+                                .padding(10)
+                                .background(Color(.systemGray5))
+                                .clipShape(Circle())
+                        }
+                        
+                        if !isRtl { Spacer() }
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.top, 35)
+                    
+                    Spacer()
+                }
+                .ignoresSafeArea()
+                
+                // MARK: - CENTERED CONTENT (just like cash view)
+                VStack(spacing: 15) {
+                    
+                    // Title
                     Text(isRtl ? "תשלום לפי סכום" : "Pay on the bill")
-                        .font(.system(size: 24, weight: .bold))
-
+                        .font(.system(size: 26, weight: .bold))
+                        .multilineTextAlignment(.center)
+                    
+                    // Remaining to pay
                     Text(
                         String(
                             format: isRtl
-                            ? "יתרה: \(currency)%.2f"
-                            : "Remaining: \(currency)%.2f",
+                                ? "יתרה לתשלום: \(currency)%.2f"
+                                : "Remaining to pay: \(currency)%.2f",
                             currentRemaining
                         )
                     )
-                    .font(.system(size: 18, weight: .medium))
+                    .font(.system(size: 16))
                     .foregroundColor(.secondary)
-
+                    
+                    // Amount box
                     ZStack {
                         RoundedRectangle(cornerRadius: 12)
                             .fill(Color(.secondarySystemBackground))
+                        
                         Text(amount == 0 ? "0" : String(Int(amount)))
-                            .font(.system(size: 30, weight: .bold, design: .monospaced))
-                            .multilineTextAlignment(.center)
+                            .font(.system(size: 26, weight: .bold, design: .monospaced))
+                            .foregroundColor(.primary)
                     }
-                    .frame(width: 260, height: 60)
-
+                    .frame(width: padWidth, height: 52)
+                    
+                    // Keypad
                     keypad
-
-                    // 🔹 Side-by-side buttons: Card (brand color) + Cash
-                    HStack(spacing: 16) {
+                        .frame(width: padWidth)
+                    
+                    // Card / Cash buttons
+                    HStack(spacing: 12) {
                         Button {
-                            onCard(amount)   // parent should open cash/charge view for this amount
+                            onCard(amount)
                         } label: {
                             Text(isRtl ? "כרטיס" : "Card")
                                 .font(.system(size: 18, weight: .semibold))
                                 .foregroundColor(.white)
                                 .frame(maxWidth: .infinity)
                                 .frame(height: 48)
-                                .background(.black)   // brand color
+                                .background(amount > 0 ? Color.black : Color.gray.opacity(0.4))
                                 .clipShape(RoundedRectangle(cornerRadius: 18))
                         }
                         .disabled(amount <= 0)
-
+                        
                         Button {
-                            onCash(amount)   // parent should open cash view for this amount
+                            onCash(amount)
                         } label: {
                             Text(isRtl ? "מזומן" : "Cash")
                                 .font(.system(size: 18, weight: .semibold))
@@ -6501,46 +7282,44 @@ struct OrderFlowView: View {
                                 .clipShape(RoundedRectangle(cornerRadius: 18))
                         }
                         .disabled(amount <= 0)
+                        
                     }
-                    .frame(width: 260)
-                    .padding(.top, 8)
-
-                    Spacer()
+                    .frame(width: padWidth)
+                    .padding(.top, 10)
                 }
-                .padding(20)
-                .onAppear {
-                    input = ""   // start empty
-                }
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button(isRtl ? "סגור" : "Close") {
-                            onCancel()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
+            }
+            .onAppear { input = "" }
+        }
+        
+        // MARK: - Keypad (same layout as cash)
+        private var keypad: some View {
+            // Each row reversed horizontally
+            let rows: [[String]] = [
+                ["3", "2", "1"],
+                ["6", "5", "4"],
+                ["9", "8", "7"],
+                ["⌫", "0", "C"]
+            ]
+            
+            let cols = Array(repeating: GridItem(.flexible(), spacing: 10), count: 3)
+            
+            return LazyVGrid(columns: cols, spacing: 10) {
+                ForEach(rows, id: \.self) { row in
+                    ForEach(row, id: \.self) { key in
+                        Button { tapKey(key) } label: {
+                            Text(key)
+                                .font(.system(size: key == "⌫" ? 22 : 24, weight: .bold))
+                                .frame(width: 80, height: 64)
+                                .background(Color(.secondarySystemBackground))
+                                .clipShape(RoundedRectangle(cornerRadius: 14))
                         }
                     }
                 }
             }
         }
-
-        private var keypad: some View {
-            let cols = Array(repeating: GridItem(.flexible(), spacing: 12), count: 3)
-            let keys = ["1","2","3","4","5","6","7","8","9","C","0","⌫"]
-
-            return LazyVGrid(columns: cols, spacing: 12) {
-                ForEach(keys, id: \.self) { key in
-                    Button {
-                        tapKey(key)
-                    } label: {
-                        Text(key)
-                            .font(.system(size: key == "⌫" ? 22 : 24, weight: .bold))
-                            .frame(width: 80, height: 64)
-                            .background(Color(.systemGray5))
-                            .clipShape(RoundedRectangle(cornerRadius: 16))
-                    }
-                }
-            }
-            .frame(width: 260)
-        }
-
+        
         private func tapKey(_ key: String) {
             switch key {
             case "C":
@@ -6548,14 +7327,11 @@ struct OrderFlowView: View {
             case "⌫":
                 if !input.isEmpty { input.removeLast() }
             default:
-                if key.allSatisfy(\.isNumber) {
-                    if input.count < 7 {
-                        input.append(contentsOf: key)
-                    }
-                }
+                guard key.allSatisfy(\.isNumber) else { return }
+                if input.count < 7 { input.append(contentsOf: key) }
             }
         }
-    }
+    } 
 
     // MARK: - Phone / Name steps
 

@@ -1,43 +1,15 @@
 import SwiftUI
 import UserNotifications
 import UIKit
+import StripeApplePay
 
 // MARK: - Reset mini shop defaults
-func resetShopUserDefaultsToDefaults() {
-    let defaults = UserDefaults.standard
-    defaults.set("#f7f5f1", forKey: "bg")
-    defaults.set("#000000", forKey: "categorySelectedTextColor")
-    defaults.set("#000000", forKey: "categoryTextColor")
-    defaults.removeObject(forKey: "priceColor")
-    defaults.removeObject(forKey: "selectedCategoryColor")
-    defaults.set("#000000", forKey: "brandColor")
-    defaults.set("ltr", forKey: "direction")
-    defaults.set("#000000", forKey: "basketBadgeTextColor")
-    defaults.set("#000000", forKey: "priceTextColor")
-    defaults.set("#FFFFFF", forKey: "basketBadgeBackground")
-    defaults.set("#FFFFFF", forKey: "badgeTextColor")
-    defaults.set("#000000", forKey: "buttonColor")
-    defaults.set("#FFFFFF", forKey: "buttonTextColor")
-    defaults.set("System", forKey: "fontName")
-    defaults.set("false", forKey: "isDelivery")
-    defaults.set("GBP", forKey: "currency")
-}
 
-func disableQuickTypeBar() {
-    let tf = UITextField.appearance()
-    tf.inputAssistantItem.leadingBarButtonGroups = []
-    tf.inputAssistantItem.trailingBarButtonGroups = []
-
-    let tv = UITextView.appearance()
-    tv.inputAssistantItem.leadingBarButtonGroups = []
-    tv.inputAssistantItem.trailingBarButtonGroups = []
-}
 
 @main
 struct MINIS_02App: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
-    @State var isRtl = true
     @Environment(\.scenePhase) private var scenePhase
 
     @AppStorage("cashPointMode") private var cashPointMode: Bool = true
@@ -45,39 +17,43 @@ struct MINIS_02App: App {
     @AppStorage("miniAppId") private var miniAppId: Int = 0          // 👈 NEW
     @AppStorage("launchMenuOnce") private var launchMenuOnce: Bool = false
     @AppStorage("autoPrintEnabled") private var autoPrintEnabled: Bool = true
+    
+    @AppStorage("direction") private var direction: String = "ltr"
+    @AppStorage("deliveryLoc") private var deliveryLoc: String = ""
 
     init() {
+        STPAPIClient.shared.publishableKey = "pk_live_51H5URzFZIwZSNufssK4R7BjLhpqxHVcfmEZVH8Tg74MAHMA20RfkYhIfbwFjDWJ55KzHWkOhEcqVWhIO2VShjOcU00Tslmi1XT"
       //  PrinterManager.shared.setPrinterSet(.ron)
         let demoData = PrinterManager.SalesReportData(
-            ppaRestaurant: 26,
-            dinersRestaurant: 14,
-            totalRestaurantIncVat: 375.0,
-            ppaRestaurantValue: 7.713,
+            ppaRestaurant: 50,
+            dinersRestaurant: 223,
+            totalRestaurantIncVat: 11304,
+            ppaRestaurantValue: 0,
 
-            ppaTA: 22,
-            dinersTA: 8,
-            totalTAIncVat: 317.2,
+            ppaTA: 32,
+            dinersTA: 138,
+            totalTAIncVat: 4472,
 
             // 🔄 REVERSED VALUES
-            totalSalesIncVat: 699.9,   // was 692.2
-            tipsTotal: 7.713,
-            grandTotal: 692.2,         // was 699.9
+            totalSalesIncVat: 15776,   // was 692.2
+            tipsTotal: 21,
+            grandTotal: 15776,         // was 699.9
 
-            cashAmount: 250.0,
-            cashCount: 3,
-            cardAmount: 329.9,
-            cardCount: 5,
-            collectionsTotalAmount: 579.9,
-            collectionsTotalCount: 8,
+            cashAmount: 1457,
+            cashCount: 47,
+            cardAmount: 14319,
+            cardCount: 314,
+            collectionsTotalAmount: 361,
+            collectionsTotalCount: 15776,
 
             closedDrawersAmount: 0,
             openDrawersAmount: 0,
             depositWithdrawAmount: 0,
             drawerTotalAmount: 0,
-            mainDrawerAmount: 0,
+            mainDrawerAmount: 1478,
             hostStationDrawerAmount: 0,
 
-            tipBaseTotal: 0,
+            tipBaseTotal: 21,
             tipRestaurant: 0,
             tipBarTakeaway: 0,
             extraTipTotal: 0,
@@ -92,50 +68,19 @@ struct MINIS_02App: App {
             discountsRefundAmount: 0, discountsRefundCount: 0
         )
      //   PrinterManager.shared.printHebrewCodepageProbe(to: "10.100.10.232")
-        PrinterManager.shared.printSalesDebugReport(demoData)
-        UIView.appearance().tintColor = UIColor.label
+            PrinterManager.shared.printSalesDebugReport(demoData)
+        UIView.appearance().tintColor = nil
 
         // 🔥 Global RTL for UIKit (menus, alerts, etc.)
-        UIView.appearance().semanticContentAttribute = .forceRightToLeft
+        //UIView.appearance().semanticContentAttribute = .forceRightToLeft
 
         UISegmentedControl.appearance().setTitleTextAttributes(
             [.foregroundColor: UIColor.black],
             for: .selected
         )
 
-        // Unselected: white/black 70% opacity depending on theme
-        let normalTextColor = UIColor { trait in
-            trait.userInterfaceStyle == .dark ? .white.withAlphaComponent(0.7)
-                                              : .black.withAlphaComponent(0.7)
-        }
-
-        let selectedTextColor = UIColor { trait in
-            trait.userInterfaceStyle == .dark ? .black : .white
-        }
-
-        let selectedTint = UIColor { trait in
-            trait.userInterfaceStyle == .dark ? .white : .black
-        }
-
-        let backgroundColor = UIColor { trait in
-            trait.userInterfaceStyle == .dark
-                ? UIColor.white.withAlphaComponent(0.15)
-                : UIColor.black.withAlphaComponent(0.10)
-        }
-
-        // MARK: - Apply
-        UISegmentedControl.appearance().setTitleTextAttributes(
-            [.foregroundColor: normalTextColor],
-            for: .normal
-        )
-
-        UISegmentedControl.appearance().setTitleTextAttributes(
-            [.foregroundColor: selectedTextColor],
-            for: .selected
-        )
-
-        UISegmentedControl.appearance().selectedSegmentTintColor = selectedTint
-        UISegmentedControl.appearance().backgroundColor = backgroundColor
+     
+        
 
         // Clear saved POS name/phone on fresh launch
         UserDefaults.standard.removeObject(forKey: "posSavedName")
@@ -151,16 +96,14 @@ struct MINIS_02App: App {
                 } else {
                     // Use your existing mini UI here.
                     // If you have a helper:
-                    menuView()
-                    //
-                    // For now, to keep it compiling even if you don't:
-                    Text("Mini app view")
-                        .tint(.primary)
+                    HomeView()
+                        .environment(\.layoutDirection, .leftToRight)
+                  
                 }
             }
-            .environment(\.isRtl, isRtl)
-            .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
-            .environment(\.currency, isRtl ? "₪" : "£")
+            .environment(\.isRtl, direction == "rtl")
+            .environment(\.layoutDirection, direction == "rtl" ? .rightToLeft : .leftToRight)
+            .environment(\.currency, direction == "rtl" ? "₪" : "£")
             .accentColor(.primary)
             .onOpenURL { url in
                 handleIncoming(url: url)
@@ -210,32 +153,43 @@ struct MINIS_02App: App {
     // mini type = pathComponents[1] ("shop" / "fastlane")
     // miniAppId = Int(pathComponents[2])
     private func handleIncoming(url: URL) {
+        print("🔗 onOpenURL → \(url.absoluteString)")
+
         guard url.host == "minis.studio" else { return }
 
-        let components = url.pathComponents
-        // Expect at least: ["/", "shop", "12"]
-        guard components.count >= 3 else { return }
+        // ✅ Reset loc each time we open a new mini (prevents leakage between bars)
+        deliveryLoc = ""
+        UserDefaults.standard.removeObject(forKey: "deliveryLoc")
 
-        let miniType = components[1]              // e.g. "shop" or "fastlane"
-        let rawId = components[2]                 // e.g. "12"
+        // Parse path
+        let components = url.pathComponents.filter { $0 != "/" && !$0.isEmpty }
+        guard let last = components.last, let id = Int(last) else { return }
 
-        guard let id = Int(rawId) else { return }
-
+        let miniType = components.dropLast().last ?? "unknown"
         print("🎯 Deep link → type=\(miniType), miniAppId=\(id)")
 
-        // Save mini id
         miniAppId = id
         UserDefaults.standard.set(id, forKey: "miniAppId")
 
-        // For now: mirror to shopId for existing logic
-        shopId = rawId
-        UserDefaults.standard.set(rawId, forKey: "shopId")
+        let shopIdString = String(id)
+        shopId = shopIdString
+        UserDefaults.standard.set(shopIdString, forKey: "shopId")
 
-        // Reset style/theme for the new mini
+        // ✅ Parse ?loc= from query string
+        if let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
+           let loc = comps.queryItems?.first(where: { $0.name == "loc" })?.value,
+           !loc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+
+            let clean = loc.trimmingCharacters(in: .whitespacesAndNewlines)
+            deliveryLoc = clean
+            UserDefaults.standard.set(clean, forKey: "deliveryLoc")
+            print("📍 Stored deliveryLoc =", clean)
+        }
+
         resetShopUserDefaultsToDefaults()
-
-        // Force opening Mini side (not POS)
         launchMenuOnce = true
         cashPointMode = false
+
+        print("✅ Deep link handled → miniAppId=\(miniAppId), shopId=\(shopId), deliveryLoc=\(deliveryLoc)")
     }
 }

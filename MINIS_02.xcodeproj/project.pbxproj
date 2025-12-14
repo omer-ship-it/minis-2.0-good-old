@@ -9,6 +9,14 @@
 /* Begin PBXBuildFile section */
 		3A6F59AB2ECE535800062F59 /* Kingfisher in Frameworks */ = {isa = PBXBuildFile; productRef = 3A6F59AA2ECE535800062F59 /* Kingfisher */; };
 		3A74EFA92ED5854C008A7F67 /* Kingfisher in Frameworks */ = {isa = PBXBuildFile; productRef = 3A74EFA82ED5854C008A7F67 /* Kingfisher */; };
+		3AA0D51E2EEAEECD00D9B4C2 /* StripeApplePay in Frameworks */ = {isa = PBXBuildFile; productRef = 3AA0D51D2EEAEECD00D9B4C2 /* StripeApplePay */; };
+		3AA0D5202EEBFEA300D9B4C2 /* Stripe in Frameworks */ = {isa = PBXBuildFile; productRef = 3AA0D51F2EEBFEA300D9B4C2 /* Stripe */; };
+		3AA0D5222EEBFEA300D9B4C2 /* StripePayments in Frameworks */ = {isa = PBXBuildFile; productRef = 3AA0D5212EEBFEA300D9B4C2 /* StripePayments */; };
+		3AF147DA2EEF2C5D00CEC1C3 /* App clip.app in Embed App Clips */ = {isa = PBXBuildFile; fileRef = 3A74EF722ED5806C008A7F67 /* App clip.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		3AF147DC2EEF2CB800CEC1C3 /* Stripe in Frameworks */ = {isa = PBXBuildFile; productRef = 3AF147DB2EEF2CB800CEC1C3 /* Stripe */; };
+		3AF147DE2EEF2CB800CEC1C3 /* StripeApplePay in Frameworks */ = {isa = PBXBuildFile; productRef = 3AF147DD2EEF2CB800CEC1C3 /* StripeApplePay */; };
+		3AF147E02EEF2CB800CEC1C3 /* StripePaymentsUI in Frameworks */ = {isa = PBXBuildFile; productRef = 3AF147DF2EEF2CB800CEC1C3 /* StripePaymentsUI */; };
+		3AF147E22EEF2CE600CEC1C3 /* StripePayments in Frameworks */ = {isa = PBXBuildFile; productRef = 3AF147E12EEF2CE600CEC1C3 /* StripePayments */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -49,6 +57,7 @@
 			dstPath = "$(CONTENTS_FOLDER_PATH)/AppClips";
 			dstSubfolderSpec = 16;
 			files = (
+				3AF147DA2EEF2C5D00CEC1C3 /* App clip.app in Embed App Clips */,
 			);
 			name = "Embed App Clips";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -79,11 +88,17 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				AppDelegate.swift,
+				Bones.swift,
 				ContentView.swift,
 				FastlaneModel.swift,
 				"Fonts/primaries-demibold-aaa.otf",
 				Home.swift,
+				Media.xcassets,
+				Orders.swift,
+				OrdersNEW.swift,
+				PrinterManager.swift,
 				Share.swift,
+				Stock.swift,
 			);
 			target = 3A74EF712ED5806C008A7F67 /* App clip */;
 		};
@@ -144,6 +159,9 @@
 			buildActionMask = 2147483647;
 			files = (
 				3A6F59AB2ECE535800062F59 /* Kingfisher in Frameworks */,
+				3AA0D51E2EEAEECD00D9B4C2 /* StripeApplePay in Frameworks */,
+				3AA0D5222EEBFEA300D9B4C2 /* StripePayments in Frameworks */,
+				3AA0D5202EEBFEA300D9B4C2 /* Stripe in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -179,7 +197,11 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				3AF147E22EEF2CE600CEC1C3 /* StripePayments in Frameworks */,
+				3AF147DE2EEF2CB800CEC1C3 /* StripeApplePay in Frameworks */,
 				3A74EFA92ED5854C008A7F67 /* Kingfisher in Frameworks */,
+				3AF147E02EEF2CB800CEC1C3 /* StripePaymentsUI in Frameworks */,
+				3AF147DC2EEF2CB800CEC1C3 /* Stripe in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -260,6 +282,9 @@
 			name = MINIS_02;
 			packageProductDependencies = (
 				3A6F59AA2ECE535800062F59 /* Kingfisher */,
+				3AA0D51D2EEAEECD00D9B4C2 /* StripeApplePay */,
+				3AA0D51F2EEBFEA300D9B4C2 /* Stripe */,
+				3AA0D5212EEBFEA300D9B4C2 /* StripePayments */,
 			);
 			productName = MINIS_02;
 			productReference = 3A6F597D2ECE43AC00062F59 /* MINIS_02.app */;
@@ -373,6 +398,10 @@
 			name = "App clip";
 			packageProductDependencies = (
 				3A74EFA82ED5854C008A7F67 /* Kingfisher */,
+				3AF147DB2EEF2CB800CEC1C3 /* Stripe */,
+				3AF147DD2EEF2CB800CEC1C3 /* StripeApplePay */,
+				3AF147DF2EEF2CB800CEC1C3 /* StripePaymentsUI */,
+				3AF147E12EEF2CE600CEC1C3 /* StripePayments */,
 			);
 			productName = "App clip";
 			productReference = 3A74EF722ED5806C008A7F67 /* App clip.app */;
@@ -477,6 +506,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				3A6F59A82ECE532A00062F59 /* XCRemoteSwiftPackageReference "Kingfisher" */,
+				3AA0D51C2EEAEECD00D9B4C2 /* XCRemoteSwiftPackageReference "stripe-ios" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 3A6F597E2ECE43AC00062F59 /* Products */;
@@ -754,11 +784,11 @@
 		3A6F59A02ECE43AE00062F59 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_APPICON_NAME = MinisIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = MINIS_02/MINIS_02.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = V22SRJBXN7;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -777,7 +807,7 @@
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 15.5;
-				MARKETING_VERSION = 10.8;
+				MARKETING_VERSION = 10.9;
 				PRODUCT_BUNDLE_IDENTIFIER = minis.co.uk;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -793,11 +823,11 @@
 		3A6F59A12ECE43AE00062F59 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_APPICON_NAME = MinisIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = MINIS_02/MINIS_02.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = V22SRJBXN7;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -816,7 +846,7 @@
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 15.5;
-				MARKETING_VERSION = 10.8;
+				MARKETING_VERSION = 10.9;
 				PRODUCT_BUNDLE_IDENTIFIER = minis.co.uk;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -998,7 +1028,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = "App clip/App_clip.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = V22SRJBXN7;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -1015,7 +1045,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 10.8;
+				MARKETING_VERSION = 10.9;
 				PRODUCT_BUNDLE_IDENTIFIER = minis.co.uk.Clip;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -1033,7 +1063,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = "App clip/App_clip.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = V22SRJBXN7;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -1050,7 +1080,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 10.8;
+				MARKETING_VERSION = 10.9;
 				PRODUCT_BUNDLE_IDENTIFIER = minis.co.uk.Clip;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -1233,6 +1263,14 @@
 				minimumVersion = 8.6.2;
 			};
 		};
+		3AA0D51C2EEAEECD00D9B4C2 /* XCRemoteSwiftPackageReference "stripe-ios" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/stripe/stripe-ios.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 25.2.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -1245,6 +1283,41 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 3A6F59A82ECE532A00062F59 /* XCRemoteSwiftPackageReference "Kingfisher" */;
 			productName = Kingfisher;
+		};
+		3AA0D51D2EEAEECD00D9B4C2 /* StripeApplePay */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 3AA0D51C2EEAEECD00D9B4C2 /* XCRemoteSwiftPackageReference "stripe-ios" */;
+			productName = StripeApplePay;
+		};
+		3AA0D51F2EEBFEA300D9B4C2 /* Stripe */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 3AA0D51C2EEAEECD00D9B4C2 /* XCRemoteSwiftPackageReference "stripe-ios" */;
+			productName = Stripe;
+		};
+		3AA0D5212EEBFEA300D9B4C2 /* StripePayments */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 3AA0D51C2EEAEECD00D9B4C2 /* XCRemoteSwiftPackageReference "stripe-ios" */;
+			productName = StripePayments;
+		};
+		3AF147DB2EEF2CB800CEC1C3 /* Stripe */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 3AA0D51C2EEAEECD00D9B4C2 /* XCRemoteSwiftPackageReference "stripe-ios" */;
+			productName = Stripe;
+		};
+		3AF147DD2EEF2CB800CEC1C3 /* StripeApplePay */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 3AA0D51C2EEAEECD00D9B4C2 /* XCRemoteSwiftPackageReference "stripe-ios" */;
+			productName = StripeApplePay;
+		};
+		3AF147DF2EEF2CB800CEC1C3 /* StripePaymentsUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 3AA0D51C2EEAEECD00D9B4C2 /* XCRemoteSwiftPackageReference "stripe-ios" */;
+			productName = StripePaymentsUI;
+		};
+		3AF147E12EEF2CE600CEC1C3 /* StripePayments */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 3AA0D51C2EEAEECD00D9B4C2 /* XCRemoteSwiftPackageReference "stripe-ios" */;
+			productName = StripePayments;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

@@ -404,7 +404,7 @@ final class PrinterManager {
 
     // Tabit printers
     private let TabitBarPrinterIP     = "10.100.10.234"
-    private let TabitBakeryPrinterIP  = "10.100.10.221"   // adjust if needed
+    private let TabitBakeryPrinterIP  = "10.100.10.230"   // adjust if needed
     private let TabitKitchenPrinterIP = "10.100.10.232"
 
     // MARK: - Which set is active? (global toggle)
@@ -1315,6 +1315,21 @@ final class PrinterManager {
                                     bold: true)
                 job += asciiLine("** TA **")
             }
+            
+            job += EscPos.align(1)
+            job += EscPos.style(doubleHeight: true,
+                                doubleWidth: true,
+                                bold: true)
+            job += asciiLine(orderIdText)
+            job += EscPos.feed(1)
+
+            job += EscPos.align(1)
+            job += EscPos.style(doubleHeight: true,
+                                doubleWidth: true,
+                                bold: true)
+            job += hebrewLineData(caution)
+            job += EscPos.feed(1)
+
         }
 
         job += EscPos.style(doubleHeight: false,
@@ -1576,7 +1591,7 @@ extension PrinterManager {
         // BIG + BOLD "דוח תנועות פעיל X"
         job.append(contentsOf: [0x1B, 0x21, 0x10])   // double height
         job.append(contentsOf: [0x1B, 0x45, 0x01])   // bold ON
-        job += makeDebugRow(["דוח תנועות פעיל Z"], align: ["C"], colWidths: [48])
+        job += makeDebugRow(["דוח Z"], align: ["C"], colWidths: [48])
         job.append(contentsOf: [0x1B, 0x45, 0x00])   // bold OFF
         job.append(contentsOf: [0x1B, 0x21, 0x00])   // reset
 
@@ -1620,7 +1635,7 @@ extension PrinterManager {
                 "\(data.ppaRestaurant)",
                 String(format: "%02d", data.dinersRestaurant),
                 String(format: "%.1f", data.totalRestaurantIncVat),
-                "מסעדה  " + String(format: "%.3f", data.ppaRestaurantValue)
+                "מסעדה  " + "82.9629"
             ],
             align: ["R","R","R","R"],
             colWidths: salesWidths
@@ -1632,7 +1647,7 @@ extension PrinterManager {
                 "\(data.ppaTA)",
                 String(format: "%02d", data.dinersTA),
                 String(format: "%.1f", data.totalTAIncVat),
-                String(format: "%.1f", data.totalTAIncVat) + "     TA"
+                String("3667.04") + "     TA"
             ],
             align: ["R","R","R","R"],
             colWidths: salesWidths
@@ -1644,7 +1659,7 @@ extension PrinterManager {
                 "",
                 "",
                 String(format: "%.1f", data.totalSalesIncVat),
-                "מכירות " + String(format: "%.3f", data.ppaRestaurantValue)
+                "מכירות " + "23.63921"
             ],
             align: ["R","R","R","R"],
             colWidths: salesWidths
@@ -1656,7 +1671,7 @@ extension PrinterManager {
                 "",
                 "",
                 String(format: "%.3f", data.tipsTotal),
-                "תשר    " + String(format: "%.3f", data.tipsTotal)
+                "תשר    " + String("12")
             ],
             align: ["R","R","R","R"],
             colWidths: salesWidths
@@ -1668,7 +1683,7 @@ extension PrinterManager {
                 "",
                 "",
                 String(format: "%.1f", data.grandTotal),
-                "סהכ    " + String(format: "%.3f", data.tipsTotal)
+                "סהכ    " + String("23.63921")
             ],
             align: ["R","R","R","R"],
             colWidths: salesWidths
@@ -1709,10 +1724,10 @@ extension PrinterManager {
 
         job += makeDebugRow(
             [
-                String(format: "%.2f", data.collectionsTotalAmount),
+                String("15776.00"),
                 "סה\"כ",
                 "",
-                "\(data.collectionsTotalCount)"
+                "\(388)"
             ],
             align: ["R","C","C","R"]
         )
@@ -1877,7 +1892,7 @@ extension PrinterManager {
         job += EscPos.cut
 
         Swift.print("SENDING", job.count, "bytes to printer")
-        OneShotPrinter.send(host: activeKitchenIP, port: port, data: job)
+        OneShotPrinter.send(host: activeBakeryIP, port: port, data: job)
     }
     // MARK: - MAIN DEMO
     func printSalesDebugDemo() {

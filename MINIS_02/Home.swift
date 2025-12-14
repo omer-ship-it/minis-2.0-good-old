@@ -51,10 +51,12 @@ struct HomeView: View {
     @AppStorage("launchStudioOnce") private var launchStudioOnce: Bool = false
     @AppStorage("launchMenuOnce") private var launchMenuOnce: Bool = false
     @AppStorage("shopId") private var shopId: String = "0"
+    @AppStorage("miniAppId") private var miniAppId: Int = 0
     @State private var openedDefaultMiniOnce = false
     @State private var showQR = false
     @Namespace private var underlineNS
     @State private var openedFallbackOnce = false
+    
 
     private var kinds: [MiniKind] {
         Array(Set(referrals.map { $0.kind })).sorted { $0.rawValue < $1.rawValue }
@@ -105,8 +107,18 @@ struct HomeView: View {
                             TabPageView(
                                 items: items(for: tab),
                                 onOpen: { r in
+                                    // Reset style to base before applying new mini’s customization
                                     resetShopUserDefaultsToDefaults()
+
+                                    // 🔥 Update BOTH miniAppId and shopId
+                                    miniAppId = r.miniAppId
+                                    shopId = String(r.miniAppId)
+
+                                    UserDefaults.standard.set(r.miniAppId, forKey: "miniAppId")
                                     UserDefaults.standard.set(String(r.miniAppId), forKey: "shopId")
+
+                                    print("🏠 HomeView.onOpen → tapped miniAppId=\(r.miniAppId), kind=\(r.kind)")
+
                                     withAnimation(.spring(response: 0.25, dampingFraction: 0.9)) {
                                         let isMiniMe = (r.kind == .miniMe)
                                         showStudio = isMiniMe
@@ -134,26 +146,36 @@ struct HomeView: View {
 
             
         }
-        .environment(\.layoutDirection, .leftToRight)
+       
         .onAppear {
             reloadReferrals()
 
             if launchStudioOnce { showStudio = true; launchStudioOnce = false }
             if launchMenuOnce  { showMenu  = true; launchMenuOnce  = false }
 
-            // 👇 Open MiniApp 12 automatically on first launch of HomeView
+            // 👇 Open default MiniApp 12 ONLY if no deep link / explicit mini was chosen
             if !openedDefaultMiniOnce {
                 openedDefaultMiniOnce = true
 
-                resetShopUserDefaultsToDefaults()
-                shopId = "12"
-                UserDefaults.standard.set("12", forKey: "shopId")
+                // Only auto-open if NO miniId and no menu requested via deep link
+                if miniAppId == 0 && !launchMenuOnce {
+                    if let ref = defaultReferral() {
+                        let id = ref.miniAppId
+                        print("🎯 HomeView defaultReferral → miniAppId=\(id), kind=\(ref.kind)")
 
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
-                    showMenu = true
+                        resetShopUserDefaultsToDefaults()
+                        miniAppId = id
+                        shopId = String(id)
+                        UserDefaults.standard.set(String(id), forKey: "shopId")
+
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
+                            showMenu = true
+                        }
+                    } else {
+                        print("ℹ️ HomeView → no referrals found, skipping auto-open")
+                    }
                 }
             }
-
             selectedIndex = index(of: selectedFilter)
         }
         .onChange(of: launchStudioOnce) { if $0 { showStudio = true; launchStudioOnce = false } }
@@ -165,25 +187,64 @@ struct HomeView: View {
         }
         .onChange(of: showStudio) { $0 ? startProvisionalReloads() : stopProvisionalReloads() }
         .onChange(of: showMenu)   { $0 ? startProvisionalReloads() : stopProvisionalReloads() }
-       
+        .onChange(of: miniAppId) { newValue in
+            // Ignore “no mini selected”
+            guard newValue != 0 else { return }
+
+            print("🎯 HomeView saw miniAppId change → \(newValue)")
+
+            // Make sure shopId matches this mini
+            shopId = String(newValue)
+
+            // If you want a fresh style each time:
+            resetShopUserDefaultsToDefaults()
+
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
+                showMenu = true
+            }
+        }
 
         .fullScreenCover(isPresented: $showMenu, onDismiss: {
             stopProvisionalReloads()
             reloadReferrals()
         }) {
-            ForceRTL {
-                NavigationStack {
-                    HomeView()   // or MenuCanvasContainer(header: { MenuHeaderView() })
-                        .navigationBarTitleDisplayMode(.inline)
-                        .environment(
-                            \.layoutDirection,
-                            (UserDefaults.standard.string(forKey: "direction") == "rtl")
-                            ? .rightToLeft
-                            : .leftToRight
-                        )
+            @AppStorage("deliveryLoc") var deliveryLoc: String = ""
+
+            let isRtlDirection = (UserDefaults.standard.string(forKey: "direction") == "rtl")
+            let forceDark = !deliveryLoc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+
+            Group {
+                if isRtlDirection {
+                    ForceRTL {
+                        NavigationStack {
+                            menuView()
+                                .environment(\.isRtl, true)
+                                .navigationBarTitleDisplayMode(.inline)
+                                .environment(\.layoutDirection, .rightToLeft)
+                        }
+                    }
+                } else {
+                    NavigationStack {
+                        menuView()
+                            .environment(\.isRtl, false)
+                            .navigationBarTitleDisplayMode(.inline)
+                            .environment(\.layoutDirection, .leftToRight)
+                    }
                 }
             }
+            .preferredColorScheme(forceDark ? .dark : nil)   // ✅ applies to menu + all sheets
+        
+            
         }
+    }
+    
+    private func defaultReferral() -> MiniReferral? {
+        // Prefer Fastlane if available
+        if let fastlane = referrals.first(where: { $0.kind == .fastlane }) {
+            return fastlane
+        }
+        // Fall back to the very first referral
+        return referrals.first
     }
 
     private func reloadReferrals() {
@@ -214,7 +275,7 @@ private struct TabsBarView: View {
     @Binding var showQR: Bool
 
     var body: some View {
-        let selectedColor: Color = .black
+        let selectedColor: Color = .primary
         let unselectedColor: Color = Color(.darkGray)
 
         HStack(spacing: 0) {
@@ -283,16 +344,15 @@ private struct TabPageView: View {
     let onOpen: (MiniReferral) -> Void
 
     var body: some View {
-        ScrollView {
-            if items.isEmpty {
-                VStack(spacing: 8) {
-                    Spacer(minLength: 40)
-                    Text("No items")
-                        .foregroundColor(.secondary)
-                        .font(.system(size: 16, weight: .regular))
-                    Spacer(minLength: 40)
-                }
-            } else {
+        if items.isEmpty {
+            VStack(spacing: 10) {
+                Text("No Minis yet")
+                    .foregroundColor(.secondary)
+                    .font(.system(size: 18, weight: .medium))
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            ScrollView {
                 VStack(spacing: 16) {
                     ForEach(items.indices, id: \.self) { i in
                         ReferralCardView(referral: items[i], onOpen: onOpen)
@@ -343,6 +403,8 @@ private struct RoundedCorners: Shape {
     }
 }
 
+
+
 private struct ReferralCardView: View {
     let referral: MiniReferral
     let onOpen: (MiniReferral) -> Void
@@ -380,7 +442,7 @@ private struct ReferralCardView: View {
                     Spacer()
                 }
                 .padding(16)
-                .background(Color(.systemBackground))
+                .background( Color(.systemGray6))
                 .clipShape(RoundedCorners(tl: 0, tr: 0, bl: 18, br: 18))
             }
             .background(
