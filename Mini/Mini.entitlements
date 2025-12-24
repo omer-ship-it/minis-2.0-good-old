@@ -2,8 +2,6 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>aps-environment</key>
-	<string>development</string>
 	<key>com.apple.developer.associated-domains</key>
 	<array>
 		<string>applinks:minis.studio</string>
@@ -15,11 +13,11 @@
 		<string>merchant.hood.uk</string>
 		<string>merchant.hood23</string>
 		<string>merchant.minis.demo</string>
+		<string>merchant.minis.production</string>
+		<string>merchant.minis.sandbox</string>
+		<string>merchant.minis.zcredit</string>
 		<string>merchant.minis.live</string>
 		<string>merchant.minis.prod</string>
-		<string>merchant.minis.production</string>
-		<string>merchant.minis.zcredit</string>
-		<string>merchant.minis.sandbox</string>
 	</array>
 	<key>com.apple.developer.parent-application-identifiers</key>
 	<array>

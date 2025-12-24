@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 struct MinisCustomizationAPI {
     var baseURL = URL(string: "https://minis.studio")!
@@ -282,11 +283,23 @@ private func makeGroupsDTO(from groups: [[String: Any]]) -> [ModifierGroupDTO] {
 
 func buildJsonData(
     description: String,
+    printer: String?,                          // ✅ NEW
     optionsArr: [[String: Any]],
     additionsArr: [[String: Any]],
     removalsArr: [[String: Any]],
     groups: [[String: Any]]
 ) -> [String: MinisProductAPI.AnyEncodable] {
+
+    let resolvedPrinter: String = {
+        let p = (printer ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if p.isEmpty { return "Bar" }
+        switch p.lowercased() {
+        case "bar":     return "Bar"
+        case "kitchen": return "Kitchen"
+        case "bakery":  return "Bakery"
+        default:        return "Bar"
+        }
+    }()
 
     // 1️⃣ Build groups DTO from the "new" structured editor model
     let groupsDTO = makeGroupsDTO(from: groups)
@@ -295,6 +308,7 @@ func buildJsonData(
     if !groupsDTO.isEmpty {
         return [
             "Description":    .init(description),
+            "Printer":        .init(resolvedPrinter),          // ✅ NEW (top-level)
             // keep flat Modifiers empty when using groups, so the backend
             // doesn't re-flatten them into a default "אפשרויות" group
             "Modifiers":      .init([] as [ModifierDTO]),
@@ -319,6 +333,7 @@ func buildJsonData(
 
     return [
         "Description": .init(description),
+        "Printer":     .init(resolvedPrinter),                 // ✅ NEW (top-level)
         "Modifiers":   .init(modifiers)
         // no ModifierGroups key in pure legacy mode
     ]

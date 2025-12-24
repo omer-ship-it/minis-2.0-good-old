@@ -12,8 +12,24 @@ struct AdminProductDraft: Identifiable {
     var description: String
     var imageURL: String        // can be full URL or short name
     var modifierGroups: [AdminModifierGroupDraft]
+    
+    var printer: String = "Bar"
 }
 
+private enum PrinterStation: String, CaseIterable, Identifiable {
+    case bar = "Bar"
+    case kitchen = "Kitchen"
+    case bakery = "Bakery"
+    var id: String { rawValue }
+
+    var titleHe: String {
+        switch self {
+        case .bar: return "בר"
+        case .kitchen: return "מטבח"
+        case .bakery: return "מאפייה"
+        }
+    }
+}
 
 struct AdminModifierGroupDraft: Identifiable, Hashable {
     enum Kind: String, CaseIterable, Identifiable {
@@ -320,6 +336,26 @@ struct AdminProductEditorView: View {
                           axis: .vertical)
                     .textFieldStyle(.roundedBorder)
                     .lineLimit(3, reservesSpace: true)
+            }
+            
+            VStack(alignment: .leading, spacing: 6) {
+                Text(isRtl ? "מדפסת" : "Printer")
+                    .font(.primariesDemi(14))
+
+                Picker("", selection: Binding(
+                    get: {
+                        PrinterStation(rawValue: draft.printer) ?? .bar
+                    },
+                    set: { newVal in
+                        draft.printer = newVal.rawValue
+                    }
+                )) {
+                    ForEach(PrinterStation.allCases) { s in
+                        Text(isRtl ? s.titleHe : s.rawValue).tag(s)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .tint(.primary)
             }
         }
     }
@@ -762,6 +798,7 @@ extension AdminProductDraft {
         // 3) Build jsonData with your helper (now groups is NON-empty)
         let jsonData = buildJsonData(
             description: description,
+            printer: printer,          // ✅ NEW
             optionsArr: optionsArr,
             additionsArr: additionsArr,
             removalsArr: removalsArr,

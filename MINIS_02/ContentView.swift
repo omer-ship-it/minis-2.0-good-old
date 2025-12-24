@@ -452,7 +452,8 @@ struct menuView: View {
                                 totalPrice: order.totalPrice,
                                 diningMode: order.diningMode
                             )
-                            
+                            .environment(\.isRtl, isRtl)
+                            .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
                         } else {
                             EmptyView()
                         }
@@ -2267,3 +2268,5 @@ struct OrderProgressView: View {
         .accessibilityHint(isRtl ? "אנא המתן" : "Please wait")
     }
 }
+
+

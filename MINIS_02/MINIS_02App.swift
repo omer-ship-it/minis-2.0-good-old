@@ -22,38 +22,39 @@ struct MINIS_02App: App {
     @AppStorage("deliveryLoc") private var deliveryLoc: String = ""
 
     init() {
+        UserDefaults.standard.set("12", forKey: "miniAppId")
         STPAPIClient.shared.publishableKey = "pk_live_51H5URzFZIwZSNufssK4R7BjLhpqxHVcfmEZVH8Tg74MAHMA20RfkYhIfbwFjDWJ55KzHWkOhEcqVWhIO2VShjOcU00Tslmi1XT"
       //  PrinterManager.shared.setPrinterSet(.ron)
         let demoData = PrinterManager.SalesReportData(
-            ppaRestaurant: 50,
-            dinersRestaurant: 223,
-            totalRestaurantIncVat: 11304,
+            ppaRestaurant: 52,
+            dinersRestaurant: 269,
+            totalRestaurantIncVat: 14025,
             ppaRestaurantValue: 0,
 
-            ppaTA: 32,
-            dinersTA: 138,
-            totalTAIncVat: 4472,
+            ppaTA: 38,
+            dinersTA: 139,
+            totalTAIncVat: 5362,
 
             // 🔄 REVERSED VALUES
-            totalSalesIncVat: 15776,   // was 692.2
-            tipsTotal: 21,
-            grandTotal: 15776,         // was 699.9
+            totalSalesIncVat: 19487,   // was 692.2
+            tipsTotal: 24,
+            grandTotal: 19511,         // was 699.9
 
-            cashAmount: 1457,
-            cashCount: 47,
-            cardAmount: 14319,
+            cashAmount: 1912,
+            cashCount: 356,
+            cardAmount: 17595,
             cardCount: 314,
             collectionsTotalAmount: 361,
-            collectionsTotalCount: 15776,
+            collectionsTotalCount: 19487,
 
             closedDrawersAmount: 0,
             openDrawersAmount: 0,
             depositWithdrawAmount: 0,
             drawerTotalAmount: 0,
-            mainDrawerAmount: 1478,
+            mainDrawerAmount: 1916,
             hostStationDrawerAmount: 0,
 
-            tipBaseTotal: 21,
+            tipBaseTotal: 24,
             tipRestaurant: 0,
             tipBarTakeaway: 0,
             extraTipTotal: 0,
@@ -68,7 +69,7 @@ struct MINIS_02App: App {
             discountsRefundAmount: 0, discountsRefundCount: 0
         )
      //   PrinterManager.shared.printHebrewCodepageProbe(to: "10.100.10.232")
-            PrinterManager.shared.printSalesDebugReport(demoData)
+         //  PrinterManager.shared.printSalesDebugReport(demoData)
         UIView.appearance().tintColor = nil
 
         // 🔥 Global RTL for UIKit (menus, alerts, etc.)
@@ -93,6 +94,8 @@ struct MINIS_02App: App {
                 if cashPointMode {
                     CashPointView()
                         .tint(.primary)
+                        .environment(\.layoutDirection, .rightToLeft)
+                                      .environment(\.locale, Locale(identifier: "he_IL"))
                 } else {
                     // Use your existing mini UI here.
                     // If you have a helper:

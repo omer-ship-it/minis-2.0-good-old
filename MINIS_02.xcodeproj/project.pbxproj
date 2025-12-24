@@ -7,46 +7,23 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		3A5D0ED42EEF2FE00020509C /* Kingfisher in Frameworks */ = {isa = PBXBuildFile; productRef = 3A5D0ED32EEF2FE00020509C /* Kingfisher */; };
+		3A5D0ED62EEF30040020509C /* Stripe in Frameworks */ = {isa = PBXBuildFile; productRef = 3A5D0ED52EEF30040020509C /* Stripe */; };
+		3A5D0ED82EEF30040020509C /* StripeApplePay in Frameworks */ = {isa = PBXBuildFile; productRef = 3A5D0ED72EEF30040020509C /* StripeApplePay */; };
+		3A5D0EDA2EEF30040020509C /* StripePaymentsUI in Frameworks */ = {isa = PBXBuildFile; productRef = 3A5D0ED92EEF30040020509C /* StripePaymentsUI */; };
 		3A6F59AB2ECE535800062F59 /* Kingfisher in Frameworks */ = {isa = PBXBuildFile; productRef = 3A6F59AA2ECE535800062F59 /* Kingfisher */; };
-		3A74EFA92ED5854C008A7F67 /* Kingfisher in Frameworks */ = {isa = PBXBuildFile; productRef = 3A74EFA82ED5854C008A7F67 /* Kingfisher */; };
 		3AA0D51E2EEAEECD00D9B4C2 /* StripeApplePay in Frameworks */ = {isa = PBXBuildFile; productRef = 3AA0D51D2EEAEECD00D9B4C2 /* StripeApplePay */; };
 		3AA0D5202EEBFEA300D9B4C2 /* Stripe in Frameworks */ = {isa = PBXBuildFile; productRef = 3AA0D51F2EEBFEA300D9B4C2 /* Stripe */; };
 		3AA0D5222EEBFEA300D9B4C2 /* StripePayments in Frameworks */ = {isa = PBXBuildFile; productRef = 3AA0D5212EEBFEA300D9B4C2 /* StripePayments */; };
-		3AF147DA2EEF2C5D00CEC1C3 /* App clip.app in Embed App Clips */ = {isa = PBXBuildFile; fileRef = 3A74EF722ED5806C008A7F67 /* App clip.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
-		3AF147DC2EEF2CB800CEC1C3 /* Stripe in Frameworks */ = {isa = PBXBuildFile; productRef = 3AF147DB2EEF2CB800CEC1C3 /* Stripe */; };
-		3AF147DE2EEF2CB800CEC1C3 /* StripeApplePay in Frameworks */ = {isa = PBXBuildFile; productRef = 3AF147DD2EEF2CB800CEC1C3 /* StripeApplePay */; };
-		3AF147E02EEF2CB800CEC1C3 /* StripePaymentsUI in Frameworks */ = {isa = PBXBuildFile; productRef = 3AF147DF2EEF2CB800CEC1C3 /* StripePaymentsUI */; };
-		3AF147E22EEF2CE600CEC1C3 /* StripePayments in Frameworks */ = {isa = PBXBuildFile; productRef = 3AF147E12EEF2CE600CEC1C3 /* StripePayments */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
-		3A6F598C2ECE43AE00062F59 /* PBXContainerItemProxy */ = {
+		3A5D0EC32EEF2F660020509C /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 3A6F59752ECE43AC00062F59 /* Project object */;
 			proxyType = 1;
-			remoteGlobalIDString = 3A6F597C2ECE43AC00062F59;
-			remoteInfo = MINIS_02;
-		};
-		3A6F59962ECE43AE00062F59 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 3A6F59752ECE43AC00062F59 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = 3A6F597C2ECE43AC00062F59;
-			remoteInfo = MINIS_02;
-		};
-		3A74EF812ED5806E008A7F67 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 3A6F59752ECE43AC00062F59 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = 3A74EF712ED5806C008A7F67;
-			remoteInfo = "App clip";
-		};
-		3A74EF8B2ED5806E008A7F67 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 3A6F59752ECE43AC00062F59 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = 3A74EF712ED5806C008A7F67;
-			remoteInfo = "App clip";
+			remoteGlobalIDString = 3A5D0EA22EEF2F640020509C;
+			remoteInfo = Mini;
 		};
 /* End PBXContainerItemProxy section */
 
@@ -57,7 +34,6 @@
 			dstPath = "$(CONTENTS_FOLDER_PATH)/AppClips";
 			dstSubfolderSpec = 16;
 			files = (
-				3AF147DA2EEF2C5D00CEC1C3 /* App clip.app in Embed App Clips */,
 			);
 			name = "Embed App Clips";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -65,50 +41,79 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		3A5D0EA32EEF2F640020509C /* Mini.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Mini.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		3A6F597D2ECE43AC00062F59 /* MINIS_02.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MINIS_02.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		3A6F598B2ECE43AE00062F59 /* MINIS_02Tests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MINIS_02Tests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		3A6F59952ECE43AE00062F59 /* MINIS_02UITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MINIS_02UITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		3A74EF492ED57F2C008A7F67 /* MiniTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MiniTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		3A74EF532ED57F2C008A7F67 /* MiniUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MiniUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		3A74EF722ED5806C008A7F67 /* App clip.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "App clip.app"; sourceTree = BUILT_PRODUCTS_DIR; };
-		3A74EF802ED5806E008A7F67 /* App clipTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "App clipTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
-		3A74EF8A2ED5806E008A7F67 /* App clipUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "App clipUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-		3A74EF952ED5806E008A7F67 /* Exceptions for "App clip" folder in "App clip" target */ = {
+		3A5D0EC62EEF2F660020509C /* Exceptions for "Mini" folder in "Mini" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				ContentView.swift,
 				Info.plist,
 			);
-			target = 3A74EF712ED5806C008A7F67 /* App clip */;
+			target = 3A5D0EA22EEF2F640020509C /* Mini */;
 		};
-		3A74EFA02ED5808D008A7F67 /* Exceptions for "MINIS_02" folder in "App clip" target */ = {
+		3A5D0ED12EEF2FB70020509C /* Exceptions for "MINIS_02" folder in "Mini" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
+				Admin.swift,
 				AppDelegate.swift,
 				Bones.swift,
+				Cashpoint.swift,
 				ContentView.swift,
 				FastlaneModel.swift,
-				"Fonts/primaries-demibold-aaa.otf",
+				File.txt,
+				Fonts/OrdersAutoPrinter.swift,
 				Home.swift,
-				Media.xcassets,
+				MiniProductApi.swift,
 				Orders.swift,
 				OrdersNEW.swift,
+				Printer.swift,
 				PrinterManager.swift,
 				Share.swift,
 				Stock.swift,
 			);
-			target = 3A74EF712ED5806C008A7F67 /* App clip */;
+			target = 3A5D0EA22EEF2F640020509C /* Mini */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
+/* Begin PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet section */
+		3A5D0EE82EEFF3230020509C /* Exceptions for "MINIS_02" folder in "Compile Sources" phase from "Mini" target */ = {
+			isa = PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet;
+			buildPhase = 3A5D0E9F2EEF2F640020509C /* Sources */;
+			membershipExceptions = (
+				"Fonts/Oswald-VariableFont_wght.ttf",
+				"Fonts/primaries-demibold-aaa.otf",
+				MINIS_02.entitlements,
+			);
+		};
+/* End PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
+		3A5D0EA42EEF2F640020509C /* Mini */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				3A5D0EC62EEF2F660020509C /* Exceptions for "Mini" folder in "Mini" target */,
+			);
+			path = Mini;
+			sourceTree = "<group>";
+		};
+		3A5D0EB42EEF2F660020509C /* MiniTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = MiniTests;
+			sourceTree = "<group>";
+		};
+		3A5D0EBE2EEF2F660020509C /* MiniUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = MiniUITests;
+			sourceTree = "<group>";
+		};
 		3A6F597F2ECE43AC00062F59 /* MINIS_02 */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
-				3A74EFA02ED5808D008A7F67 /* Exceptions for "MINIS_02" folder in "App clip" target */,
+				3A5D0ED12EEF2FB70020509C /* Exceptions for "MINIS_02" folder in "Mini" target */,
+				3A5D0EE82EEFF3230020509C /* Exceptions for "MINIS_02" folder in "Compile Sources" phase from "Mini" target */,
 			);
 			path = MINIS_02;
 			sourceTree = "<group>";
@@ -133,14 +138,6 @@
 			path = MiniUITests;
 			sourceTree = "<group>";
 		};
-		3A74EF732ED5806C008A7F67 /* App clip */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-				3A74EF952ED5806E008A7F67 /* Exceptions for "App clip" folder in "App clip" target */,
-			);
-			path = "App clip";
-			sourceTree = "<group>";
-		};
 		3A74EF832ED5806E008A7F67 /* App clipTests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = "App clipTests";
@@ -151,9 +148,25 @@
 			path = "App clipUITests";
 			sourceTree = "<group>";
 		};
+		3AC2D4A12EFBD92B00795189 /* Dashboard */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Dashboard;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		3A5D0EA02EEF2F640020509C /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				3A5D0ED82EEF30040020509C /* StripeApplePay in Frameworks */,
+				3A5D0ED42EEF2FE00020509C /* Kingfisher in Frameworks */,
+				3A5D0EDA2EEF30040020509C /* StripePaymentsUI in Frameworks */,
+				3A5D0ED62EEF30040020509C /* Stripe in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		3A6F597A2ECE43AC00062F59 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -165,74 +178,23 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		3A6F59882ECE43AE00062F59 /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		3A6F59922ECE43AE00062F59 /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		3A74EF462ED57F2C008A7F67 /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		3A74EF502ED57F2C008A7F67 /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		3A74EF6F2ED5806C008A7F67 /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				3AF147E22EEF2CE600CEC1C3 /* StripePayments in Frameworks */,
-				3AF147DE2EEF2CB800CEC1C3 /* StripeApplePay in Frameworks */,
-				3A74EFA92ED5854C008A7F67 /* Kingfisher in Frameworks */,
-				3AF147E02EEF2CB800CEC1C3 /* StripePaymentsUI in Frameworks */,
-				3AF147DC2EEF2CB800CEC1C3 /* Stripe in Frameworks */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		3A74EF7D2ED5806E008A7F67 /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		3A74EF872ED5806E008A7F67 /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
 		3A6F59742ECE43AC00062F59 = {
 			isa = PBXGroup;
 			children = (
+				3AC2D4A12EFBD92B00795189 /* Dashboard */,
 				3A6F597F2ECE43AC00062F59 /* MINIS_02 */,
 				3A6F598E2ECE43AE00062F59 /* MINIS_02Tests */,
 				3A6F59982ECE43AE00062F59 /* MINIS_02UITests */,
 				3A74EF4C2ED57F2C008A7F67 /* MiniTests */,
 				3A74EF562ED57F2C008A7F67 /* MiniUITests */,
-				3A74EF732ED5806C008A7F67 /* App clip */,
 				3A74EF832ED5806E008A7F67 /* App clipTests */,
 				3A74EF8D2ED5806E008A7F67 /* App clipUITests */,
+				3A5D0EA42EEF2F640020509C /* Mini */,
+				3A5D0EB42EEF2F660020509C /* MiniTests */,
+				3A5D0EBE2EEF2F660020509C /* MiniUITests */,
 				3A6F59A92ECE535800062F59 /* Frameworks */,
 				3A6F597E2ECE43AC00062F59 /* Products */,
 			);
@@ -242,13 +204,7 @@
 			isa = PBXGroup;
 			children = (
 				3A6F597D2ECE43AC00062F59 /* MINIS_02.app */,
-				3A6F598B2ECE43AE00062F59 /* MINIS_02Tests.xctest */,
-				3A6F59952ECE43AE00062F59 /* MINIS_02UITests.xctest */,
-				3A74EF492ED57F2C008A7F67 /* MiniTests.xctest */,
-				3A74EF532ED57F2C008A7F67 /* MiniUITests.xctest */,
-				3A74EF722ED5806C008A7F67 /* App clip.app */,
-				3A74EF802ED5806E008A7F67 /* App clipTests.xctest */,
-				3A74EF8A2ED5806E008A7F67 /* App clipUITests.xctest */,
+				3A5D0EA32EEF2F640020509C /* Mini.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -263,6 +219,32 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		3A5D0EA22EEF2F640020509C /* Mini */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 3A5D0EC72EEF2F660020509C /* Build configuration list for PBXNativeTarget "Mini" */;
+			buildPhases = (
+				3A5D0E9F2EEF2F640020509C /* Sources */,
+				3A5D0EA02EEF2F640020509C /* Frameworks */,
+				3A5D0EA12EEF2F640020509C /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				3A5D0EA42EEF2F640020509C /* Mini */,
+			);
+			name = Mini;
+			packageProductDependencies = (
+				3A5D0ED32EEF2FE00020509C /* Kingfisher */,
+				3A5D0ED52EEF30040020509C /* Stripe */,
+				3A5D0ED72EEF30040020509C /* StripeApplePay */,
+				3A5D0ED92EEF30040020509C /* StripePaymentsUI */,
+			);
+			productName = Mini;
+			productReference = 3A5D0EA32EEF2F640020509C /* Mini.app */;
+			productType = "com.apple.product-type.application.on-demand-install-capable";
+		};
 		3A6F597C2ECE43AC00062F59 /* MINIS_02 */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 3A6F599F2ECE43AE00062F59 /* Build configuration list for PBXNativeTarget "MINIS_02" */;
@@ -275,6 +257,7 @@
 			buildRules = (
 			);
 			dependencies = (
+				3A5D0EC42EEF2F660020509C /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				3A6F597F2ECE43AC00062F59 /* MINIS_02 */,
@@ -290,169 +273,6 @@
 			productReference = 3A6F597D2ECE43AC00062F59 /* MINIS_02.app */;
 			productType = "com.apple.product-type.application";
 		};
-		3A6F598A2ECE43AE00062F59 /* MINIS_02Tests */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = 3A6F59A22ECE43AE00062F59 /* Build configuration list for PBXNativeTarget "MINIS_02Tests" */;
-			buildPhases = (
-				3A6F59872ECE43AE00062F59 /* Sources */,
-				3A6F59882ECE43AE00062F59 /* Frameworks */,
-				3A6F59892ECE43AE00062F59 /* Resources */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-				3A6F598D2ECE43AE00062F59 /* PBXTargetDependency */,
-			);
-			fileSystemSynchronizedGroups = (
-				3A6F598E2ECE43AE00062F59 /* MINIS_02Tests */,
-			);
-			name = MINIS_02Tests;
-			packageProductDependencies = (
-			);
-			productName = MINIS_02Tests;
-			productReference = 3A6F598B2ECE43AE00062F59 /* MINIS_02Tests.xctest */;
-			productType = "com.apple.product-type.bundle.unit-test";
-		};
-		3A6F59942ECE43AE00062F59 /* MINIS_02UITests */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = 3A6F59A52ECE43AE00062F59 /* Build configuration list for PBXNativeTarget "MINIS_02UITests" */;
-			buildPhases = (
-				3A6F59912ECE43AE00062F59 /* Sources */,
-				3A6F59922ECE43AE00062F59 /* Frameworks */,
-				3A6F59932ECE43AE00062F59 /* Resources */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-				3A6F59972ECE43AE00062F59 /* PBXTargetDependency */,
-			);
-			fileSystemSynchronizedGroups = (
-				3A6F59982ECE43AE00062F59 /* MINIS_02UITests */,
-			);
-			name = MINIS_02UITests;
-			packageProductDependencies = (
-			);
-			productName = MINIS_02UITests;
-			productReference = 3A6F59952ECE43AE00062F59 /* MINIS_02UITests.xctest */;
-			productType = "com.apple.product-type.bundle.ui-testing";
-		};
-		3A74EF482ED57F2C008A7F67 /* MiniTests */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = 3A74EF632ED57F2C008A7F67 /* Build configuration list for PBXNativeTarget "MiniTests" */;
-			buildPhases = (
-				3A74EF452ED57F2C008A7F67 /* Sources */,
-				3A74EF462ED57F2C008A7F67 /* Frameworks */,
-				3A74EF472ED57F2C008A7F67 /* Resources */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-			);
-			fileSystemSynchronizedGroups = (
-				3A74EF4C2ED57F2C008A7F67 /* MiniTests */,
-			);
-			name = MiniTests;
-			packageProductDependencies = (
-			);
-			productName = MiniTests;
-			productReference = 3A74EF492ED57F2C008A7F67 /* MiniTests.xctest */;
-			productType = "com.apple.product-type.bundle.unit-test";
-		};
-		3A74EF522ED57F2C008A7F67 /* MiniUITests */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = 3A74EF662ED57F2C008A7F67 /* Build configuration list for PBXNativeTarget "MiniUITests" */;
-			buildPhases = (
-				3A74EF4F2ED57F2C008A7F67 /* Sources */,
-				3A74EF502ED57F2C008A7F67 /* Frameworks */,
-				3A74EF512ED57F2C008A7F67 /* Resources */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-			);
-			fileSystemSynchronizedGroups = (
-				3A74EF562ED57F2C008A7F67 /* MiniUITests */,
-			);
-			name = MiniUITests;
-			packageProductDependencies = (
-			);
-			productName = MiniUITests;
-			productReference = 3A74EF532ED57F2C008A7F67 /* MiniUITests.xctest */;
-			productType = "com.apple.product-type.bundle.ui-testing";
-		};
-		3A74EF712ED5806C008A7F67 /* App clip */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = 3A74EF962ED5806E008A7F67 /* Build configuration list for PBXNativeTarget "App clip" */;
-			buildPhases = (
-				3A74EF6E2ED5806C008A7F67 /* Sources */,
-				3A74EF6F2ED5806C008A7F67 /* Frameworks */,
-				3A74EF702ED5806C008A7F67 /* Resources */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-			);
-			fileSystemSynchronizedGroups = (
-				3A74EF732ED5806C008A7F67 /* App clip */,
-			);
-			name = "App clip";
-			packageProductDependencies = (
-				3A74EFA82ED5854C008A7F67 /* Kingfisher */,
-				3AF147DB2EEF2CB800CEC1C3 /* Stripe */,
-				3AF147DD2EEF2CB800CEC1C3 /* StripeApplePay */,
-				3AF147DF2EEF2CB800CEC1C3 /* StripePaymentsUI */,
-				3AF147E12EEF2CE600CEC1C3 /* StripePayments */,
-			);
-			productName = "App clip";
-			productReference = 3A74EF722ED5806C008A7F67 /* App clip.app */;
-			productType = "com.apple.product-type.application.on-demand-install-capable";
-		};
-		3A74EF7F2ED5806E008A7F67 /* App clipTests */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = 3A74EF992ED5806E008A7F67 /* Build configuration list for PBXNativeTarget "App clipTests" */;
-			buildPhases = (
-				3A74EF7C2ED5806E008A7F67 /* Sources */,
-				3A74EF7D2ED5806E008A7F67 /* Frameworks */,
-				3A74EF7E2ED5806E008A7F67 /* Resources */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-				3A74EF822ED5806E008A7F67 /* PBXTargetDependency */,
-			);
-			fileSystemSynchronizedGroups = (
-				3A74EF832ED5806E008A7F67 /* App clipTests */,
-			);
-			name = "App clipTests";
-			packageProductDependencies = (
-			);
-			productName = "App clipTests";
-			productReference = 3A74EF802ED5806E008A7F67 /* App clipTests.xctest */;
-			productType = "com.apple.product-type.bundle.unit-test";
-		};
-		3A74EF892ED5806E008A7F67 /* App clipUITests */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = 3A74EF9C2ED5806E008A7F67 /* Build configuration list for PBXNativeTarget "App clipUITests" */;
-			buildPhases = (
-				3A74EF862ED5806E008A7F67 /* Sources */,
-				3A74EF872ED5806E008A7F67 /* Frameworks */,
-				3A74EF882ED5806E008A7F67 /* Resources */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-				3A74EF8C2ED5806E008A7F67 /* PBXTargetDependency */,
-			);
-			fileSystemSynchronizedGroups = (
-				3A74EF8D2ED5806E008A7F67 /* App clipUITests */,
-			);
-			name = "App clipUITests";
-			packageProductDependencies = (
-			);
-			productName = "App clipUITests";
-			productReference = 3A74EF8A2ED5806E008A7F67 /* App clipUITests.xctest */;
-			productType = "com.apple.product-type.bundle.ui-testing";
-		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -460,38 +280,14 @@
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
-				LastSwiftUpdateCheck = 1640;
+				LastSwiftUpdateCheck = 2610;
 				LastUpgradeCheck = 1640;
 				TargetAttributes = {
+					3A5D0EA22EEF2F640020509C = {
+						CreatedOnToolsVersion = 26.1.1;
+					};
 					3A6F597C2ECE43AC00062F59 = {
 						CreatedOnToolsVersion = 16.4;
-					};
-					3A6F598A2ECE43AE00062F59 = {
-						CreatedOnToolsVersion = 16.4;
-						TestTargetID = 3A6F597C2ECE43AC00062F59;
-					};
-					3A6F59942ECE43AE00062F59 = {
-						CreatedOnToolsVersion = 16.4;
-						TestTargetID = 3A6F597C2ECE43AC00062F59;
-					};
-					3A74EF482ED57F2C008A7F67 = {
-						CreatedOnToolsVersion = 16.4;
-						TestTargetID = 3A74EF3A2ED57F2A008A7F67;
-					};
-					3A74EF522ED57F2C008A7F67 = {
-						CreatedOnToolsVersion = 16.4;
-						TestTargetID = 3A74EF3A2ED57F2A008A7F67;
-					};
-					3A74EF712ED5806C008A7F67 = {
-						CreatedOnToolsVersion = 16.4;
-					};
-					3A74EF7F2ED5806E008A7F67 = {
-						CreatedOnToolsVersion = 16.4;
-						TestTargetID = 3A74EF712ED5806C008A7F67;
-					};
-					3A74EF892ED5806E008A7F67 = {
-						CreatedOnToolsVersion = 16.4;
-						TestTargetID = 3A74EF712ED5806C008A7F67;
 					};
 				};
 			};
@@ -514,68 +310,20 @@
 			projectRoot = "";
 			targets = (
 				3A6F597C2ECE43AC00062F59 /* MINIS_02 */,
-				3A6F598A2ECE43AE00062F59 /* MINIS_02Tests */,
-				3A6F59942ECE43AE00062F59 /* MINIS_02UITests */,
-				3A74EF482ED57F2C008A7F67 /* MiniTests */,
-				3A74EF522ED57F2C008A7F67 /* MiniUITests */,
-				3A74EF712ED5806C008A7F67 /* App clip */,
-				3A74EF7F2ED5806E008A7F67 /* App clipTests */,
-				3A74EF892ED5806E008A7F67 /* App clipUITests */,
+				3A5D0EA22EEF2F640020509C /* Mini */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		3A5D0EA12EEF2F640020509C /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		3A6F597B2ECE43AC00062F59 /* Resources */ = {
-			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		3A6F59892ECE43AE00062F59 /* Resources */ = {
-			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		3A6F59932ECE43AE00062F59 /* Resources */ = {
-			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		3A74EF472ED57F2C008A7F67 /* Resources */ = {
-			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		3A74EF512ED57F2C008A7F67 /* Resources */ = {
-			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		3A74EF702ED5806C008A7F67 /* Resources */ = {
-			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		3A74EF7E2ED5806E008A7F67 /* Resources */ = {
-			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		3A74EF882ED5806E008A7F67 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -585,56 +333,14 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		3A5D0E9F2EEF2F640020509C /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		3A6F59792ECE43AC00062F59 /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		3A6F59872ECE43AE00062F59 /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		3A6F59912ECE43AE00062F59 /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		3A74EF452ED57F2C008A7F67 /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		3A74EF4F2ED57F2C008A7F67 /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		3A74EF6E2ED5806C008A7F67 /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		3A74EF7C2ED5806E008A7F67 /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		3A74EF862ED5806E008A7F67 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -644,29 +350,89 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
-		3A6F598D2ECE43AE00062F59 /* PBXTargetDependency */ = {
+		3A5D0EC42EEF2F660020509C /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			target = 3A6F597C2ECE43AC00062F59 /* MINIS_02 */;
-			targetProxy = 3A6F598C2ECE43AE00062F59 /* PBXContainerItemProxy */;
-		};
-		3A6F59972ECE43AE00062F59 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = 3A6F597C2ECE43AC00062F59 /* MINIS_02 */;
-			targetProxy = 3A6F59962ECE43AE00062F59 /* PBXContainerItemProxy */;
-		};
-		3A74EF822ED5806E008A7F67 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = 3A74EF712ED5806C008A7F67 /* App clip */;
-			targetProxy = 3A74EF812ED5806E008A7F67 /* PBXContainerItemProxy */;
-		};
-		3A74EF8C2ED5806E008A7F67 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = 3A74EF712ED5806C008A7F67 /* App clip */;
-			targetProxy = 3A74EF8B2ED5806E008A7F67 /* PBXContainerItemProxy */;
+			target = 3A5D0EA22EEF2F640020509C /* Mini */;
+			targetProxy = 3A5D0EC32EEF2F660020509C /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		3A5D0EC82EEF2F660020509C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = Mini/Mini.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 2;
+				DEVELOPMENT_TEAM = V22SRJBXN7;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Mini/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Minis;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.1;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 11.0;
+				PRODUCT_BUNDLE_IDENTIFIER = minis.co.uk.Clip;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		3A5D0EC92EEF2F660020509C /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = Mini/Mini.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 2;
+				DEVELOPMENT_TEAM = V22SRJBXN7;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Mini/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Minis;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.1;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 11.0;
+				PRODUCT_BUNDLE_IDENTIFIER = minis.co.uk.Clip;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
 		3A6F599D2ECE43AE00062F59 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -807,8 +573,9 @@
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 15.5;
-				MARKETING_VERSION = 10.9;
+				MARKETING_VERSION = 11.0;
 				PRODUCT_BUNDLE_IDENTIFIER = minis.co.uk;
+				"PRODUCT_BUNDLE_IDENTIFIER[sdk=iphoneos*]" = minis.co.uk2;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
@@ -846,8 +613,9 @@
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 15.5;
-				MARKETING_VERSION = 10.9;
+				MARKETING_VERSION = 11.0;
 				PRODUCT_BUNDLE_IDENTIFIER = minis.co.uk;
+				"PRODUCT_BUNDLE_IDENTIFIER[sdk=iphoneos*]" = minis.co.uk2;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
@@ -859,318 +627,18 @@
 			};
 			name = Release;
 		};
-		3A6F59A32ECE43AE00062F59 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				BUNDLE_LOADER = "$(TEST_HOST)";
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
-				MACOSX_DEPLOYMENT_TARGET = 15.5;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "Milkman.MINIS-02Tests";
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = auto;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
-				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2,7";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/MINIS_02.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/MINIS_02";
-				XROS_DEPLOYMENT_TARGET = 2.5;
-			};
-			name = Debug;
-		};
-		3A6F59A42ECE43AE00062F59 /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				BUNDLE_LOADER = "$(TEST_HOST)";
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
-				MACOSX_DEPLOYMENT_TARGET = 15.5;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "Milkman.MINIS-02Tests";
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = auto;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
-				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2,7";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/MINIS_02.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/MINIS_02";
-				XROS_DEPLOYMENT_TARGET = 2.5;
-			};
-			name = Release;
-		};
-		3A6F59A62ECE43AE00062F59 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
-				MACOSX_DEPLOYMENT_TARGET = 15.5;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "Milkman.MINIS-02UITests";
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = auto;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
-				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2,7";
-				TEST_TARGET_NAME = MINIS_02;
-				XROS_DEPLOYMENT_TARGET = 2.5;
-			};
-			name = Debug;
-		};
-		3A6F59A72ECE43AE00062F59 /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
-				MACOSX_DEPLOYMENT_TARGET = 15.5;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "Milkman.MINIS-02UITests";
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = auto;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
-				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2,7";
-				TEST_TARGET_NAME = MINIS_02;
-				XROS_DEPLOYMENT_TARGET = 2.5;
-			};
-			name = Release;
-		};
-		3A74EF642ED57F2C008A7F67 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				BUNDLE_LOADER = "$(TEST_HOST)";
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "Milkman.MINIS-02.MiniTests";
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = iphoneos;
-				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Mini.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Mini";
-			};
-			name = Debug;
-		};
-		3A74EF652ED57F2C008A7F67 /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				BUNDLE_LOADER = "$(TEST_HOST)";
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "Milkman.MINIS-02.MiniTests";
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = iphoneos;
-				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Mini.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Mini";
-				VALIDATE_PRODUCT = YES;
-			};
-			name = Release;
-		};
-		3A74EF672ED57F2C008A7F67 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "Milkman.MINIS-02.MiniUITests";
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = iphoneos;
-				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_TARGET_NAME = Mini;
-			};
-			name = Debug;
-		};
-		3A74EF682ED57F2C008A7F67 /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "Milkman.MINIS-02.MiniUITests";
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = iphoneos;
-				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_TARGET_NAME = Mini;
-				VALIDATE_PRODUCT = YES;
-			};
-			name = Release;
-		};
-		3A74EF972ED5806E008A7F67 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = "App clip/App_clip.entitlements";
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2;
-				DEVELOPMENT_TEAM = V22SRJBXN7;
-				ENABLE_PREVIEWS = YES;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = "App clip/Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = Minis;
-				INFOPLIST_KEY_LSApplicationCategoryType = "";
-				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
-				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-				);
-				MARKETING_VERSION = 10.9;
-				PRODUCT_BUNDLE_IDENTIFIER = minis.co.uk.Clip;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = iphoneos;
-				SWIFT_ACTIVE_COMPILATION_CONDITIONS = APPCLIP;
-				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-			};
-			name = Debug;
-		};
-		3A74EF982ED5806E008A7F67 /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = "App clip/App_clip.entitlements";
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2;
-				DEVELOPMENT_TEAM = V22SRJBXN7;
-				ENABLE_PREVIEWS = YES;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = "App clip/Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = Minis;
-				INFOPLIST_KEY_LSApplicationCategoryType = "";
-				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
-				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-				);
-				MARKETING_VERSION = 10.9;
-				PRODUCT_BUNDLE_IDENTIFIER = minis.co.uk.Clip;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = iphoneos;
-				SWIFT_ACTIVE_COMPILATION_CONDITIONS = APPCLIP;
-				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-				VALIDATE_PRODUCT = YES;
-			};
-			name = Release;
-		};
-		3A74EF9A2ED5806E008A7F67 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				BUNDLE_LOADER = "$(TEST_HOST)";
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "Milkman.MINIS-02.App-clipTests";
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = iphoneos;
-				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/App clip.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/App clip";
-			};
-			name = Debug;
-		};
-		3A74EF9B2ED5806E008A7F67 /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				BUNDLE_LOADER = "$(TEST_HOST)";
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "Milkman.MINIS-02.App-clipTests";
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = iphoneos;
-				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/App clip.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/App clip";
-				VALIDATE_PRODUCT = YES;
-			};
-			name = Release;
-		};
-		3A74EF9D2ED5806E008A7F67 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "Milkman.MINIS-02.App-clipUITests";
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = iphoneos;
-				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_TARGET_NAME = "App clip";
-			};
-			name = Debug;
-		};
-		3A74EF9E2ED5806E008A7F67 /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "Milkman.MINIS-02.App-clipUITests";
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = iphoneos;
-				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_TARGET_NAME = "App clip";
-				VALIDATE_PRODUCT = YES;
-			};
-			name = Release;
-		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		3A5D0EC72EEF2F660020509C /* Build configuration list for PBXNativeTarget "Mini" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				3A5D0EC82EEF2F660020509C /* Debug */,
+				3A5D0EC92EEF2F660020509C /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		3A6F59782ECE43AC00062F59 /* Build configuration list for PBXProject "MINIS_02" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
@@ -1185,69 +653,6 @@
 			buildConfigurations = (
 				3A6F59A02ECE43AE00062F59 /* Debug */,
 				3A6F59A12ECE43AE00062F59 /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
-		3A6F59A22ECE43AE00062F59 /* Build configuration list for PBXNativeTarget "MINIS_02Tests" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				3A6F59A32ECE43AE00062F59 /* Debug */,
-				3A6F59A42ECE43AE00062F59 /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
-		3A6F59A52ECE43AE00062F59 /* Build configuration list for PBXNativeTarget "MINIS_02UITests" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				3A6F59A62ECE43AE00062F59 /* Debug */,
-				3A6F59A72ECE43AE00062F59 /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
-		3A74EF632ED57F2C008A7F67 /* Build configuration list for PBXNativeTarget "MiniTests" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				3A74EF642ED57F2C008A7F67 /* Debug */,
-				3A74EF652ED57F2C008A7F67 /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
-		3A74EF662ED57F2C008A7F67 /* Build configuration list for PBXNativeTarget "MiniUITests" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				3A74EF672ED57F2C008A7F67 /* Debug */,
-				3A74EF682ED57F2C008A7F67 /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
-		3A74EF962ED5806E008A7F67 /* Build configuration list for PBXNativeTarget "App clip" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				3A74EF972ED5806E008A7F67 /* Debug */,
-				3A74EF982ED5806E008A7F67 /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
-		3A74EF992ED5806E008A7F67 /* Build configuration list for PBXNativeTarget "App clipTests" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				3A74EF9A2ED5806E008A7F67 /* Debug */,
-				3A74EF9B2ED5806E008A7F67 /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
-		3A74EF9C2ED5806E008A7F67 /* Build configuration list for PBXNativeTarget "App clipUITests" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				3A74EF9D2ED5806E008A7F67 /* Debug */,
-				3A74EF9E2ED5806E008A7F67 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
@@ -1274,12 +679,27 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		3A6F59AA2ECE535800062F59 /* Kingfisher */ = {
+		3A5D0ED32EEF2FE00020509C /* Kingfisher */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 3A6F59A82ECE532A00062F59 /* XCRemoteSwiftPackageReference "Kingfisher" */;
 			productName = Kingfisher;
 		};
-		3A74EFA82ED5854C008A7F67 /* Kingfisher */ = {
+		3A5D0ED52EEF30040020509C /* Stripe */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 3AA0D51C2EEAEECD00D9B4C2 /* XCRemoteSwiftPackageReference "stripe-ios" */;
+			productName = Stripe;
+		};
+		3A5D0ED72EEF30040020509C /* StripeApplePay */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 3AA0D51C2EEAEECD00D9B4C2 /* XCRemoteSwiftPackageReference "stripe-ios" */;
+			productName = StripeApplePay;
+		};
+		3A5D0ED92EEF30040020509C /* StripePaymentsUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 3AA0D51C2EEAEECD00D9B4C2 /* XCRemoteSwiftPackageReference "stripe-ios" */;
+			productName = StripePaymentsUI;
+		};
+		3A6F59AA2ECE535800062F59 /* Kingfisher */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 3A6F59A82ECE532A00062F59 /* XCRemoteSwiftPackageReference "Kingfisher" */;
 			productName = Kingfisher;
@@ -1295,26 +715,6 @@
 			productName = Stripe;
 		};
 		3AA0D5212EEBFEA300D9B4C2 /* StripePayments */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 3AA0D51C2EEAEECD00D9B4C2 /* XCRemoteSwiftPackageReference "stripe-ios" */;
-			productName = StripePayments;
-		};
-		3AF147DB2EEF2CB800CEC1C3 /* Stripe */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 3AA0D51C2EEAEECD00D9B4C2 /* XCRemoteSwiftPackageReference "stripe-ios" */;
-			productName = Stripe;
-		};
-		3AF147DD2EEF2CB800CEC1C3 /* StripeApplePay */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 3AA0D51C2EEAEECD00D9B4C2 /* XCRemoteSwiftPackageReference "stripe-ios" */;
-			productName = StripeApplePay;
-		};
-		3AF147DF2EEF2CB800CEC1C3 /* StripePaymentsUI */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 3AA0D51C2EEAEECD00D9B4C2 /* XCRemoteSwiftPackageReference "stripe-ios" */;
-			productName = StripePaymentsUI;
-		};
-		3AF147E12EEF2CE600CEC1C3 /* StripePayments */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 3AA0D51C2EEAEECD00D9B4C2 /* XCRemoteSwiftPackageReference "stripe-ios" */;
 			productName = StripePayments;

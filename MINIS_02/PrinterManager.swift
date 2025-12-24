@@ -1,56 +1,426 @@
+
 import Foundation
 import Network
 import UIKit
 import Network
-import CoreFoundation   // ⬅️ add this
+import CoreFoundation
+import Combine
+
+import Foundation
+import Network
+import Darwin
 
 enum OneShotPrinter {
-    static func send(host: String, port: UInt16, data: Data) {
+
+    private static let connectTimeout: TimeInterval = 2.0
+    private static let sendTimeout: TimeInterval = 3.0
+    private static let drainDelaySmall: TimeInterval = 0.25
+    
+    private static let drainDelayLarge: TimeInterval = 0.65
+
+    private static let fastAttempts = 2
+    private static let fastRetryDelayBase: TimeInterval = 0.35
+    private static let fastRetryJitterMax: TimeInterval = 0.25
+
+    // Slow retry window (per job)
+    private static let slowRetryEvery: TimeInterval = 5.0
+    private static let slowRetryMaxWindow: TimeInterval = 60.0   // 1 minute total
+
+    // Pending pump
+    private static let pendingPumpInterval: TimeInterval = 5.0
+
+    // ✅ RETRY LOG THROTTLE
+    private static let slowRetryLogEvery: Int = 3
+
+    // Per-printer serialization
+    private static let lock = NSLock()
+    private static var queues: [String: DispatchQueue] = [:]
+
+    // Pending jobs per printer (keyed by dedupeKey)
+    private static var pendingOrder: [String: [String]] = [:]
+    private static var pendingMap:   [String: [String: Job]] = [:]
+
+    private static var isDraining: Set<String> = []
+    private static var pendingPumpScheduled: Set<String> = []
+
+    // ✅ LAN transition marker state
+    private static var lastPrinterLanUp: Bool = false
+
+    private struct Job {
+        let id: UUID
+        let createdAt: Date
+        let data: Data
+        let tag: String
+        let dedupeKey: String
+        let slowAttempts: Int
+    }
+
+    // MARK: - Tiny LAN IPv4 helper (en0 / bridge100)
+
+    private static func currentLANIPv4() -> String? {
+        var ifaddrPtr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddrPtr) == 0, let firstAddr = ifaddrPtr else { return nil }
+        defer { freeifaddrs(ifaddrPtr) }
+
+        for ptr in sequence(first: firstAddr, next: { $0.pointee.ifa_next }) {
+            let interface = ptr.pointee
+            let name = String(cString: interface.ifa_name)
+
+            guard name == "en0" || name == "bridge100" else { continue }
+            guard interface.ifa_addr.pointee.sa_family == sa_family_t(AF_INET) else { continue }
+
+            let addrInPtr = withUnsafePointer(to: interface.ifa_addr.pointee) {
+                $0.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0 }
+            }
+            var addr4 = addrInPtr.pointee.sin_addr
+
+            var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+            inet_ntop(AF_INET, &addr4, &buffer, socklen_t(INET_ADDRSTRLEN))
+            return String(cString: buffer)
+        }
+        return nil
+    }
+
+    private static func isOnPrinterLan(_ ip: String?) -> Bool {
+        guard let ip else { return false }
+        return ip.hasPrefix("10.100.10.")
+    }
+
+    private static func key(_ host: String, _ port: UInt16) -> String { "\(host):\(port)" }
+
+    private static func queue(for host: String, port: UInt16) -> DispatchQueue {
+        let k = key(host, port)
+        lock.lock(); defer { lock.unlock() }
+        if let q = queues[k] { return q }
+        let q = DispatchQueue(label: "OneShotPrinter.\(k)")
+        queues[k] = q
+        return q
+    }
+
+    private static func log(_ s: String) {
+        Swift.print("🖨️ \(s)")
+    }
+
+    private static func totalPendingAllPrinters() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return pendingOrder.values.reduce(0) { $0 + $1.count }
+    }
+
+    private static func maybeLogLanTransition() {
+        let ip = currentLANIPv4()
+        let up = isOnPrinterLan(ip)
+        let total = totalPendingAllPrinters()
+
+        if up && !lastPrinterLanUp && total > 0 {
+            log("ONLINE ip=\(ip ?? "?") → FLUSH pending=\(total)")
+        }
+
+        lastPrinterLanUp = up
+    }
+
+    // MARK: - Public API
+
+    static func send(host: String, port: UInt16, data: Data, tag: String = "job", dedupeKey: String) {
+        let pk = key(host, port)
+
+        maybeLogLanTransition()
+
+        if let ip = currentLANIPv4(), !ip.hasPrefix("10.100.10.") {
+            log("OFFLANE ip=\(ip) → \(pk) \(dedupeKey)")
+        }
+
+        lock.lock()
+        var map = pendingMap[pk] ?? [:]
+        var order = pendingOrder[pk] ?? []
+
+        if let existing = map[dedupeKey] {
+            // replace payload but keep retry counter
+            let job = Job(
+                id: existing.id,
+                createdAt: existing.createdAt,
+                data: data,
+                tag: tag,
+                dedupeKey: dedupeKey,
+                slowAttempts: existing.slowAttempts
+            )
+            map[dedupeKey] = job
+            log("DEDUP \(pk) \(dedupeKey) bytes=\(data.count)")
+        } else {
+            let job = Job(
+                id: UUID(),
+                createdAt: Date(),
+                data: data,
+                tag: tag,
+                dedupeKey: dedupeKey,
+                slowAttempts: 0
+            )
+            map[dedupeKey] = job
+            order.append(dedupeKey)
+            log("ENQ \(pk) \(dedupeKey) bytes=\(data.count) pending=\(order.count)")
+        }
+
+        pendingMap[pk] = map
+        pendingOrder[pk] = order
+        lock.unlock()
+
+        queue(for: host, port: port).async {
+            drainIfNeeded(host: host, port: port)
+        }
+    }
+
+    static func send(host: String, port: UInt16, data: Data, tag: String = "job") {
+        send(host: host, port: port, data: data, tag: tag, dedupeKey: tag)
+    }
+
+    static func pendingCount(host: String, port: UInt16) -> Int {
+        let pk = key(host, port)
+        lock.lock(); defer { lock.unlock() }
+        return pendingOrder[pk]?.count ?? 0
+    }
+
+    // MARK: - Pending pump
+
+    private static func schedulePendingPump(host: String, port: UInt16) {
+        let pk = key(host, port)
+
+        lock.lock()
+        if pendingPumpScheduled.contains(pk) { lock.unlock(); return }
+        pendingPumpScheduled.insert(pk)
+        lock.unlock()
+
+        queue(for: host, port: port).asyncAfter(deadline: .now() + pendingPumpInterval) {
+            lock.lock()
+            pendingPumpScheduled.remove(pk)
+            let hasPending = (pendingOrder[pk]?.isEmpty == false)
+            lock.unlock()
+
+            guard hasPending else { return }
+
+            maybeLogLanTransition()
+            log("PUMP \(pk) pending=\(pendingCount(host: host, port: port))")
+            drainIfNeeded(host: host, port: port)
+        }
+    }
+
+    // MARK: - Drain loop
+
+    private static func drainIfNeeded(host: String, port: UInt16) {
+        let pk = key(host, port)
+
+        lock.lock()
+        if isDraining.contains(pk) { lock.unlock(); return }
+        isDraining.insert(pk)
+        lock.unlock()
+
+        maybeLogLanTransition()
+        log("DRAIN START \(pk)")
+
+        func next() {
+            let popped: Job? = {
+                lock.lock(); defer { lock.unlock() }
+                guard var order = pendingOrder[pk], !order.isEmpty else { return nil }
+                var map = pendingMap[pk] ?? [:]
+
+                let dk = order.removeFirst()
+                let job = map.removeValue(forKey: dk)
+
+                pendingOrder[pk] = order
+                pendingMap[pk] = map
+
+                return job
+            }()
+
+            guard let job = popped else {
+                lock.lock()
+                isDraining.remove(pk)
+                lock.unlock()
+                log("DRAIN STOP \(pk) empty")
+                return
+            }
+
+            trySendWithSlowWindow(host: host, port: port, job: job) { ok, updatedJob in
+                if !ok {
+                    lock.lock()
+                    var map = pendingMap[pk] ?? [:]
+                    var order = pendingOrder[pk] ?? []
+
+                    map[updatedJob.dedupeKey] = updatedJob
+                    order.removeAll { $0 == updatedJob.dedupeKey }
+                    order.insert(updatedJob.dedupeKey, at: 0)
+
+                    pendingMap[pk] = map
+                    pendingOrder[pk] = order
+                    lock.unlock()
+
+                    log("PEND \(pk) \(updatedJob.dedupeKey) pending=\(pendingCount(host: host, port: port))")
+
+                    lock.lock()
+                    isDraining.remove(pk)
+                    lock.unlock()
+
+                    schedulePendingPump(host: host, port: port)
+                    return
+                }
+
+                queue(for: host, port: port).async { next() }
+            }
+        }
+
+        next()
+    }
+
+    // MARK: - Send strategy (no inout)
+
+    private static func trySendWithSlowWindow(
+        host: String,
+        port: UInt16,
+        job: Job,
+        completion: @escaping (Bool, Job) -> Void
+    ) {
+        // 1) fast attempts
+        sendImpl(host: host, port: port, data: job.data, attempt: 1, maxAttempts: fastAttempts, tag: job.dedupeKey) { ok in
+            if ok { completion(true, job); return }
+
+            let deadline = job.createdAt.addingTimeInterval(slowRetryMaxWindow)
+
+            func slowTick(_ current: Job) {
+                if Date() >= deadline {
+                    log("EXPIRE \(host):\(port) \(current.dedupeKey)")
+                    completion(false, current)
+                    return
+                }
+
+                let nextAttempt = current.slowAttempts + 1
+                let updated = Job(
+                    id: current.id,
+                    createdAt: current.createdAt,
+                    data: current.data,
+                    tag: current.tag,
+                    dedupeKey: current.dedupeKey,
+                    slowAttempts: nextAttempt
+                )
+
+                if updated.slowAttempts % slowRetryLogEvery == 0 {
+                    log("RETRY \(host):\(port) \(updated.dedupeKey) #\(updated.slowAttempts)")
+                }
+
+                sendImpl(host: host, port: port, data: updated.data, attempt: 1, maxAttempts: 1, tag: updated.dedupeKey) { ok2 in
+                    if ok2 { completion(true, updated); return }
+                    queue(for: host, port: port).asyncAfter(deadline: .now() + slowRetryEvery) {
+                        slowTick(updated)
+                    }
+                }
+            }
+
+            slowTick(job)
+        }
+    }
+
+    // MARK: - Core send
+
+    private static func sendImpl(
+        host: String,
+        port: UInt16,
+        data: Data,
+        attempt: Int,
+        maxAttempts: Int,
+        tag: String,
+        completion: @escaping (Bool) -> Void
+    ) {
         let hostNW = NWEndpoint.Host(host)
         let portNW = NWEndpoint.Port(rawValue: port) ?? .init(integerLiteral: 9100)
-
         let connection = NWConnection(host: hostNW, port: portNW, using: .tcp)
+
+        let startedAt = Date()
+        var didFinish = false
+        var didBecomeReady = false
+        var didStartSend = false
+
+        func markResult(success: Bool) {
+            Task { @MainActor in
+                PrinterManager.shared.lastSendHadNetworkError = !success
+            }
+        }
+
+        func finish(success: Bool, reason: String) {
+            guard !didFinish else { return }
+            didFinish = true
+
+            let ms = Int(Date().timeIntervalSince(startedAt) * 1000)
+            log("\(success ? "OK" : "FAIL") \(host):\(port) \(tag) \(ms)ms — \(reason)")
+
+            markResult(success: success)
+            connection.stateUpdateHandler = nil
+            connection.cancel()
+
+            if success { completion(true); return }
+
+            if attempt < maxAttempts {
+                let backoff = fastRetryDelayBase * Double(attempt)
+                let jitter  = Double.random(in: 0...fastRetryJitterMax)
+                let delay   = backoff + jitter
+
+                queue(for: host, port: port).asyncAfter(deadline: .now() + delay) {
+                    sendImpl(host: host, port: port, data: data, attempt: attempt + 1, maxAttempts: maxAttempts, tag: tag, completion: completion)
+                }
+                return
+            }
+
+            completion(false)
+        }
+
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + connectTimeout) {
+            if didFinish { return }
+            if !didBecomeReady {
+                finish(success: false, reason: "connect timeout \(connectTimeout)s")
+            }
+        }
 
         connection.stateUpdateHandler = { state in
             switch state {
-
             case .ready:
-                Swift.print("📡 [OneShotPrinter] connected to \(host):\(port)")
+                didBecomeReady = true
+
+                guard !didStartSend else { return }
+                didStartSend = true
+
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + sendTimeout) {
+                    if didFinish { return }
+                    finish(success: false, reason: "send timeout \(sendTimeout)s")
+                }
 
                 connection.send(content: data, completion: .contentProcessed { error in
                     if let error = error {
-                        Swift.print("⚠️ [OneShotPrinter] send error:", error)
-
-                        // ❌ SEND FAILED – update flag on main actor
-                        Task { @MainActor in
-                            PrinterManager.shared.lastSendHadNetworkError = true
-                        }
-                    } else {
-                        Swift.print("✅ [OneShotPrinter] send OK to \(host):\(port)")
-
-                        // ✅ SEND SUCCEEDED – update flag on main actor
-                        Task { @MainActor in
-                            PrinterManager.shared.lastSendHadNetworkError = false
-                        }
+                        finish(success: false, reason: "send error: \(error)")
+                        return
                     }
-                    connection.cancel()
+
+                    let drain = (data.count > 30_000) ? drainDelayLarge : drainDelaySmall
+                    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + drain) {
+                        finish(success: true, reason: "sent + drainDelay \(drain)s")
+                    }
                 })
 
             case .failed(let error):
-                Swift.print("❌ [OneShotPrinter] connection failed:", error)
+                finish(success: false, reason: "connection failed: \(error)")
 
-                // ❌ CONNECTION FAILED – update flag on main actor
-                Task { @MainActor in
-                    PrinterManager.shared.lastSendHadNetworkError = true
-                }
-                connection.cancel()
+            case .cancelled:
+                if !didFinish { finish(success: false, reason: "cancelled") }
 
             default:
                 break
             }
         }
 
-        connection.start(queue: .global())
+        connection.start(queue: DispatchQueue.global(qos: .utility))
+    }
+}
+
+// tiny helper
+private extension Optional {
+    func also(_ f: (Wrapped) -> Void) -> Wrapped? {
+        if let v = self { f(v) }
+        return self
     }
 }
 
@@ -62,7 +432,7 @@ struct EscPos {
     static func feed(_ n: UInt8) -> Data { Data([0x1B, 0x64, n]) }
 
     // Cut paper
-    static let cut = Data([0x1D, 0x56, 0x00])
+    static let cut = Data([0x1D, 0x56, 0x01])
 
     // 🔄 180° rotation (ESC { n)
       static let rotate180On  = Data([0x1B, 0x7B, 0x01])   // ESC { 1
@@ -217,10 +587,16 @@ fileprivate func stationFromFilter(_ f: StationFilter) -> Station? {
 }
 
 fileprivate func stationFromString(_ s: String?) -> Station? {
-    guard let raw = s?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !raw.isEmpty else { return nil }
-    if raw.contains("bar") || raw.contains("drink") || raw.contains("beverage") { return .bar }
-    if raw.contains("kitchen") || raw.contains("food") { return .kitchen }
-    return nil
+    guard let raw = s?.trimmingCharacters(in: .whitespacesAndNewlines),
+          !raw.isEmpty
+    else { return nil }
+
+    switch raw.lowercased() {
+    case "bar":     return .bar
+    case "kitchen": return .kitchen
+    case "bakery":  return .bakery
+    default:        return nil
+    }
 }
 
 fileprivate func lineStation(_ line: KDSOrderLine) -> Station? {
@@ -609,7 +985,8 @@ final class PrinterManager {
     }
 
     // MARK: - Tax invoice
-
+    let taBarText = "** TA **"  // or "TA"
+    
     func printTaxInvoice(
         invoiceNumber: Int,
         date: Date = Date(),
@@ -781,7 +1158,8 @@ final class PrinterManager {
             let fam  = activeFamily
             let job  = makeJob(order: o, lines: kitchenLines, rotated: false, family: fam)
             Swift.print("🧑‍🍳 KITCHEN: sending \(job.count) bytes to \(host):\(port)")
-            send(job, via: kitchenTCP, host: host)
+            let dk = "bone|\(o.id)|kitchen"
+            send(job, host: host, dedupeKey: dk)
 
         case .bakery:
             Swift.print("🧁 BAKERY printing order #\(o.id), lines=",
@@ -798,7 +1176,8 @@ final class PrinterManager {
             let fam  = activeFamily
             let job  = makeJob(order: o, lines: bakeryLines, rotated: false, family: fam)
             Swift.print("🧁 BAKERY: sending \(job.count) bytes to \(host):\(port)")
-            send(job, via: bakeryTCP, host: host)
+            let dk = "bone|\(o.id)|bakery"
+            send(job, host: host, dedupeKey: dk)
 
         case .all:
             guard !allLines.isEmpty else {
@@ -811,7 +1190,8 @@ final class PrinterManager {
             let job  = makeJob(order: o, lines: allLines, rotated: false, family: fam)
             Swift.print("📦 ALL: sending \(job.count) bytes to bar \(host):\(port)")
             debugTicketPreview(order: o, lines: allLines, stationLabel: "All stations")
-            send(job, via: barTCP, host: host)
+            let dk = "bone|\(o.id)|all"
+            send(job, host: host, dedupeKey: dk)
 
         case .bar:
             Swift.print("🖨 BAR station handling order #\(o.id)")
@@ -833,8 +1213,12 @@ final class PrinterManager {
                 let host = activeBakeryIP
                 let fam  = activeFamily
                 let bakeryJob = makeJob(order: o, lines: bakeryLines, rotated: false, family: fam)
+
                 Swift.print("🧁 BAKERY (from BAR): sending \(bakeryJob.count) bytes to \(host):\(port)")
-                send(bakeryJob, via: bakeryTCP, host: host)
+
+                // ✅ IMPORTANT: unique per-order+station so jobs don't overwrite each other
+                let dedupeKey = "bone|\(o.id)|bakery"
+                send(bakeryJob, host: host, dedupeKey: dedupeKey)
             }
 
             if !barLines.isEmpty {
@@ -845,8 +1229,12 @@ final class PrinterManager {
                 let host = activeBarIP
                 let fam  = activeFamily
                 let barJob = makeJob(order: o, lines: barLines, rotated: false, family: fam)
+
                 Swift.print("🖨 BAR: sending \(barJob.count) bytes to \(host):\(port)")
-                send(barJob, via: barTCP, host: host)
+
+                // ✅ Stable per-order + station dedupe key
+                let dedupeKey = "bone|\(o.id)|bar"
+                send(barJob, host: host, dedupeKey: dedupeKey)
             }
         }
     }
@@ -884,7 +1272,8 @@ final class PrinterManager {
                               rotated: rotated,
                               family: fam)
             Swift.print("🧑‍🍳 SPLIT-ALL KITCHEN: sending \(job.count) bytes to \(host):\(port)")
-            send(job, via: kitchenTCP, host: host)
+            let dk = "bone|\(o.id)|kitchen"
+            send(job, host: host, dedupeKey: dk)
         }
 
         if !bakeryLines.isEmpty {
@@ -899,7 +1288,8 @@ final class PrinterManager {
                               rotated: rotated,
                               family: fam)
             Swift.print("🧁 SPLIT-ALL BAKERY: sending \(job.count) bytes to \(host):\(port)")
-            send(job, via: bakeryTCP, host: host)
+            let dk = "bone|\(o.id)|bakery"
+            send(job, host: host, dedupeKey: dk)
         }
 
         if !barLines.isEmpty {
@@ -914,7 +1304,8 @@ final class PrinterManager {
                               rotated: rotated,
                               family: fam)
             Swift.print("🍹 SPLIT-ALL BAR: sending \(job.count) bytes to \(host):\(port)")
-            send(job, via: barTCP, host: host)
+            let dk = "bone|\(o.id)|bar"
+            send(job, host: host, dedupeKey: dk)
         }
     }
 
@@ -932,64 +1323,14 @@ final class PrinterManager {
         .trimmingCharacters(in: .whitespacesAndNewlines)
         .lowercased()
     }
-
     fileprivate func classifyStation(for line: KDSOrderLine) -> Station {
-        let rawCat  = (line.category ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let rawName = line.name.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        let cat  = normalizeCategory(rawCat)
-        let name = rawName.lowercased()
-
-        if rawName.contains("הערה לוטרינה") { return .bakery }
-        if rawName.contains("הערה למטבח")  { return .kitchen }
-        if rawName.contains("הערה לבר")     { return .bar }
-
-        if name.contains("וטרינה") {
-            return .bakery
-        }
-
-        let isSaladCategory =
-            cat.contains("סלט")
-
-        let isSandwichToastCategory =
-            cat.contains("כריכים") ||
-            cat.contains("טוסט")
-
-        let isBakeryCategory =
-            cat.contains("מאפים מתוקים") ||
-            cat.contains("מאפים מלוחים") ||
-            cat.contains("עוגות ועוד")   ||
-            cat.contains("מוצרים לבית")  ||
-            cat.contains("מאפים")        ||
-            cat.contains("מאפה")         ||
-            cat.contains("עוגות")        ||
-            cat.contains("עוגה")         ||
-            cat.contains("סחוט")
-
-        if isSaladCategory {
-            return .kitchen
-        }
-
-        if isSandwichToastCategory && name.contains("טוסט") {
-            return .kitchen
-        }
-
-        if isBakeryCategory {
-            return .bakery
-        }
-
-        if isSandwichToastCategory && !name.contains("טוסט") {
-            return .bakery
-        }
-
-        return .bar
+        // ✅ ONLY from product printer (line.station)
+        return stationFromString(line.station) ?? .bar   // default if missing
     }
-
     // MARK: - Low-level send + debug
 
-    private func send(_ job: Data, via printer: TCPPrinter, host: String) {
-        // Still using one-shot behavior
-        OneShotPrinter.send(host: host, port: port, data: job)
+    private func send(_ job: Data, host: String, dedupeKey: String) {
+        OneShotPrinter.send(host: host, port: port, data: job, tag: dedupeKey, dedupeKey: dedupeKey)
     }
 
     private func debugTicketPreview(order: KDSAdminOrder,
@@ -1048,7 +1389,7 @@ final class PrinterManager {
             return name
         }()
 
-        let orderIdText = "#\(o.id)"
+        let orderIdText = "\(o.id)"
 
         let df = DateFormatter()
         df.dateFormat = "HH:mm   dd/MM/yyyy"
@@ -1163,12 +1504,8 @@ final class PrinterManager {
             job += EscPos.feed(1)
 
             if isTakeAwayService {
-                job += EscPos.align(1)
-                job += EscPos.style(doubleHeight: true,
-                                    doubleWidth: true,
-                                    bold: true)
-                job += asciiLine("** TA **")
-                job += EscPos.align(1)
+                job += EscPos.feed(1)
+                job += makeBlackTitle(taBarText, totalWidth: 24)
                 job += EscPos.feed(1)
             }
 
@@ -1226,24 +1563,12 @@ final class PrinterManager {
 
             if isTakeAwayService {
                 job += EscPos.feed(1)
-                job += EscPos.align(1)
-                job += EscPos.style(doubleHeight: true,
-                                    doubleWidth: true,
-                                    bold: true)
-                job += asciiLine("** TA **")
-            }
-
-        } else {
-            // Non-rotated layout (your original path)
-            if isTakeAwayService {
-                job += EscPos.align(1)
-                job += EscPos.style(doubleHeight: true,
-                                    doubleWidth: true,
-                                    bold: true)
-                job += asciiLine("** TA **")
+                job += makeBlackTitle(taBarText, totalWidth: 24)
                 job += EscPos.feed(1)
             }
 
+        } else {
+            
             job += EscPos.align(1)
             job += EscPos.style(doubleHeight: true,
                                 doubleWidth: true,
@@ -1251,8 +1576,29 @@ final class PrinterManager {
             job += asciiLine(orderIdText)
             job += EscPos.feed(1)
 
-            job += hebrewLineData(caution)
-            job += EscPos.feed(2)
+            // Non-rotated layout (your original path)
+           
+            let isTeamTable = caution.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("שולחן")
+
+            if isTeamTable {
+                job += EscPos.feed(1)
+                job += makeBlackTitle(caution, totalWidth: 24)   // ✅ black bar
+                job += EscPos.feed(1)
+            } else {
+                job += EscPos.align(1)
+                job += EscPos.style(doubleHeight: true, doubleWidth: true, bold: true)
+                job += hebrewLineData(caution)
+                job += EscPos.style(doubleHeight: false, doubleWidth: false, bold: false)
+                job += EscPos.align(0)
+                job += EscPos.feed(1)
+            }
+            
+            if isTakeAwayService {
+                job += EscPos.feed(1)
+                job += makeBlackTitle(taBarText, totalWidth: 24)
+                job += EscPos.feed(1)
+            }
+
 
             job += EscPos.align(2)
             job += EscPos.style(doubleHeight: true,
@@ -1308,13 +1654,7 @@ final class PrinterManager {
                 job += EscPos.feed(1)
             }
 
-            if isTakeAwayService {
-                job += EscPos.align(1)
-                job += EscPos.style(doubleHeight: true,
-                                    doubleWidth: true,
-                                    bold: true)
-                job += asciiLine("** TA **")
-            }
+        
             
             job += EscPos.align(1)
             job += EscPos.style(doubleHeight: true,
@@ -1323,12 +1663,20 @@ final class PrinterManager {
             job += asciiLine(orderIdText)
             job += EscPos.feed(1)
 
-            job += EscPos.align(1)
-            job += EscPos.style(doubleHeight: true,
-                                doubleWidth: true,
-                                bold: true)
-            job += hebrewLineData(caution)
-            job += EscPos.feed(1)
+           
+            if isTeamTable {
+                job += EscPos.feed(1)
+                job += makeBlackTitle(caution, totalWidth: 24)   // ✅ black bar
+                job += EscPos.feed(1)
+            } else {
+                job += hebrewLineData(caution)
+                job += EscPos.feed(2)
+            }
+            if isTakeAwayService {
+                job += EscPos.feed(1)
+                job += makeBlackTitle(taBarText, totalWidth: 24)
+                job += EscPos.feed(1)
+            }
 
         }
 
@@ -1543,16 +1891,182 @@ extension PrinterManager {
         // You can add more fields later if the layout grows
     }
 
-    func printSalesDebugReport(_ data: SalesReportData) {
+    func printSalesDebugReport(_ data: SalesReportData, vatRate: Double = 0.18) {
         Swift.print("=== DEBUG PRINT (מכירות + תקבולים + דוח מזומן + תשר + חריגים) ===")
+
+        func exVat(_ incVat: Double) -> Double {
+            guard vatRate > 0 else { return incVat }
+            return incVat / (1.0 + vatRate)
+        }
+
+        func f1(_ v: Double) -> String { String(format: "%.1f", v) }
+        func f2(_ v: Double) -> String { String(format: "%.2f", v) }
 
         var job = Data()
         job += EscPos.initPrinter
-        job += escSelectHebrew(.tabit)  // Hebrew code page
+        job += escSelectHebrew(.tabit)
 
-        // ---------- DATE/TIME ----------
+        // ---------- DATE / TIME ----------
         let now = Date()
 
+        let tf = DateFormatter()
+        tf.locale = Locale(identifier: "he_IL")
+        tf.dateFormat = "HH:mm:ss"
+
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "he_IL")
+        df.dateFormat = "dd/MM/yyyy"
+
+        let timeText = tf.string(from: now)
+        let dateText = df.string(from: now)
+
+        // ---------- HEADER ----------
+        job.append(contentsOf: [0x1B, 0x21, 0x10])
+        job.append(contentsOf: [0x1B, 0x45, 0x01])
+        job += makeDebugRow(["Beit Ha'am"], align: ["C"], colWidths: [48])
+        job.append(contentsOf: [0x1B, 0x45, 0x00])
+        job.append(contentsOf: [0x1B, 0x21, 0x00])
+
+        job += makeDebugRow(["בית העם קונדיטוריה ויין בע\"מ"], align: ["C"], colWidths: [48])
+        job += makeDebugRow(["ח.פ / ע.מ. 516784139"], align: ["C"], colWidths: [48])
+        job += EscPos.feed(1)
+
+        job.append(contentsOf: [0x1B, 0x21, 0x10])
+        job.append(contentsOf: [0x1B, 0x45, 0x01])
+        job += makeDebugRow(["דוח Z"], align: ["C"], colWidths: [48])
+        job.append(contentsOf: [0x1B, 0x45, 0x00])
+        job.append(contentsOf: [0x1B, 0x21, 0x00])
+
+        job += makeDebugRow([dateText], align: ["C"], colWidths: [48])
+        job += EscPos.feed(1)
+        job += makeDebugRow(["\(timeText) \(dateText)"], align: ["C"], colWidths: [48])
+        job += makeDebugSeparator(colWidths: [48])
+
+        // ---------- מכירות ----------
+        // TYPE | ללא | כולל | סועד | PPA
+        let salesWidths = [10, 10, 8, 5, 5]
+
+        job += makeBlackTitle("מכירות", totalWidth: 24)
+        job += EscPos.feed(1)
+        job += makeDebugSeparator(colWidths: salesWidths)
+
+        job += makeDebugRow(
+            ["סוג", "ללא מע״מ", "כולל מע״מ", "סועד", "PPA"],
+            align: ["C","C","C","C","C"],
+            colWidths: salesWidths
+        )
+        job += makeDebugSeparator(colWidths: salesWidths)
+
+        // מסעדה
+        job += makeDebugRow(
+            [
+                "מסעדה",
+                f1(exVat(data.totalRestaurantIncVat)),
+                f1(data.totalRestaurantIncVat),
+                "\(data.dinersRestaurant)",
+                "\(data.ppaRestaurant)"
+            ],
+            align: ["R","R","R","R","R"],
+            colWidths: salesWidths
+        )
+
+        // TA
+        job += makeDebugRow(
+            [
+                "TA",
+                f1(exVat(data.totalTAIncVat)),
+                f1(data.totalTAIncVat),
+                "\(data.dinersTA)",
+                "\(data.ppaTA)"
+            ],
+            align: ["R","R","R","R","R"],
+            colWidths: salesWidths
+        )
+
+        // מכירות
+        job += makeDebugRow(
+            [
+                "מכירות",
+                f1(exVat(data.totalSalesIncVat)),
+                f1(data.totalSalesIncVat),
+                "",
+                ""
+            ],
+            align: ["R","R","R","R","R"],
+            colWidths: salesWidths
+        )
+
+        // תשר (no VAT)
+        job += makeDebugRow(
+            [
+                "תשר",
+                "",
+                f1(data.tipsTotal),
+                "",
+                ""
+            ],
+            align: ["R","R","R","R","R"],
+            colWidths: salesWidths
+        )
+
+        // סה״כ
+        job += makeDebugRow(
+            [
+                "סה\"כ",
+                f1(exVat(data.grandTotal)),
+                f1(data.grandTotal),
+                "",
+                ""
+            ],
+            align: ["R","R","R","R","R"],
+            colWidths: salesWidths
+        )
+
+        job += makeDebugSeparator(colWidths: salesWidths)
+
+        // ---------- END ----------
+        job += EscPos.feed(3)
+        job += EscPos.cut
+
+        Swift.print("SENDING", job.count, "bytes to printer")
+        OneShotPrinter.send(host: activeBakeryIP, port: port, data: job)
+    }
+    // MARK: - MAIN DEMO
+    func printSalesReport(
+        _ report: PrinterManager.SalesReportData,
+        type: CashPointView.ReportType,
+        reportDate: Date = Date(),          // ✅ report is FOR this day
+        isRestore: Bool = false,            // ✅ true when restoring
+        generatedAt: Date = Date()          // ✅ print time (now)
+    ) {
+        Swift.print("=== PRINT REPORT \(type == .x ? "X" : "Z") ===")
+        // ⚠️ Printing adjustment: reduce 1 NIS from tips
+        let printTipAdjustment: Double = 1.0
+
+        let printedTips = max(report.tipBaseTotal - printTipAdjustment, 0)
+
+        // Cash already includes tips → reduce cash as well
+        let printedCash = max(report.cashAmount - printTipAdjustment, 0)
+
+        // Recalculate collections total for printing
+        let printedCollectionsTotal = printedCash + report.cardAmount
+        // VAT rate comes from your live model mapping (XReport vatRate / ZReport vatRate)
+        // If you haven't added it yet, default to 18%.
+        let vatRate = 0.18
+
+        func exVat(_ incVat: Double) -> Double {
+            guard vatRate > 0 else { return incVat }
+            return incVat / (1.0 + vatRate)
+        }
+        func reverseNumber(_ s: String) -> String {
+            String(s.reversed())
+        }
+
+        var job = Data()
+        job += EscPos.initPrinter
+        job += escSelectHebrew(.tabit)
+
+        // ---------- DATE/TIME ----------
         let timeFormatter = DateFormatter()
         timeFormatter.locale = Locale(identifier: "he_IL")
         timeFormatter.dateFormat = "HH:mm:ss"
@@ -1561,129 +2075,99 @@ extension PrinterManager {
         dateFormatter.locale = Locale(identifier: "he_IL")
         dateFormatter.dateFormat = "dd/MM/yyyy"
 
-        let timeText = timeFormatter.string(from: now)
-        let dateText = dateFormatter.string(from: now)
+        // ✅ Date shown in the big header = report day (restoreDate)
+        let reportDateText = dateFormatter.string(from: reportDate)
 
-        // ---------- TOP HEADER ----------
+        // ✅ “generated” line uses actual print time
+        let genTimeText = timeFormatter.string(from: generatedAt)
+        let genDateText = dateFormatter.string(from: generatedAt)
 
-        // BIG + BOLD "Beit Ha'am"
-        job.append(contentsOf: [0x1B, 0x21, 0x10])   // double height
+        // ---------- HEADER ----------
+        job.append(contentsOf: [0x1B, 0x21, 0x10])   // double-height
         job.append(contentsOf: [0x1B, 0x45, 0x01])   // bold ON
         job += makeDebugRow(["Beit Ha'am"], align: ["C"], colWidths: [48])
         job.append(contentsOf: [0x1B, 0x45, 0x00])   // bold OFF
         job.append(contentsOf: [0x1B, 0x21, 0x00])   // reset font
-
-        job += makeDebugRow(
-            ["בית העם קונדיטוריה ויין בע\"מ"],
-            align: ["C"],
-            colWidths: [48]
-        )
-
-        job += makeDebugRow(
-            ["ח.פ / ע.מ. 516784139"],
-            align: ["C"],
-            colWidths: [48]
-        )
-
-        // Blank line
         job += EscPos.feed(1)
 
-        // BIG + BOLD "דוח תנועות פעיל X"
-        job.append(contentsOf: [0x1B, 0x21, 0x10])   // double height
-        job.append(contentsOf: [0x1B, 0x45, 0x01])   // bold ON
-        job += makeDebugRow(["דוח Z"], align: ["C"], colWidths: [48])
-        job.append(contentsOf: [0x1B, 0x45, 0x00])   // bold OFF
-        job.append(contentsOf: [0x1B, 0x21, 0x00])   // reset
-
-        // BIG + BOLD date (dd/MM/yyyy)
-        job.append(contentsOf: [0x1B, 0x21, 0x10])   // double height
-        job.append(contentsOf: [0x1B, 0x45, 0x01])   // bold ON
-        job += makeDebugRow([dateText], align: ["C"], colWidths: [48])
-        job.append(contentsOf: [0x1B, 0x45, 0x00])   // bold OFF
-        job.append(contentsOf: [0x1B, 0x21, 0x00])   // reset font
-
-        // Blank line
+        job += makeDebugRow(["בית העם קונדיטוריה ויין בע\"מ"], align: ["C"], colWidths: [48])
+        job += makeDebugRow(["ח.פ / ע.מ. 516784139"], align: ["C"], colWidths: [48])
         job += EscPos.feed(1)
 
-       
-        let headerText = "\(timeText) \(dateText)"
-        job += makeDebugRow(
-            [headerText],
-            align: ["C"],
-            colWidths: [48]
-        )
+        // Title: X/Z
+        job.append(contentsOf: [0x1B, 0x21, 0x10])
+        job.append(contentsOf: [0x1B, 0x45, 0x01])
+        job += makeDebugRow(["דוח תנועות פעיל \(type == .x ? "X" : "Z")"], align: ["C"], colWidths: [48])
+        job.append(contentsOf: [0x1B, 0x45, 0x00])
+        job.append(contentsOf: [0x1B, 0x21, 0x00])
+        job += EscPos.feed(1)
 
+        // ✅ Date big = report date (not today)
+        job.append(contentsOf: [0x1B, 0x21, 0x10])
+        job.append(contentsOf: [0x1B, 0x45, 0x01])
+        job += makeDebugRow([reportDateText], align: ["C"], colWidths: [48])
+        job.append(contentsOf: [0x1B, 0x45, 0x00])
+        job.append(contentsOf: [0x1B, 0x21, 0x00])
+
+        job += EscPos.feed(1)
+
+        // ✅ Generated line: restore vs normal
+        if isRestore {
+            job += makeDebugRow(["\(reportDateText)"], align: ["C"], colWidths: [48])
+        } else {
+            job += makeDebugRow(["הופק בתאריך \(genDateText) \(genTimeText)"], align: ["C"], colWidths: [48])
+        }
         job += makeDebugSeparator(colWidths: [48])
 
-        // ---------- מכירות ----------
+        // ---------- SALES ----------
         let salesWidths = [5, 5, 8, 21]
-
         job += makeBlackTitle("מכירות", totalWidth: 24)
         job += EscPos.feed(1)
         job += makeDebugSeparator(colWidths: salesWidths)
-
-        job += makeDebugRow(
-            ["PPA", "סועד", "כולל מעמ", "ללא מעמ"],
-            align: ["C","C","C","C"],
-            colWidths: salesWidths
-        )
+        job += makeDebugRow(["PPA", "סועד", "כולל מעמ", "ללא מעמ"], align: ["C","C","C","C"], colWidths: salesWidths)
         job += makeDebugSeparator(colWidths: salesWidths)
 
-        // Row: מסעדה
         job += makeDebugRow(
             [
-                "\(data.ppaRestaurant)",
-                String(format: "%02d", data.dinersRestaurant),
-                String(format: "%.1f", data.totalRestaurantIncVat),
-                "מסעדה  " + "82.9629"
+                "\(report.ppaRestaurant)",
+                "\(report.dinersRestaurant)",
+                fmt1(report.totalRestaurantIncVat),
+                "מסעדה  \(reverseNumber(fmt1(exVat(report.totalRestaurantIncVat))))"
             ],
             align: ["R","R","R","R"],
             colWidths: salesWidths
         )
 
-        // Row: TA
         job += makeDebugRow(
             [
-                "\(data.ppaTA)",
-                String(format: "%02d", data.dinersTA),
-                String(format: "%.1f", data.totalTAIncVat),
-                String("3667.04") + "     TA"
+                "\(report.ppaTA)",
+                "\(report.dinersTA)",
+                fmt1(report.totalTAIncVat),
+                "\(fmt1(exVat(report.totalTAIncVat)))     TA"
             ],
             align: ["R","R","R","R"],
             colWidths: salesWidths
         )
 
-        // Row: מכירות total inc VAT
         job += makeDebugRow(
-            [
-                "",
-                "",
-                String(format: "%.1f", data.totalSalesIncVat),
-                "מכירות " + "23.63921"
+            ["", "",
+             fmt1(report.totalSalesIncVat),
+             "מכירות \(reverseNumber(fmt1(exVat(report.totalSalesIncVat))))"
             ],
             align: ["R","R","R","R"],
             colWidths: salesWidths
         )
 
-        // Row: תשר total
         job += makeDebugRow(
-            [
-                "",
-                "",
-                String(format: "%.3f", data.tipsTotal),
-                "תשר    " + String("12")
-            ],
+            ["", "", fmt1(report.tipsTotal), "תשר"],
             align: ["R","R","R","R"],
             colWidths: salesWidths
         )
 
-        // Row: Grand total
         job += makeDebugRow(
-            [
-                "",
-                "",
-                String(format: "%.1f", data.grandTotal),
-                "סהכ    " + String("23.63921")
+            ["", "",
+             fmt1(report.grandTotal),
+             "סה\"כ   \(reverseNumber(fmt1(exVat(report.grandTotal))))"
             ],
             align: ["R","R","R","R"],
             colWidths: salesWidths
@@ -1691,199 +2175,68 @@ extension PrinterManager {
 
         job += makeDebugSeparator(colWidths: salesWidths)
 
-        // ---------- תקבולים ----------
+        // ---------- PAYMENTS ----------
         job += makeBlackTitle("תקבולים", totalWidth: 24)
         job += EscPos.feed(1)
         job += makeDebugSeparator()
-
         job += makeDebugRow(["סכום","תשלום","סוג","כמות"], align: ["C","C","C","C"])
         job += makeDebugSeparator()
 
-        // Cash
-        job += makeDebugRow(
-            [
-                String(format: "%.2f", data.cashAmount),
-                "מזומן",
-                "-",
-                "\(data.cashCount)"
-            ],
-            align: ["R","C","C","R"]
-        )
-
-        job += makeDebugRow(
-            [
-                String(format: "%.2f", data.cardAmount),
-                "אשראי",
-                "-",
-                "\(data.cardCount)"
-            ],
-            align: ["R","C","C","R"]
-        )
+        job += makeDebugRow([fmt2(report.cashAmount), "מזומן", "-", "\(report.cashCount)"], align: ["R","C","C","R"])
+        job += makeDebugRow([fmt2(report.cardAmount), "אשראי", "-", "\(report.cardCount)"], align: ["R","C","C","R"])
 
         job += makeDebugSeparator()
-
-        job += makeDebugRow(
-            [
-                String("15776.00"),
-                "סה\"כ",
-                "",
-                "\(388)"
-            ],
-            align: ["R","C","C","R"]
-        )
+        job += makeDebugRow([fmt2(report.collectionsTotalAmount), "סה\"כ", "", "\(report.collectionsTotalCount)"], align: ["R","C","C","R"])
         job += makeDebugSeparator()
 
-        // ---------- דוח מזומן ----------
+        // ---------- CASH REPORT ----------
         let cashReportWidths = [8, 14, 17]
-
         job += makeBlackTitle("דוח מזומן", totalWidth: 24)
         job += EscPos.feed(1)
         job += makeDebugSeparator(colWidths: cashReportWidths)
-
-        job += makeDebugRow(
-            ["סכום", "סוג מגירה", "סוג פעולה"],
-            align: ["C","C","C"],
-            colWidths: cashReportWidths
-        )
+        job += makeDebugRow(["סכום", "סוג מגירה", "סוג פעולה"], align: ["C","C","C"], colWidths: cashReportWidths)
         job += makeDebugSeparator(colWidths: cashReportWidths)
 
-        // Group 1
-        job += makeDebugRow(
-            [String(format: "%.1f", data.closedDrawersAmount), "", "הד. סגורות"],
-            align: ["R","C","R"],
-            colWidths: cashReportWidths
-        )
-        job += makeDebugRow(
-            [String(format: "%.1f", data.openDrawersAmount), "", "הד. פתוחות"],
-            align: ["R","C","R"],
-            colWidths: cashReportWidths
-        )
-        job += makeDebugRow(
-            [String(format: "%.1f", data.depositWithdrawAmount), "", "הפקדה/משיכה"],
-            align: ["R","C","R"],
-            colWidths: cashReportWidths
-        )
-
+        job += makeDebugRow([fmt2(report.cashAmount), "", "הד. סגורות"], align: ["R","C","R"], colWidths: cashReportWidths)
+        job += makeDebugRow([fmt1(report.openDrawersAmount), "", "הד. פתוחות"], align: ["R","C","R"], colWidths: cashReportWidths)
+        job += makeDebugRow([fmt1(report.depositWithdrawAmount), "", "הפקדה/משיכה"], align: ["R","C","R"], colWidths: cashReportWidths)
         job += makeDebugSeparator(colWidths: cashReportWidths)
 
-        // Group 2
-        job += makeDebugRow(
-            [String(format: "%.1f", data.drawerTotalAmount), "", "סהכ במגירת"],
-            align: ["R","C","R"],
-            colWidths: cashReportWidths
-        )
-        job += makeDebugRow(
-            [String(format: "%.1f", data.mainDrawerAmount), "מגירה ראשית", ""],
-            align: ["R","R","R"],
-            colWidths: cashReportWidths
-        )
-        job += makeDebugRow(
-            [String(format: "%.1f", data.hostStationDrawerAmount), "עמדת מארחת", ""],
-            align: ["R","R","R"],
-            colWidths: cashReportWidths
-        )
-
+        job += makeDebugRow([fmt2(report.cashAmount), "", "סה\"כ במגירה"], align: ["R","C","R"], colWidths: cashReportWidths)
+        job += makeDebugRow([fmt2(report.cashAmount), "מגירה ראשית", ""], align: ["R","R","R"], colWidths: cashReportWidths)
+        job += makeDebugRow([fmt1(report.hostStationDrawerAmount), "עמדת מארחת", ""], align: ["R","R","R"], colWidths: cashReportWidths)
         job += makeDebugSeparator(colWidths: cashReportWidths)
 
-        // ---------- תשר ----------
-        let tipsWidths = cashReportWidths  // [8, 14, 17]
-
+        // ---------- TIPS ----------
+        let tipsWidths = cashReportWidths
         job += makeBlackTitle("תשר", totalWidth: 24)
         job += EscPos.feed(1)
         job += makeDebugSeparator(colWidths: tipsWidths)
 
-        // Group 1 – base tips
-        job += makeDebugRow(
-            [String(format: "%.1f", data.tipBaseTotal), "", "תשר"],
-            align: ["R","C","R"],
-            colWidths: tipsWidths
-        )
-        job += makeDebugRow(
-            [String(format: "%.1f", data.tipRestaurant), "שולחנות מסעדה", ""],
-            align: ["R","R","R"],
-            colWidths: tipsWidths
-        )
-        job += makeDebugRow(
-            [String(format: "%.1f", data.tipBarTakeaway), "בר ולקחת", ""],
-            align: ["R","R","R"],
-            colWidths: tipsWidths
-        )
+        job += makeDebugRow([fmt1(report.tipBaseTotal), "", "תשר"], align: ["R","C","R"], colWidths: tipsWidths)
+        job += makeDebugRow([fmt1(report.tipRestaurant), "שולחנות מסעדה", ""], align: ["R","R","R"], colWidths: tipsWidths)
+        job += makeDebugRow([fmt1(report.tipBarTakeaway), "בר ולקחת", ""], align: ["R","R","R"], colWidths: tipsWidths)
 
         job += makeDebugSeparator(colWidths: tipsWidths)
 
-        // Group 2 – extra tips
-        job += makeDebugRow(
-            [String(format: "%.1f", data.extraTipTotal), "", "עודף טיפ"],
-            align: ["R","C","R"],
-            colWidths: tipsWidths
-        )
-        job += makeDebugRow(
-            [String(format: "%.1f", data.extraTipRestaurant), "מסעדה", ""],
-            align: ["R","R","R"],
-            colWidths: tipsWidths
-        )
-        job += makeDebugRow(
-            [String(format: "%.1f", data.extraTipBar), "בר", ""],
-            align: ["R","R","R"],
-            colWidths: tipsWidths
-        )
+        job += makeDebugRow([fmt1(report.extraTipTotal), "", "עודף טיפ"], align: ["R","C","R"], colWidths: tipsWidths)
+        job += makeDebugRow([fmt1(report.extraTipRestaurant), "מסעדה", ""], align: ["R","R","R"], colWidths: tipsWidths)
+        job += makeDebugRow([fmt1(report.extraTipBar), "בר", ""], align: ["R","R","R"], colWidths: tipsWidths)
 
         job += makeDebugSeparator(colWidths: tipsWidths)
 
-        // ---------- חריגים ----------
-        let exceptionsWidths = tipsWidths  // [8, 14, 17]
-
+        // ---------- EXCEPTIONS ----------
+        let exceptionsWidths = tipsWidths
         job += makeBlackTitle("חריגים", totalWidth: 24)
         job += EscPos.feed(1)
         job += makeDebugSeparator(colWidths: exceptionsWidths)
 
-        job += makeDebugRow(
-            [String(format: "%.1f", data.ordersOTHAmount),
-             "\(data.ordersOTHCount)",
-             "הזמנות OTH"],
-            align: ["R","R","R"],
-            colWidths: exceptionsWidths
-        )
-
-        job += makeDebugRow(
-            [String(format: "%.1f", data.itemsOTHAmount),
-             "\(data.itemsOTHCount)",
-             "מנות OTH"],
-            align: ["R","R","R"],
-            colWidths: exceptionsWidths
-        )
-
-        job += makeDebugRow(
-            [String(format: "%.1f", data.canceledItemsAmount),
-             "\(data.canceledItemsCount)",
-             "ביטולי מנות"],
-            align: ["R","R","R"],
-            colWidths: exceptionsWidths
-        )
-
-        job += makeDebugRow(
-            [String(format: "%.1f", data.refundedItemsAmount),
-             "\(data.refundedItemsCount)",
-             "החזרי מנות"],
-            align: ["R","R","R"],
-            colWidths: exceptionsWidths
-        )
-
-        job += makeDebugRow(
-            [String(format: "%.1f", data.discountsAmount),
-             "\(data.discountsCount)",
-             "הנחות"],
-            align: ["R","R","R"],
-            colWidths: exceptionsWidths
-        )
-
-        job += makeDebugRow(
-            [String(format: "%.1f", data.discountsRefundAmount),
-             "\(data.discountsRefundCount)",
-             "החזר הנחות"],
-            align: ["R","R","R"],
-            colWidths: exceptionsWidths
-        )
+        job += makeDebugRow([fmt1(report.ordersOTHAmount), "\(report.ordersOTHCount)", "הזמנות HTO"], align: ["R","R","R"], colWidths: exceptionsWidths)
+        job += makeDebugRow([fmt1(report.itemsOTHAmount), "\(report.itemsOTHCount)", "מנות HTO"], align: ["R","R","R"], colWidths: exceptionsWidths)
+        job += makeDebugRow([fmt1(report.canceledItemsAmount), "\(report.canceledItemsCount)", "ביטולי מנות"], align: ["R","R","R"], colWidths: exceptionsWidths)
+        job += makeDebugRow([fmt1(report.refundedItemsAmount), "\(report.refundedItemsCount)", "החזרי מנות"], align: ["R","R","R"], colWidths: exceptionsWidths)
+        job += makeDebugRow([fmt1(report.discountsAmount), "\(report.discountsCount)", "הנחות"], align: ["R","R","R"], colWidths: exceptionsWidths)
+        job += makeDebugRow([fmt1(report.discountsRefundAmount), "\(report.discountsRefundCount)", "החזר הנחות"], align: ["R","R","R"], colWidths: exceptionsWidths)
 
         job += makeDebugSeparator(colWidths: exceptionsWidths)
 
@@ -1894,200 +2247,8 @@ extension PrinterManager {
         Swift.print("SENDING", job.count, "bytes to printer")
         OneShotPrinter.send(host: activeBakeryIP, port: port, data: job)
     }
-    // MARK: - MAIN DEMO
-    func printSalesDebugDemo() {
-        Swift.print("=== DEBUG PRINT (מכירות + תקבולים + דוח מזומן + תשר + חריגים) ===")
-
-        var job = Data()
-        job += EscPos.initPrinter
-        job += escSelectHebrew(.tabit)  // Hebrew code page
-
-        // ---------- DATE/TIME PREP ----------
-        let now = Date()
-
-        let timeFormatter = DateFormatter()
-        timeFormatter.locale = Locale(identifier: "he_IL")
-        timeFormatter.dateFormat = "ss:mm:HH"
-
-        let dateFormatter = DateFormatter()
-        dateFormatter.locale = Locale(identifier: "he_IL")
-        dateFormatter.dateFormat = "yyyy/MM/dd"
-
-        let timeText = timeFormatter.string(from: now)
-        let dateText = dateFormatter.string(from: now)
-
-        // ---------- TOP HEADER ----------
-        // Beit Ha'am (Latin)
-        job.append(contentsOf: [0x1B, 0x21, 0x10])   // double-height
-        job.append(contentsOf: [0x1B, 0x45, 0x01])   // bold ON
-        job += makeDebugRow(["Beit Ha'am"], align: ["C"], colWidths: [48])
-        job.append(contentsOf: [0x1B, 0x45, 0x00])   // bold OFF
-        job.append(contentsOf: [0x1B, 0x21, 0x00])   // reset font
-        job += EscPos.feed(1)
-        // בית העם קונדיטוריה ויין בע"מ
-        job += makeDebugRow(
-            ["בית העם קונדיטוריה ויין בע\"מ"],
-            align: ["C"],
-            colWidths: [48]
-        )
-
-        // ח.פ / ע.מ. 516784139
-        job += makeDebugRow(
-            ["ח.פ / ע.מ. 516784139"],
-            align: ["C"],
-            colWidths: [48]
-        )
-
-        // Blank line
-        job += EscPos.feed(1)
-
-        // דוח תנועות פעיל X
-        // BIG + BOLD "דוח תנועות פעיל X"
-        job.append(contentsOf: [0x1B, 0x21, 0x10])   // double height
-        job.append(contentsOf: [0x1B, 0x45, 0x01])   // bold ON
-        job += makeDebugRow(["דוח תנועות פעיל X"], align: ["C"], colWidths: [48])
-        job.append(contentsOf: [0x1B, 0x45, 0x00])   // bold OFF
-        job.append(contentsOf: [0x1B, 0x21, 0x00])   // reset font
-        job += EscPos.feed(1)
-        // Date line: 05/12/2025 style
-        // BIG + BOLD date (dd/MM/yyyy)
-        job.append(contentsOf: [0x1B, 0x21, 0x10])   // double height
-        job.append(contentsOf: [0x1B, 0x45, 0x01])   // bold ON
-        job += makeDebugRow([dateText], align: ["C"], colWidths: [48])
-        job.append(contentsOf: [0x1B, 0x45, 0x00])   // bold OFF
-        job.append(contentsOf: [0x1B, 0x21, 0x00])   // reset font
-
-        // Blank line
-        job += EscPos.feed(1)
-
-        // Line: HH:mm:ss dd/MM/yyyy הופק בתאריך
-        let headerText = "הופק בתאריך \(dateText) \(timeText)"
-        job += makeDebugRow(
-            [headerText],
-            align: ["C"],
-            colWidths: [48]
-        )
-
-        // Separator under header block
-        job += makeDebugSeparator(colWidths: [48])
-
-        // ---------- SALES (מכירות) ----------
-        //  col1 = 5 (PPA)
-        //  col2 = 5 (סועד)
-        //  col3 = 8 (כולל מע״מ)
-        //  col4 = 21 (ללא מע״מ)
-        //  5 + 5 + 8 + 21 = 39   -> + 9 (" | " * 3) = 48 chars
-        let salesWidths = [5, 5, 8, 21]
-
-        job += makeBlackTitle("מכירות", totalWidth: 24)
-        job += EscPos.feed(1)
-        job += makeDebugSeparator(colWidths: salesWidths)
-
-        job += makeDebugRow(
-            ["PPA", "סועד", "כולל מעמ", "ללא מעמ"],
-            align: ["C","C","C","C"],
-            colWidths: salesWidths
-        )
-        job += makeDebugSeparator(colWidths: salesWidths)
-
-        job += makeDebugRow(["26","14","375.0","מסעדה  7.713"], align: ["R","R","R","R"], colWidths: salesWidths)
-        job += makeDebugRow(["22","08","317.2","317.2     TA"], align: ["R","R","R","R"], colWidths: salesWidths)
-        job += makeDebugRow(["","","692.2","מכירות 7.713"],       align: ["R","R","R","R"], colWidths: salesWidths)
-        job += makeDebugRow(["","","7.713","תשר    7.713"],       align: ["R","R","R","R"], colWidths: salesWidths)
-        job += makeDebugRow(["","","699.9","סהכ    7.713"],       align: ["R","R","R","R"], colWidths: salesWidths)
-
-        job += makeDebugSeparator(colWidths: salesWidths)
-
-        // ---------- תקבולים ----------
-        job += makeBlackTitle("תקבולים", totalWidth: 24)
-        job += EscPos.feed(1)
-        job += makeDebugSeparator()
-
-        job += makeDebugRow(["סכום","תשלום","סוג","כמות"], align: ["C","C","C","C"])
-        job += makeDebugSeparator()
-
-        job += makeDebugRow(["250.0","מזומן","-","3"], align: ["R","C","C","R"])
-        job += makeDebugRow(["329.9","אשראי","-","5"], align: ["R","C","C","R"])
-
-        job += makeDebugSeparator()
-        job += makeDebugRow(["579.9","סהכ","","8"], align: ["R","C","C","R"])
-        job += makeDebugSeparator()
-
-        // ---------- דוח מזומן ----------
-        // 3 columns (RTL visual order): סכום | סוג מגירה | סוג פעולה
-        // widths: סכום 8 | סוג מגירה 14 | סוג פעולה 17
-        let cashReportWidths = [8, 14, 17]
-
-        job += makeBlackTitle("דוח מזומן", totalWidth: 24)
-        job += EscPos.feed(1)
-        job += makeDebugSeparator(colWidths: cashReportWidths)
-
-        // Header
-        job += makeDebugRow(
-            ["סכום", "סוג מגירה", "סוג פעולה"],
-            align: ["C","C","C"],
-            colWidths: cashReportWidths
-        )
-        job += makeDebugSeparator(colWidths: cashReportWidths)
-
-        // --- Group 1 ---
-        job += makeDebugRow(["0", "", "הד. סגורות"],   align: ["R","C","R"], colWidths: cashReportWidths)
-        job += makeDebugRow(["0", "", "הד. פתוחות"],   align: ["R","C","R"], colWidths: cashReportWidths)
-        job += makeDebugRow(["0", "", "הפקדה/משיכה"], align: ["R","C","R"], colWidths: cashReportWidths)
-
-        job += makeDebugSeparator(colWidths: cashReportWidths)
-
-        // --- Group 2 ---
-        job += makeDebugRow(["0", "", "סהכ במגירת"],      align: ["R","C","R"], colWidths: cashReportWidths)
-        job += makeDebugRow(["0", "מגירה ראשית", ""],     align: ["R","R","R"], colWidths: cashReportWidths)
-        job += makeDebugRow(["0", "עמדת מארחת", ""],      align: ["R","R","R"], colWidths: cashReportWidths)
-
-        job += makeDebugSeparator(colWidths: cashReportWidths)
-
-        // ---------- תשר ----------
-        let tipsWidths = cashReportWidths  // [8, 14, 17]
-
-        job += makeBlackTitle("תשר", totalWidth: 24)
-        job += EscPos.feed(1)
-        job += makeDebugSeparator(colWidths: tipsWidths)
-
-        // Group 1: תשר בסיסי
-        job += makeDebugRow(["0", "", "תשר"],                align: ["R","C","R"], colWidths: tipsWidths)
-        job += makeDebugRow(["0", "שולחנות מסעדה", ""],     align: ["R","R","R"], colWidths: tipsWidths)
-        job += makeDebugRow(["0", "בר ולקחת", ""],          align: ["R","R","R"], colWidths: tipsWidths)
-
-        job += makeDebugSeparator(colWidths: tipsWidths)
-
-        // Group 2: עודף טיפ
-        job += makeDebugRow(["0", "", "עודף טיפ"], align: ["R","C","R"], colWidths: tipsWidths)
-        job += makeDebugRow(["0", "מסעדה", ""],    align: ["R","R","R"], colWidths: tipsWidths)
-        job += makeDebugRow(["0", "בר", ""],       align: ["R","R","R"], colWidths: tipsWidths)
-
-        job += makeDebugSeparator(colWidths: tipsWidths)
-
-        // ---------- חריגים ----------
-        let exceptionsWidths = tipsWidths  // [8, 14, 17]
-
-        job += makeBlackTitle("חריגים", totalWidth: 24)
-        job += EscPos.feed(1)
-        job += makeDebugSeparator(colWidths: exceptionsWidths)
-
-        job += makeDebugRow(["0", "0", "הזמנות OTH"],  align: ["R","R","R"], colWidths: exceptionsWidths)
-        job += makeDebugRow(["0", "0", "מנות OTH"],    align: ["R","R","R"], colWidths: exceptionsWidths)
-        job += makeDebugRow(["0", "0", "ביטולי מנות"], align: ["R","R","R"], colWidths: exceptionsWidths)
-        job += makeDebugRow(["0", "0", "החזרי מנות"],  align: ["R","R","R"], colWidths: exceptionsWidths)
-        job += makeDebugRow(["0", "0", "הנחות"],       align: ["R","R","R"], colWidths: exceptionsWidths)
-        job += makeDebugRow(["0", "0", "החזר הנחות"],  align: ["R","R","R"], colWidths: exceptionsWidths)
-
-        job += makeDebugSeparator(colWidths: exceptionsWidths)
-
-        // ---------- END ----------
-        job += EscPos.feed(3)
-        job += EscPos.cut
-
-        Swift.print("SENDING", job.count, "bytes to printer")
-        OneShotPrinter.send(host: activeKitchenIP, port: port, data: job)
-    }
+    private func fmt1(_ v: Double) -> String { String(format: "%.1f", v) }
+    private func fmt2(_ v: Double) -> String { String(format: "%.2f", v) }
     
     
     
@@ -2114,7 +2275,7 @@ extension PrinterManager {
                 qty: entry.quantity,
                 category: entry.item.category,
                 status: 1,
-                station: nil,
+                station: entry.item.printer,     // ✅ THIS is the whole fix
                 modifiers: entry.subtitle
             )
         }
@@ -2136,7 +2297,9 @@ extension PrinterManager {
             service: diningMode == .dineIn ? "sit" : "ta",
             name: customerName
         )
-
+        for ln in lines {
+            Swift.print("🧾 line:", ln.name, "| category:", ln.category ?? "-", "| station:", ln.station ?? "nil")
+        }
         printSplitAllStations(order: order)
     }
 }
@@ -2236,3 +2399,119 @@ struct InvoiceItem {
     }
 }
 
+
+// MARK: - API row (matches /api/zreports/daily output)
+struct DailyReportApiRow: Decodable {
+    let date: Date
+
+    let grossTotal: Double
+    let netTotal: Double
+    let vatTotal: Double
+
+    let cashTotal: Double
+    let cardTotal: Double
+    let paymentsTotal: Double
+
+    let totalTips: Double
+    let cashTips: Double
+    let cardTips: Double
+
+    let ordersCount: Int
+    let taCount: Int
+    let taGross: Double
+    let restaurantCount: Int
+    let restaurantGross: Double
+
+    let cashCount: Int
+    let cardCount: Int
+    let mixedCount: Int
+    let missingPaymentCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case date = "Date"
+        case grossTotal = "GrossTotal"
+        case netTotal = "NetTotal"
+        case vatTotal = "VATTotal"
+        case cashTotal = "CashTotal"
+        case cardTotal = "CardTotal"
+        case paymentsTotal = "PaymentsTotal"
+        case totalTips = "TotalTips"
+        case cashTips = "CashTips"
+        case cardTips = "CardTips"
+        case ordersCount = "OrdersCount"
+        case taCount = "TaCount"
+        case taGross = "TaGross"
+        case restaurantCount = "RestaurantCount"
+        case restaurantGross = "RestaurantGross"
+        case cashCount = "CashCount"
+        case cardCount = "CardCount"
+        case mixedCount = "MixedCount"
+        case missingPaymentCount = "MissingPaymentCount"
+    }
+}
+
+// MARK: - Map API -> your existing SalesReportData
+ extension PrinterManager.SalesReportData {
+    static func fromDaily(_ r: DailyReportApiRow) -> PrinterManager.SalesReportData {
+
+        // ✅ precise PPA value (Double) for restaurant (required by your init)
+        let ppaRestaurantValue: Double =
+            r.restaurantCount > 0 ? (r.restaurantGross / Double(r.restaurantCount)) : 0
+
+        // ✅ TA ppa is only Int in your struct
+        let ppaTAInt: Int =
+            r.taCount > 0 ? Int((r.taGross / Double(r.taCount)).rounded()) : 0
+
+        // Collections (unique paying orders)
+        let collectionsUnique = max(0, r.cashCount + r.cardCount - r.mixedCount)
+
+        return PrinterManager.SalesReportData(
+            // ⚠️ order MUST match your initializer labels:
+            ppaRestaurant: Int(ppaRestaurantValue.rounded()),
+            dinersRestaurant: r.restaurantCount,
+            totalRestaurantIncVat: r.restaurantGross,
+            ppaRestaurantValue: ppaRestaurantValue,
+
+            ppaTA: ppaTAInt,
+            dinersTA: r.taCount,
+            totalTAIncVat: r.taGross,
+
+            totalSalesIncVat: r.grossTotal,
+            tipsTotal: r.totalTips,
+            grandTotal: r.grossTotal + r.totalTips,
+
+            // ⚠️ your init expects cashAmount, cashCount, cardAmount, cardCount (this order)
+            cashAmount: r.cashTotal,
+            cashCount: r.cashCount,
+            cardAmount: r.cardTotal,
+            cardCount: r.cardCount,
+
+            collectionsTotalAmount: r.paymentsTotal,
+            collectionsTotalCount: collectionsUnique,
+
+            // Not yet wired from API → keep zero for preview
+            closedDrawersAmount: 0,
+            openDrawersAmount: 0,
+            depositWithdrawAmount: 0,
+            drawerTotalAmount: 0,
+            mainDrawerAmount: 0,
+            hostStationDrawerAmount: 0,
+
+            // tips breakdown (not wired yet)
+            tipBaseTotal: r.totalTips,
+            tipRestaurant: 0,
+            tipBarTakeaway: 0,
+            extraTipTotal: 0,
+            extraTipRestaurant: 0,
+            extraTipBar: 0,
+
+            // exceptions (not wired yet)
+            ordersOTHAmount: 0, ordersOTHCount: 0,
+            itemsOTHAmount: 0, itemsOTHCount: 0,
+            canceledItemsAmount: 0, canceledItemsCount: 0,
+            refundedItemsAmount: 0, refundedItemsCount: 0,
+            discountsAmount: 0, discountsCount: 0,
+            discountsRefundAmount: 0, discountsRefundCount: 0
+        )
+    }
+}

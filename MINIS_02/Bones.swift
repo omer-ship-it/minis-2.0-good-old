@@ -1,6 +1,7 @@
 import SwiftUI
 import AVFoundation
 import UIKit
+import Combine
 
 struct DigitalBonesView: View {
     // MARK: - UI Bone model
@@ -14,6 +15,24 @@ struct DigitalBonesView: View {
             case .active:  return "פעיל"
             case .history: return "היסטוריה"
             }
+        }
+    }
+    
+    private func resolvePrinter(for line: BonesLineDTO) -> String? {
+        // 1) station from server
+        if let s = line.station?.trimmingCharacters(in: .whitespacesAndNewlines), !s.isEmpty {
+            return s
+        }
+        // 2) printer from menu JSON by productId
+        return MenuCatalog.shared.printer(for: line.productId)
+    }
+
+    private func stationFromPrinter(_ p: String?) -> Station {
+        switch (p ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "kitchen": return .kitchen
+        case "bar":     return .bar
+        case "bakery":  return .bar   // bones UI has only bar/kitchen; treat bakery as bar here
+        default:        return .bar
         }
     }
     struct Bone: Identifiable, Equatable {
@@ -96,39 +115,46 @@ struct DigitalBonesView: View {
 
         for ln in order.lines {
             let qty = max(ln.qty, 1)
+            let cleanName = ln.name.trimmingCharacters(in: .whitespacesAndNewlines)
 
-            // Clean name
-            let cleanName = ln.name.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
-
-            // Clean modifiers into a simple " · " separated string
-            let modsRaw = (ln.modifiers ?? "").trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+            let modsRaw = (ln.modifiers ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let modsClean = modsRaw
                 .components(separatedBy: CharacterSet(charactersIn: "·,"))
-                .map { $0.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines) }
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty }
                 .joined(separator: " · ")
 
-            // Minimal ShellMenuItem built from line data
-            let item = ShellMenuItem(
-                id: ln.productId ?? ln.itemId ?? nextLineId,
-                name: cleanName,
-                price: 0,                        // not used by printCashPointSplit
-                category: ln.category ?? "",
-                modifiers: nil,
-                imageURL: nil,
-                description: nil
-            )
+            // ✅ resolve printer
+            let resolvedPrinter = resolvePrinter(for: ln)
 
-            // BasketEntry for printCashPointSplit
-            let entry = BasketEntry(
-                id: nextLineId,
-                item: item,
-                quantity: qty,
-                subtitle: modsClean.isEmpty ? nil : modsClean,
-                unitPrice: 0
-            )
+            // ✅ build item: prefer MenuCatalog (has printer), else fallback with printer
+            let item: ShellMenuItem = {
+                if let menuItem = MenuCatalog.shared.item(for: ln.productId) {
+                    return menuItem
+                }
+                return ShellMenuItem(
+                    id: ln.productId ?? ln.itemId ?? nextLineId,
+                    name: cleanName,
+                    price: 0,
+                    category: ln.category ?? "",
+                    modifiers: nil,
+                    imageURL: nil,
+                    description: nil,
+                    status: nil,
+                    stockQuantity: nil,
+                    printer: resolvedPrinter ?? "Bar"
+                )
+            }()
 
-            entries.append(entry)
+            entries.append(
+                BasketEntry(
+                    id: nextLineId,
+                    item: item,
+                    quantity: qty,
+                    subtitle: modsClean.isEmpty ? nil : modsClean,
+                    unitPrice: 0
+                )
+            )
             nextLineId += 1
         }
 
@@ -705,7 +731,7 @@ struct DigitalBonesView: View {
             }
         }
         .onAppear {
-            selectedStation = Station(rawValue: selectedStationRaw) ?? .bar
+            selectedStation = Station(rawValue: selectedStationRaw) ?? .kitchen
         }
         .task {
             await loadOrders(showSpinner: true)
@@ -1091,27 +1117,7 @@ struct DigitalBonesView: View {
     }
 
     private func classifyStation(for line: BonesLineDTO) -> Station {
-        let rawCat  = (line.category ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let rawName = line.name.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        let cat  = normalizeCategory(rawCat)
-        let name = rawName.lowercased()
-
-        if rawName.contains("הערה למטבח") {
-            return .kitchen
-        }
-        if rawName.contains("הערה לבר") || rawName.contains("הערה לוטרינה") {
-            return .bar
-        }
-
-        let isSaladCategory = cat.contains("סלט")
-        let isToastProduct  = name.contains("טוסט")
-
-        if isSaladCategory || isToastProduct {
-            return .kitchen
-        }
-
-        return .bar
+        stationFromPrinter(resolvePrinter(for: line))
     }
 
     private func mapOrder(_ dto: BonesOrderDTO) -> BoneOrder {
