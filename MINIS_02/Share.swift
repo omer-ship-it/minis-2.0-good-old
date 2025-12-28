@@ -187,66 +187,106 @@ struct AvatarChip: View {
         .buttonStyle(.plain)
     }
 }
-
 struct DotQRView: View {
     let text: String
     var dotScale: CGFloat = 0.78
-    var tint: Color = .primary
-    var bg: Color = .white
-    var overlayLabel: String? = nil
-    var logoKnockoutFraction: CGFloat = 0.28
+    var overlayLabel: String? = "MINI"
+    var logoKnockoutFraction: CGFloat = 0.22
+
+    @Environment(\.colorScheme) private var scheme
+
+    private var cardBG: Color { Color(.secondarySystemGroupedBackground) } // adapts
+    private var qrBG: Color { Color(.systemBackground) }                  // adapts
+    private var ink: Color { Color(.label) }                              // adapts
 
     var body: some View {
         GeometryReader { geo in
             let side = min(geo.size.width, geo.size.height)
+
             ZStack {
-                if let matrix = QRMatrix(text: text) {
+                if let modules = QRMatrix(text: text, correction: "H") {
                     Canvas { ctx, size in
-                        let n = CGFloat(matrix.count)
-                        guard n > 0 else { return }
-                        let cell = side / n
+                        let nInt = modules.count
+                        guard nInt > 0 else { return }
 
-                        ctx.fill(Path(CGRect(origin: .zero, size: size)), with: .color(bg))
+                        let side = min(size.width, size.height)
 
+                        // JS-style quiet zone (4 modules)
+                        let quiet = 4
+                        let totalModules = nInt + quiet * 2
+                        let cell = side / CGFloat(totalModules)
+
+                        // center knockout
                         let kSide = side * logoKnockoutFraction
-                        let kRect = CGRect(x: (side - kSide)/2, y: (side - kSide)/2, width: kSide, height: kSide)
+                        let kx = (side - kSide) / 2
+                        let ky = (side - kSide) / 2
+                        let kRect = CGRect(x: kx, y: ky, width: kSide, height: kSide)
 
-                        for row in 0..<matrix.count {
-                            for col in 0..<matrix[row].count {
-                                guard matrix[row][col] else { continue }
-                                let cx = (CGFloat(col) + 0.5) * cell
-                                let cy = (CGFloat(row) + 0.5) * cell
+                        // QR background (dynamic)
+                        ctx.fill(Path(CGRect(origin: .zero, size: CGSize(width: side, height: side))),
+                                 with: .color(qrBG))
+
+                        func isInFinder(_ r: Int, _ c: Int, _ n: Int) -> Bool {
+                            let tl = (r < 7 && c < 7)
+                            let tr = (r < 7 && c >= n - 7)
+                            let bl = (r >= n - 7 && c < 7)
+                            return tl || tr || bl
+                        }
+
+                        for r in 0..<nInt {
+                            for c in 0..<nInt {
+                                guard modules[r][c] else { continue }
+
+                                let x = (CGFloat(c + quiet)) * cell
+                                let y = (CGFloat(r + quiet)) * cell
+
+                                let cx = x + cell / 2
+                                let cy = y + cell / 2
                                 if kRect.contains(CGPoint(x: cx, y: cy)) { continue }
-                                let d = cell * dotScale
-                                ctx.fill(
-                                    Path(ellipseIn: CGRect(x: cx - d/2, y: cy - d/2, width: d, height: d)),
-                                    with: .color(tint)
-                                )
+
+                                if isInFinder(r, c, nInt) {
+                                    let ix = CGFloat(Int(x.rounded()))
+                                    let iy = CGFloat(Int(y.rounded()))
+                                    let isz = CGFloat(Int(cell.rounded(.up)))
+                                    ctx.fill(Path(CGRect(x: ix, y: iy, width: isz, height: isz)),
+                                             with: .color(ink))
+                                } else {
+                                    let radius = (cell * dotScale) / 2
+                                    ctx.fill(Path(ellipseIn: CGRect(x: cx - radius, y: cy - radius, width: radius * 2, height: radius * 2)),
+                                             with: .color(ink))
+                                }
                             }
                         }
-                    }
-                }
 
-                if let label = overlayLabel {
-                    Text(label)
-                        .font(.system(size: side * 0.1, weight: .heavy, design: .rounded))
-                        .foregroundColor(.black)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 4)
+                        if let label = overlayLabel, !label.isEmpty {
+                            let fontSize = side * 0.10
+                            let t = Text(label)
+                                .font(.system(size: fontSize, weight: .bold))
+                                .foregroundStyle(ink)
+
+                            ctx.draw(t, at: CGPoint(x: side/2, y: side/2), anchor: .center)
+                        }
+                    }
                 }
             }
             .frame(width: side, height: side)
             .background(
                 RoundedRectangle(cornerRadius: 24, style: .continuous)
-                    .fill(Color.white)
+                    .fill(cardBG)
             )
-            .shadow(color: .black.opacity(0.15), radius: 12, x: 0, y: 6)
+            .overlay(
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .stroke(Color.black.opacity(scheme == .dark ? 0.25 : 0.06), lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(scheme == .dark ? 0.35 : 0.12),
+                    radius: scheme == .dark ? 18 : 16,
+                    x: 0, y: 6)
         }
         .aspectRatio(1, contentMode: .fit)
     }
 }
 
-private func QRMatrix(text: String, correction: String = "M") -> [[Bool]]? {
+private func QRMatrix(text: String, correction: String = "H") -> [[Bool]]? {
     let data = Data(text.utf8)
     let filter = CIFilter.qrCodeGenerator()
     filter.setValue(data, forKey: "inputMessage")
@@ -256,30 +296,62 @@ private func QRMatrix(text: String, correction: String = "M") -> [[Bool]]? {
     guard let ciImage = filter.outputImage,
           let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else { return nil }
 
-    let width = cgImage.width, height = cgImage.height
-    guard width == height else { return nil }
+    let width = cgImage.width
+    let height = cgImage.height
+    guard width == height, width > 0 else { return nil }
 
+    // Read as 8-bit grayscale
     let bytesPerRow = width
     var buffer = [UInt8](repeating: 255, count: width * height)
     let colorSpace = CGColorSpaceCreateDeviceGray()
 
-    guard let ctx = CGContext(data: &buffer, width: width, height: height,
-                              bitsPerComponent: 8, bytesPerRow: bytesPerRow,
-                              space: colorSpace, bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return nil }
+    guard let ctx = CGContext(
+        data: &buffer,
+        width: width,
+        height: height,
+        bitsPerComponent: 8,
+        bytesPerRow: bytesPerRow,
+        space: colorSpace,
+        bitmapInfo: CGImageAlphaInfo.none.rawValue
+    ) else { return nil }
 
     ctx.interpolationQuality = .none
     ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
 
-    var matrix = Array(repeating: Array(repeating: false, count: width), count: height)
+    // Build raw matrix (includes CoreImage quiet zone)
+    var raw = Array(repeating: Array(repeating: false, count: width), count: height)
     for y in 0..<height {
         let rowStart = y * bytesPerRow
         for x in 0..<width {
-            matrix[y][x] = buffer[rowStart + x] < 128
+            raw[y][x] = buffer[rowStart + x] < 128
         }
     }
-    return matrix
-}
 
+    // ✅ Trim the quiet zone off (so we can re-add exactly 4 modules like JS)
+    // Find bounding box of dark modules
+    var minX = width, minY = height, maxX = -1, maxY = -1
+    for y in 0..<height {
+        for x in 0..<width where raw[y][x] {
+            if x < minX { minX = x }
+            if y < minY { minY = y }
+            if x > maxX { maxX = x }
+            if y > maxY { maxY = y }
+        }
+    }
+    if maxX < 0 || maxY < 0 { return nil }
+
+    let coreW = maxX - minX + 1
+    let coreH = maxY - minY + 1
+    guard coreW == coreH, coreW > 0 else { return nil }
+
+    var core = Array(repeating: Array(repeating: false, count: coreW), count: coreH)
+    for y in 0..<coreH {
+        for x in 0..<coreW {
+            core[y][x] = raw[minY + y][minX + x]
+        }
+    }
+    return core
+}
 struct QRShareSheet: View {
     let url: URL
     var title = "Share"
@@ -336,7 +408,7 @@ struct QRShareSheet: View {
                                 }
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 14)
-                                .background(RoundedRectangle(cornerRadius: 16).fill(.white))
+                                .background(RoundedRectangle(cornerRadius: 16).fill(Color(.secondarySystemGroupedBackground)))
                                 .shadow(color: .black.opacity(0.12), radius: 10, x: 0, y: 6)
                             }
                             .buttonStyle(.plain)
@@ -361,7 +433,7 @@ struct QRShareSheet: View {
                                 }
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 14)
-                                .background(RoundedRectangle(cornerRadius: 16).fill(.white))
+                                .background(RoundedRectangle(cornerRadius: 16).fill(Color(.secondarySystemGroupedBackground)))
                                 .shadow(color: .black.opacity(0.12), radius: 10, x: 0, y: 6)
                             }
                             .buttonStyle(.plain)
@@ -390,7 +462,6 @@ struct QRShareSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(Color.clear, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
-            .toolbarColorScheme(.light, for: .navigationBar)
             .toolbar(angle.isCustomerFacing ? .hidden : .visible, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -399,14 +470,13 @@ struct QRShareSheet: View {
                             dismiss()
                         } label: {
                             ZStack {
-                                Circle()
-                                    .fill(Color.white)
+                                Circle().fill(Color(.secondarySystemGroupedBackground))
                                     .frame(width: 40, height: 40)
                                     .shadow(color: .black.opacity(0.1), radius: 2, x: 0, y: 1)
 
                                 Image(systemName: "xmark")
                                     .font(.system(size: 14, weight: .bold))
-                                    .foregroundColor(.black)
+                                    .foregroundColor(.primary)
                             }
                         }
                     }

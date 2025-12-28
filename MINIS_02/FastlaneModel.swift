@@ -543,7 +543,6 @@ enum OrderAPI {
     ) {
         let defaults = UserDefaults.standard
 
-        // ---------- helpers ----------
         func r2(_ x: Double) -> Double { (x * 100).rounded() / 100 }
         func closeEnough(_ a: Double, _ b: Double, tol: Double = 0.01) -> Bool { abs(a - b) <= tol }
 
@@ -565,17 +564,12 @@ enum OrderAPI {
         let miniAppId: Int
         if miniAppIdFromDefaults > 0 {
             miniAppId = miniAppIdFromDefaults
-        } else if
-            let s = storedShopIdString,
-            let v = Int(s)
-        {
+        } else if let s = storedShopIdString, let v = Int(s) {
             miniAppId = v
         } else {
             completion(.failure(SubmitError(message: "No miniAppId / shopId selected for this order")))
             return
         }
-
-        print("🧾 OrderAPI.submitOrder → miniAppId=\(miniAppId) (miniAppIdFromDefaults=\(miniAppIdFromDefaults), storedShopId=\(storedShopIdString ?? "nil"))")
 
         let uuid         = defaults.string(forKey: "anonUUID")    ?? UUID().uuidString
         let defaultEmail = defaults.string(forKey: "userEmail")   ?? "customer@example.com"
@@ -590,21 +584,19 @@ enum OrderAPI {
 
         let basketPayload: [[String: Any]] = entries.map { entry in
             let qty = max(entry.quantity, 0)
-
             let unitCandidate = (entry.unitPrice > 0) ? entry.unitPrice : entry.item.price
             let unit = unitCandidate
-
-            let isOth = othSet.contains(entry.id)   // ✅ NEW
+            let isOth = othSet.contains(entry.id)
 
             return [
-                "lineId":    entry.id,              // ✅ helpful for audit/debug
+                "lineId":    entry.id,
                 "productId": entry.item.id,
                 "name":      entry.item.name,
                 "quantity":  qty,
                 "unitPrice": unit,
                 "lineTotal": unit * Double(qty),
                 "modifiers": entry.subtitle ?? "",
-                "isOth":     isOth                  // ✅ THIS is what you save in JSON/DB
+                "isOth":     isOth
             ]
         }
 
@@ -617,22 +609,23 @@ enum OrderAPI {
             }
         }()
 
-        // ---------- totals (discount-aware) ----------
-        // Prefer totals["total"] as the amount due; fall back to function param `total`
+        // ------------------------------------------------------------
+        // ✅ SOURCE: normalize ONCE (used for payload + headers)
+        // ------------------------------------------------------------
+        let normalizedSource = source.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+        // ---------- totals ----------
         var finalTotals: [String: Any] = totals ?? [:]
 
         let dueFromTotals = flexDouble(finalTotals["total"])
         let due = r2(max(dueFromTotals ?? total, 0))
 
-        // Ensure totals always include currency + total (so reporting never misses it)
         if finalTotals["currency"] == nil {
             finalTotals["currency"] = defaults.string(forKey: "currency") ?? "ILS"
         }
         finalTotals["total"] = due
 
-        // (Optional) If caller didn’t include subtotal/discount, derive “discount” as a fallback
         if finalTotals["subtotal"] == nil {
-            // best-effort: basket sum is subtotal baseline
             let subtotalGuess = r2(entries.reduce(0.0) { acc, e in acc + (Double(e.quantity) * e.unitPrice) })
             finalTotals["subtotal"] = subtotalGuess
         }
@@ -642,16 +635,13 @@ enum OrderAPI {
             }
         }
 
-        // ---------- base payload ----------
+        // ---------- payload ----------
         var payload: [String: Any] = [
             "uuid": uuid,
             "email": defaultEmail,
             "name": effectiveName,
             "miniAppId": miniAppId,
-
-            // keep for backwards compat (old server paths)
             "total": due,
-
             "basket": basketPayload,
             "diningMode": diningMode.rawValue,
             "service": serviceValue,
@@ -659,20 +649,16 @@ enum OrderAPI {
                 "platform": "ios",
                 "token": apnsToken
             ],
+            "totals": finalTotals,
 
-            // ✅ NEW unified totals object (discount, subtotal, total, currency)
-            "totals": finalTotals
+            // ✅ IMPORTANT: include source IN JSON (backend might ignore headers)
+            "source": normalizedSource,
+            "orderSource": normalizedSource
         ]
 
-        if let orderId = orderId {
-            payload["orderId"] = orderId
-        }
+        if let orderId { payload["orderId"] = orderId }
+        if let ticketNumber { payload["ticketNumber"] = ticketNumber }
 
-        if let ticketNumber = ticketNumber {
-            payload["ticketNumber"] = ticketNumber
-        }
-
-        // ✅ Order classification (team tab)
         if let orderType, !orderType.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             payload["orderType"] = orderType
         }
@@ -681,27 +667,20 @@ enum OrderAPI {
         }
 
         // ------------------------------------------------------------
-        // 🧾 Payment summary: normalize amounts + ensure paid matches DUE
+        // Payment: normalize
         // ------------------------------------------------------------
-        var normalizedMethod: String? = nil
-        var normalizedCash: Double? = nil
-        var normalizedCard: Double? = nil
-
-        var dueVar = due  // 👈 make due mutable so we can align it with paid sum
+        var dueVar = due
 
         if let payment {
             var cash = r2(max(payment.cashAmount, 0))
             var card = r2(max(payment.cardAmount, 0))
-            var sum  = r2(cash + card)
+            let sum  = r2(cash + card)
 
-            // ✅ If anything was paid, prefer the paid sum as the “due”
-            // This fixes discount rounding cases (e.g. 6 -10% => UI due 5, cash paid 5)
             if sum > 0.01, !closeEnough(sum, dueVar) {
                 dueVar = sum
                 finalTotals["total"] = dueVar
             }
 
-            // ✅ Derive method from normalized amounts (don’t trust caller)
             let method: String
             if sum <= 0.01 {
                 cash = 0
@@ -715,10 +694,6 @@ enum OrderAPI {
                 method = PaymentMethod.cash.rawValue
             }
 
-            normalizedMethod = method
-            normalizedCash   = cash
-            normalizedCard   = card
-
             payload["payment"] = [
                 "provider": "minis",
                 "method": method,
@@ -727,13 +702,23 @@ enum OrderAPI {
             ]
         }
 
-        // ✅ Make sure payload uses the final due (possibly adjusted to paid sum)
+        // ✅ If ApplePay succeeded but you forgot to pass PaymentSummary,
+        // still mark the order as CARD so DB won't show unpaid.
+        if payload["payment"] == nil, zcreditMeta != nil, dueVar > 0.01 {
+            payload["payment"] = [
+                "provider": "zcredit",
+                "method": PaymentMethod.card.rawValue,
+                "cardAmount": dueVar,
+                "cashAmount": 0
+            ]
+        }
+
+        // ensure final totals use dueVar
         payload["total"] = dueVar
         var totalsOut = finalTotals
         totalsOut["total"] = dueVar
         payload["totals"] = totalsOut
 
-        // 📲 WhatsApp notifications
         if let phone = customerPhone?.trimmingCharacters(in: .whitespacesAndNewlines),
            !phone.isEmpty {
             payload["notifications"] = [
@@ -744,11 +729,22 @@ enum OrderAPI {
             ]
         }
 
-        // 💳 ZCredit meta – prefer normalized method if available
-       
         guard let url = URL(string: "https://minis.studio/submitOrder") else {
             completion(.failure(SubmitError(message: "Bad URL")))
             return
+        }
+
+        // ✅ Idempotency key (persisted by outbox)
+        let idempotencyKey = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        payload["idempotencyKey"] = idempotencyKey
+
+        Task { @MainActor in
+            OutboxLog.shared.queued(
+                id: idempotencyKey,
+                miniAppId: miniAppId,
+                ticketNumber: ticketNumber,
+                msg: "queued for /submitOrder"
+            )
         }
 
         var req = URLRequest(url: url)
@@ -756,10 +752,12 @@ enum OrderAPI {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
 
-        let normalizedSource = source
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
+        // ✅ still send header version too
         req.setValue(normalizedSource, forHTTPHeaderField: "X-Order-Source")
+
+        // ✅ send idempotency in headers too (your backend reads these)
+        req.setValue(idempotencyKey, forHTTPHeaderField: "Idempotency-Key")
+        req.setValue(idempotencyKey, forHTTPHeaderField: "X-Request-Id")
 
         if !apnsToken.isEmpty {
             req.setValue("ios", forHTTPHeaderField: "X-Device-Platform")
@@ -779,13 +777,43 @@ enum OrderAPI {
             #endif
         }
 
+        // ✅ Enqueue BEFORE sending (durability)
+        let env = OutboxEnvelope(
+            id: idempotencyKey,
+            createdAt: Date(),
+            state: .pending,
+            attemptCount: 0,
+            lastAttemptAt: nil,
+            endpoint: url.absoluteString,
+            body: req.httpBody ?? Data(),
+            headers: req.allHTTPHeaderFields ?? [:]
+        )
+
+        Task { @MainActor in
+            OrderOutbox.shared.enqueue(env)
+            OrderOutbox.shared.drainNow()   // try immediately
+        }
+
         print("curl:", req.curlDebug)
 
+        Task { @MainActor in
+            NotificationCenter.default.post(name: .resetModifiers, object: nil)
+        }
+
+        Task { @MainActor in
+            OutboxLog.shared.sending(id: idempotencyKey, msg: "sending…")
+        }
+
+        // ✅ Fire normal request too (fast path). Outbox will retry if this fails.
         URLSession.shared.dataTask(with: req) { data, resp, err in
             if let err = err {
+                Task { @MainActor in
+                    OutboxLog.shared.failed(id: idempotencyKey, msg: err.localizedDescription)
+                }
                 completion(.failure(err))
                 return
             }
+
             guard
                 let http = resp as? HTTPURLResponse,
                 (200...299).contains(http.statusCode),
@@ -795,7 +823,25 @@ enum OrderAPI {
                 completion(.failure(SubmitError(message: "Server error")))
                 return
             }
-            completion(.success(obj["orderId"] as? Int ?? 0))
+
+            let oid = obj["orderId"] as? Int ?? 0
+            let replay = (obj["replay"] as? Bool) ?? false
+
+            Task { @MainActor in
+                OutboxLog.shared.acked(
+                    id: idempotencyKey,
+                    orderId: oid,
+                    replay: replay,
+                    msg: replay ? "server replay" : "server ack"
+                )
+            }
+
+            if oid > 0 {
+                Task { @MainActor in OrderOutbox.shared.drainNow() }
+                completion(.success(oid))
+            } else {
+                completion(.failure(SubmitError(message: "Server did not return orderId")))
+            }
         }.resume()
     }
 }
@@ -1727,38 +1773,163 @@ enum TabType: String, CaseIterable, Identifiable {
 
 
 enum TeamTabsAPI {
-    static func close(orderId: Int, completion: @escaping (Result<Void, Error>) -> Void) {
-           guard let url = URL(string: "https://minis.studio/api/teamtabs/\(orderId)/close") else {
-               completion(.failure(NSError(domain: "TeamTabsAPI", code: -1)))
-               return
-           }
-           var req = URLRequest(url: url, timeoutInterval: 15)
-           req.httpMethod = "POST"
-           req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-           req.httpBody = try? JSONSerialization.data(withJSONObject: [:])
 
-           URLSession.shared.dataTask(with: req) { data, resp, err in
-               if let err = err { completion(.failure(err)); return }
-               guard let http = resp as? HTTPURLResponse else {
-                   completion(.failure(NSError(domain: "TeamTabsAPI", code: -2))); return
-               }
-               if !(200...299).contains(http.statusCode) {
-                   let body = String(data: data ?? Data(), encoding: .utf8) ?? ""
-                   completion(.failure(NSError(domain: "TeamTabsAPI", code: http.statusCode, userInfo: ["body": body])))
-                   return
-               }
-               completion(.success(()))
-           }.resume()
-       }
+    private static let base = "https://minis.studio"
+
+    // MARK: - Close team tab (DEBUG + correct endpoint)
+
+    static func close(orderId: Int, completion: @escaping (Result<Void, Error>) -> Void) {
+
+        // ✅ BACKEND ROUTE IS /api/teamtabs/close (no /{id}/close)
+        guard let url = URL(string: "\(base)/api/teamtabs/close") else {
+            completion(.failure(NSError(domain: "TeamTabsAPI", code: -1)))
+            return
+        }
+
+        // ✅ Backend expects TeamTabCloseReq with OrderId
+        // C# property likely "OrderId" but JSON should be camelCase "orderId" by default.
+        let payload: [String: Any] = [
+            "orderId": orderId
+        ]
+
+        let bodyData = (try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted])) ?? Data()
+        let bodyString = String(data: bodyData, encoding: .utf8) ?? "<non-utf8 body>"
+
+        var req = URLRequest(url: url, timeoutInterval: 15)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.httpBody = bodyData
+
+        // ✅ DEBUG REQUEST
+        print("🧾 TeamTabsAPI.close REQUEST")
+        print("   url:", url.absoluteString)
+        print("   method:", req.httpMethod ?? "")
+        print("   body:\n\(bodyString)")
+
+        let curl = """
+        curl -sS -i -X POST "\(url.absoluteString)" \
+          -H "Content-Type: application/json" \
+          -H "Accept: application/json" \
+          -d '\(bodyString.replacingOccurrences(of: "\n", with: " "))'
+        """
+        print("   curl:\n\(curl)")
+
+        let start = Date()
+
+        URLSession.shared.dataTask(with: req) { data, resp, err in
+            if let err = err {
+                print("❌ TeamTabsAPI.close NETWORK error:", err.localizedDescription)
+                completion(.failure(err))
+                return
+            }
+
+            guard let http = resp as? HTTPURLResponse else {
+                let text = data.flatMap { String(data: $0, encoding: .utf8) } ?? "<no body>"
+                print("❌ TeamTabsAPI.close NO HTTP RESPONSE body:", text)
+                completion(.failure(NSError(domain: "TeamTabsAPI", code: -2, userInfo: ["body": text])))
+                return
+            }
+
+            let ms = Int(Date().timeIntervalSince(start) * 1000)
+            let raw = data ?? Data()
+            let text = String(data: raw, encoding: .utf8) ?? "<non-utf8 \(raw.count) bytes>"
+
+            // ✅ DEBUG RESPONSE
+            print("📥 TeamTabsAPI.close RESPONSE (\(ms)ms)")
+            print("   status:", http.statusCode)
+            if let ct = http.value(forHTTPHeaderField: "Content-Type") { print("   content-type:", ct) }
+            if let rid = http.value(forHTTPHeaderField: "x-request-id") { print("   x-request-id:", rid) }
+            if let cf = http.value(forHTTPHeaderField: "cf-ray") { print("   cf-ray:", cf) }
+            print("   body:\n\(text)")
+
+            guard (200...299).contains(http.statusCode) else {
+                completion(.failure(NSError(
+                    domain: "TeamTabsAPI",
+                    code: http.statusCode,
+                    userInfo: ["body": text]
+                )))
+                return
+            }
+
+            completion(.success(()))
+        }.resume()
+    }
+
+    // MARK: - OpenOrCreate
+
     struct OpenResp: Decodable {
         let orderId: Int
     }
-    
+
+    static func openOrCreate(
+        miniAppId: Int,
+        tab: TabType,
+        completion: @escaping (Result<Int, Error>) -> Void
+    ) {
+        guard miniAppId > 0 else {
+            completion(.failure(NSError(domain: "TeamTabsAPI", code: -1)))
+            return
+        }
+
+        guard let url = URL(string: "\(base)/api/team-tabs/open") else {
+            completion(.failure(NSError(domain: "TeamTabsAPI", code: -2)))
+            return
+        }
+
+        let payload: [String: Any] = [
+            "miniAppId": miniAppId,
+            "tabKey": tab.rawValue
+        ]
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+
+        if let body = req.httpBody, let s = String(data: body, encoding: .utf8) {
+            print("🧩 TeamTabsAPI.openOrCreate payload:", s)
+        }
+
+        URLSession.shared.dataTask(with: req) { data, resp, err in
+            if let err = err {
+                completion(.failure(err))
+                return
+            }
+
+            guard let http = resp as? HTTPURLResponse else {
+                let text = data.flatMap { String(data: $0, encoding: .utf8) } ?? "<no body>"
+                print("❌ TeamTabsAPI.openOrCreate NO HTTP RESPONSE body:", text)
+                completion(.failure(NSError(domain: "TeamTabsAPI", code: -3, userInfo: ["body": text])))
+                return
+            }
+
+            guard (200...299).contains(http.statusCode), let data else {
+                let text = data.flatMap { String(data: $0, encoding: .utf8) } ?? "<no body>"
+                print("❌ TeamTabsAPI.openOrCreate HTTP \(http.statusCode) body:", text)
+                completion(.failure(NSError(domain: "TeamTabsAPI", code: http.statusCode, userInfo: ["body": text])))
+                return
+            }
+
+            do {
+                let decoded = try JSONDecoder().decode(OpenResp.self, from: data)
+                completion(.success(decoded.orderId))
+            } catch {
+                let text = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
+                print("❌ TeamTabsAPI.openOrCreate decode failed body:", text)
+                completion(.failure(error))
+            }
+        }.resume()
+    }
+
+    // MARK: - Fetch order metadata
+
     static func fetchOrderMetadata(
         orderId: Int,
         completion: @escaping (Result<OrderMetadataDTO, Error>) -> Void
     ) {
-        guard let url = URL(string: "https://minis.studio/api/orders/\(orderId)") else {
+        guard let url = URL(string: "\(base)/api/orders/\(orderId)") else {
             completion(.failure(NSError(domain: "TeamTabsAPI", code: -10)))
             return
         }
@@ -1772,14 +1943,14 @@ enum TeamTabsAPI {
             guard let http = resp as? HTTPURLResponse else {
                 let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? "<no body>"
                 print("❌ fetchOrderMetadata NO HTTP RESPONSE body:", body)
-                completion(.failure(NSError(domain: "TeamTabsAPI", code: -11)))
+                completion(.failure(NSError(domain: "TeamTabsAPI", code: -11, userInfo: ["body": body])))
                 return
             }
 
             guard (200...299).contains(http.statusCode), let data = data else {
                 let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? "<no body>"
                 print("❌ fetchOrderMetadata HTTP \(http.statusCode) body:", body)
-                completion(.failure(NSError(domain: "TeamTabsAPI", code: http.statusCode)))
+                completion(.failure(NSError(domain: "TeamTabsAPI", code: http.statusCode, userInfo: ["body": body])))
                 return
             }
 
@@ -1795,73 +1966,6 @@ enum TeamTabsAPI {
             }
         }.resume()
     }
-
-    // ✅ NEW: fetch order details so we can restore basket
-     
-    static func openOrCreate(
-        miniAppId: Int,
-        tab: TabType,
-        completion: @escaping (Result<Int, Error>) -> Void
-    ) {
-        let miniAppId = miniAppId
-
-        guard miniAppId > 0 else {
-            completion(.failure(NSError(domain: "TeamTabsAPI", code: -1)))
-            return
-        }
-
-        guard let url = URL(string: "https://minis.studio/api/team-tabs/open") else {
-            completion(.failure(NSError(domain: "TeamTabsAPI", code: -2)))
-            return
-        }
-
-        let payload: [String: Any] = [
-            "miniAppId": miniAppId,
-            "tabKey": tab.rawValue
-        ]
-
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
-
-        // ✅ Debug curl
-        if let body = req.httpBody, let s = String(data: body, encoding: .utf8) {
-            print("🧩 TeamTabsAPI.openOrCreate payload:", s)
-        }
-
-        URLSession.shared.dataTask(with: req) { data, resp, err in
-            if let err = err {
-                completion(.failure(err))
-                return
-            }
-
-            guard let http = resp as? HTTPURLResponse else {
-                let text = data.flatMap { String(data: $0, encoding: .utf8) } ?? "<no body>"
-                print("❌ TeamTabsAPI.openOrCreate NO HTTP RESPONSE body:", text)
-                completion(.failure(NSError(domain: "TeamTabsAPI", code: -3)))
-                return
-            }
-
-            guard (200...299).contains(http.statusCode), let data else {
-                let text = data.flatMap { String(data: $0, encoding: .utf8) } ?? "<no body>"
-                print("❌ TeamTabsAPI.openOrCreate HTTP \(http.statusCode) body:", text)
-                completion(.failure(NSError(domain: "TeamTabsAPI", code: -3)))
-                return
-            }
-
-            do {
-                let decoded = try JSONDecoder().decode(OpenResp.self, from: data)
-                completion(.success(decoded.orderId))
-            } catch {
-                let text = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
-                print("❌ TeamTabsAPI.openOrCreate decode failed body:", text)
-                completion(.failure(error))
-            }
-        }.resume()
-    }
-
-   
 }
 
 
@@ -2470,4 +2574,414 @@ struct PaymentDTO: Decodable {
     let cashAmount: Double?
 }
 
+
+import Foundation
+
+struct OutboxEnvelope: Codable, Identifiable {
+    enum State: String, Codable { case pending, sending }
+
+    let id: String                  // idempotencyKey
+    let createdAt: Date
+    var state: State
+    var attemptCount: Int
+    var lastAttemptAt: Date?
+
+    let endpoint: String
+    let body: Data
+    let headers: [String: String]
+}
+
+@MainActor
+final class OrderOutbox: ObservableObject {
+    static let shared = OrderOutbox()
+
+    private let fm = FileManager.default
+    private let dir: URL
+    private var isDraining = false
+
+    private init() {
+        let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        dir = base.appendingPathComponent("order_outbox", isDirectory: true)
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    }
+
+    private func fileURL(for id: String) -> URL {
+        dir.appendingPathComponent("\(id).json")
+    }
+
+    func enqueue(_ env: OutboxEnvelope) {
+        let url = fileURL(for: env.id)
+        if fm.fileExists(atPath: url.path) { return } // idempotent
+        if let data = try? JSONEncoder().encode(env) {
+            try? data.write(to: url, options: [.atomic])
+        }
+    }
+
+    func drainNow() {
+        guard !isDraining else { return }
+        isDraining = true
+
+        Task {
+            defer { isDraining = false }
+
+            let files = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+            let sorted = files.sorted { $0.lastPathComponent < $1.lastPathComponent }
+
+            for f in sorted {
+                guard let raw = try? Data(contentsOf: f),
+                      var env = try? JSONDecoder().decode(OutboxEnvelope.self, from: raw) else {
+                    try? fm.removeItem(at: f) // corrupt -> drop
+                    continue
+                }
+
+                // mark sending + persist
+                env.state = .sending
+                env.attemptCount += 1
+                env.lastAttemptAt = Date()
+                if let updated = try? JSONEncoder().encode(env) {
+                    try? updated.write(to: f, options: [.atomic])
+                }
+
+                let ok = await send(env)
+
+                if ok {
+                    try? fm.removeItem(at: f) // ACKed -> delete
+                } else {
+                    // revert to pending and stop (likely offline)
+                    env.state = .pending
+                    if let updated = try? JSONEncoder().encode(env) {
+                        try? updated.write(to: f, options: [.atomic])
+                    }
+                    break
+                }
+            }
+        }
+    }
+
+    private func send(_ env: OutboxEnvelope) async -> Bool {
+        guard let url = URL(string: env.endpoint) else { return false }
+
+        var req = URLRequest(url: url, timeoutInterval: 20)
+        req.httpMethod = "POST"
+        req.httpBody = env.body
+        for (k, v) in env.headers { req.setValue(v, forHTTPHeaderField: k) }
+
+        do {
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
+            guard (200...299).contains(code) else { return false }
+
+            // require orderId in response (ACK)
+            if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let oid = obj["orderId"] as? Int, oid > 0 {
+                return true
+            }
+            return false
+        } catch {
+            return false
+        }
+    }
+}
+
+import Foundation
+import SwiftUI
+
+@MainActor
+final class OutboxLog: ObservableObject {
+    static let shared = OutboxLog()
+
+    struct Row: Identifiable, Codable {
+        let id: String            // idempotencyKey
+        let createdAt: Date
+        var updatedAt: Date
+        var state: String         // queued/sending/acked/failed/replay
+        var orderId: Int?
+        var ticketNumber: Int?
+        var miniAppId: Int?
+        var message: String?
+    }
+
+    @Published private(set) var rows: [Row] = []
+
+    private let key = "outbox.log.v1"
+
+    private init() {
+        load()
+    }
+
+    private func load() {
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let decoded = try? JSONDecoder().decode([Row].self, from: data) else {
+            rows = []
+            return
+        }
+        rows = decoded
+    }
+
+    private func save() {
+        if let data = try? JSONEncoder().encode(rows) {
+            UserDefaults.standard.set(data, forKey: key)
+        }
+    }
+
+    private func upsert(_ row: Row) {
+        if let i = rows.firstIndex(where: { $0.id == row.id }) {
+            rows[i] = row
+        } else {
+            rows.insert(row, at: 0)
+        }
+        save()
+    }
+
+    func queued(id: String, miniAppId: Int, ticketNumber: Int?, msg: String? = nil) {
+        let now = Date()
+        upsert(Row(id: id, createdAt: now, updatedAt: now, state: "queued",
+                   orderId: nil, ticketNumber: ticketNumber, miniAppId: miniAppId, message: msg))
+    }
+
+    func sending(id: String, msg: String? = nil) {
+        let now = Date()
+        if var r = rows.first(where: { $0.id == id }) {
+            r.updatedAt = now
+            r.state = "sending"
+            r.message = msg
+            upsert(r)
+        }
+    }
+
+    func acked(id: String, orderId: Int, replay: Bool = false, msg: String? = nil) {
+        let now = Date()
+        if var r = rows.first(where: { $0.id == id }) {
+            r.updatedAt = now
+            r.state = replay ? "replay" : "acked"
+            r.orderId = orderId
+            r.message = msg
+            upsert(r)
+        } else {
+            upsert(Row(id: id, createdAt: now, updatedAt: now,
+                       state: replay ? "replay" : "acked",
+                       orderId: orderId, ticketNumber: nil, miniAppId: nil, message: msg))
+        }
+    }
+
+    func failed(id: String, msg: String) {
+        let now = Date()
+        if var r = rows.first(where: { $0.id == id }) {
+            r.updatedAt = now
+            r.state = "failed"
+            r.message = msg
+            upsert(r)
+        }
+    }
+
+    func clear() {
+        rows.removeAll()
+        save()
+    }
+}
+
+struct OutboxLogView: View {
+    @StateObject private var log = OutboxLog.shared
+    private let df: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f
+    }()
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(log.rows) { r in
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text(r.state.uppercased())
+                                .font(.system(size: 12, weight: .bold))
+                            Spacer()
+                            Text(df.string(from: r.updatedAt))
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                        }
+
+                        if let oid = r.orderId {
+                            Text("orderId: \(oid)")
+                                .font(.system(size: 13, weight: .semibold))
+                        }
+
+                        let mini = r.miniAppId.map { "miniAppId: \($0)" } ?? "miniAppId: —"
+                        let ticket = r.ticketNumber.map { "ticket: \($0)" } ?? "ticket: —"
+                        Text("\(mini)   \(ticket)")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+
+                        Text("id: \(r.id)")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+
+                        if let m = r.message, !m.isEmpty {
+                            Text(m)
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+            .navigationTitle("Outbox Log")
+            .toolbar {
+                Button("Clear") { log.clear() }
+            }
+        }
+    }
+}
+
+import Network
+import Foundation
+
+@MainActor
+final class NetworkMonitor: ObservableObject {
+    static let shared = NetworkMonitor()
+
+    @Published private(set) var isOnline: Bool = true
+
+    private let monitor = NWPathMonitor()
+    private let queue = DispatchQueue(label: "network.monitor")
+
+    private init() {
+        monitor.pathUpdateHandler = { path in
+            let ok = (path.status == .satisfied)
+            Task { @MainActor in
+                let wasOffline = (self.isOnline == false)
+                self.isOnline = ok
+
+                // ✅ When internet comes back → retry outbox
+                if ok && wasOffline {
+                    OrderOutbox.shared.drainNow()
+                }
+            }
+        }
+        monitor.start(queue: queue)
+    }
+}
+
+extension Notification.Name {
+    static let resetModifiers = Notification.Name("resetModifiers")
+}
+
+
+struct MyItem: Codable, Identifiable, Equatable {
+    let id: Int
+    let name: String
+    let imageURL: String?
+    let lastPrice: Double
+    let lastSubtitle: String?     // ✅ NEW
+    let lastUsedAt: Date
+}
+
+enum MyItemsStore {
+
+    // MARK: - Config
+    private static let key = "myItems.v1"
+    private static let maxItems = 8
+
+    private static var defaults: UserDefaults {
+        MinisShared.sharedDefaults
+    }
+
+    // MARK: - Public API
+
+    /// Returns items ordered by most-recent first
+    static func load() -> [MyItem] {
+        guard let data = defaults.data(forKey: key),
+              let items = try? JSONDecoder().decode([MyItem].self, from: data)
+        else { return [] }
+
+        return items.sorted { $0.lastUsedAt > $1.lastUsedAt }
+    }
+
+    /// Touch (add or promote) an item after a successful order
+    static func touch(
+        productId: Int,
+        name: String,
+        imageURL: String?,
+        price: Double,
+        subtitle: String?            // ✅ NEW
+    ) {
+        var items = load()
+        let now = Date()
+
+        if let index = items.firstIndex(where: { $0.id == productId }) {
+            let existing = items[index]
+            items.remove(at: index)
+            items.insert(
+                MyItem(
+                    id: existing.id,
+                    name: existing.name,
+                    imageURL: existing.imageURL,
+                    lastPrice: price,
+                    lastSubtitle: subtitle ?? existing.lastSubtitle,  // ✅ keep if nil
+                    lastUsedAt: now
+                ),
+                at: 0
+            )
+        } else {
+            items.insert(
+                MyItem(
+                    id: productId,
+                    name: name,
+                    imageURL: imageURL,
+                    lastPrice: price,
+                    lastSubtitle: subtitle,
+                    lastUsedAt: now
+                ),
+                at: 0
+            )
+        }
+
+        if items.count > maxItems { items = Array(items.prefix(maxItems)) }
+        save(items)
+    }
+
+    static func remove(productId: Int) {
+        var items = load()
+        items.removeAll { $0.id == productId }
+        save(items) // ✅ will post
+    }
+
+    static func clear() {
+        defaults.removeObject(forKey: key)
+        defaults.synchronize()
+        NotificationCenter.default.post(name: .myItemsChanged, object: nil)   // ✅
+    }
+
+    // MARK: - Private
+
+    private static func save(_ items: [MyItem]) {
+        guard let data = try? JSONEncoder().encode(items) else { return }
+        defaults.set(data, forKey: key)
+        defaults.synchronize()
+        NotificationCenter.default.post(name: .myItemsChanged, object: nil)   // ✅
+    }
+
+}
+enum ServiceIntent: String {
+    case sit
+    case ta
+}
+
+private func diningModeFromIntent(_ raw: String) -> DiningMode {
+    (ServiceIntent(rawValue: raw) == .sit) ? .dineIn : .takeAway
+}
+
+ func intentFromDiningMode(_ mode: DiningMode) -> ServiceIntent {
+    (mode == .dineIn) ? .sit : .ta
+}
+
+ func labelForIntent(_ intent: ServiceIntent, isRtl: Bool) -> String {
+    if isRtl {
+        return intent == .sit ? "לשבת" : "לקחת"
+    } else {
+        return intent == .sit ? "Dine-in" : "Takeaway"
+    }
+}
 

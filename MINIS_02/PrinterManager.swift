@@ -1078,9 +1078,27 @@ final class PrinterManager {
         job += EscPos.feed(1)
         job += EscPos.align(0)
 
+        func stripModsForInvoice(_ s: String) -> String {
+            var x = s
+
+            // If modifiers appended on next line
+            if let r = x.range(of: "\n") { x = String(x[..<r.lowerBound]) }
+
+            // If modifiers appended with separators
+            if let r = x.range(of: "·") { x = String(x[..<r.lowerBound]) }
+            if let r = x.range(of: ",") { x = String(x[..<r.lowerBound]) }
+
+            // If you have patterns like "Milk: Oat" and want only left side:
+            if let r = x.range(of: ":") { x = String(x[..<r.lowerBound]) }
+
+            return x.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
         for item in items {
-            let label = "\(item.quantity)x \(item.name)"
+            let cleanName = stripModsForInvoice(item.name)
+            let label = "\(item.quantity)x \(cleanName)"
             let priceText = money(item.lineTotal)
+
             job += hebrewMixedLineData(
                 label: label,
                 price: priceText,
@@ -1088,7 +1106,6 @@ final class PrinterManager {
                 leftPadding: 1
             )
         }
-
         // ===== SEPARATOR =====
         job += EscPos.feed(1)
         job += EscPos.align(0)
@@ -1107,7 +1124,7 @@ final class PrinterManager {
         )
 
         job += hebrewMixedLineData(
-            label: "מע\"מ \(Int(vatRate * 100))%",
+            label: "מע\"מ 81%",
             price: money(vatAmount),
             totalWidth: lineWidth,
             leftPadding: 1
@@ -2041,15 +2058,16 @@ extension PrinterManager {
     ) {
         Swift.print("=== PRINT REPORT \(type == .x ? "X" : "Z") ===")
         // ⚠️ Printing adjustment: reduce 1 NIS from tips
-        let printTipAdjustment: Double = 1.0
+        let printTipAdjustment: Double = 0.0
 
+      
+        // ✅ THIS is what you want to print as "cash" (cash + tips)
         let printedTips = max(report.tipBaseTotal - printTipAdjustment, 0)
+        let printedCashWithTip = max(report.cashAmount + printedTips, 0)
 
-        // Cash already includes tips → reduce cash as well
-        let printedCash = max(report.cashAmount - printTipAdjustment, 0)
-
+        // ✅ Totals for printing (cash already includes tip now)
+        let printedCollectionsTotal = printedCashWithTip + report.cardAmount
         // Recalculate collections total for printing
-        let printedCollectionsTotal = printedCash + report.cardAmount
         // VAT rate comes from your live model mapping (XReport vatRate / ZReport vatRate)
         // If you haven't added it yet, default to 18%.
         let vatRate = 0.18
@@ -2182,11 +2200,12 @@ extension PrinterManager {
         job += makeDebugRow(["סכום","תשלום","סוג","כמות"], align: ["C","C","C","C"])
         job += makeDebugSeparator()
 
-        job += makeDebugRow([fmt2(report.cashAmount), "מזומן", "-", "\(report.cashCount)"], align: ["R","C","C","R"])
+        job += makeDebugRow([fmt2(printedCashWithTip), "מזומן", "-", "\(report.cashCount)"], align: ["R","C","C","R"])
+
         job += makeDebugRow([fmt2(report.cardAmount), "אשראי", "-", "\(report.cardCount)"], align: ["R","C","C","R"])
 
         job += makeDebugSeparator()
-        job += makeDebugRow([fmt2(report.collectionsTotalAmount), "סה\"כ", "", "\(report.collectionsTotalCount)"], align: ["R","C","C","R"])
+        job += makeDebugRow([fmt2(printedCollectionsTotal), "סה\"כ", "", "\(report.collectionsTotalCount)"], align: ["R","C","C","R"])
         job += makeDebugSeparator()
 
         // ---------- CASH REPORT ----------
@@ -2195,15 +2214,17 @@ extension PrinterManager {
         job += EscPos.feed(1)
         job += makeDebugSeparator(colWidths: cashReportWidths)
         job += makeDebugRow(["סכום", "סוג מגירה", "סוג פעולה"], align: ["C","C","C"], colWidths: cashReportWidths)
+        job += makeDebugRow(["סכום", "סוג מגירה", "סוג פעולה"], align: ["C","C","C"], colWidths: cashReportWidths)
         job += makeDebugSeparator(colWidths: cashReportWidths)
 
-        job += makeDebugRow([fmt2(report.cashAmount), "", "הד. סגורות"], align: ["R","C","R"], colWidths: cashReportWidths)
+        job += makeDebugRow([fmt2(printedCashWithTip), "", "הד. סגורות"], align: ["R","C","R"], colWidths: cashReportWidths)
+
         job += makeDebugRow([fmt1(report.openDrawersAmount), "", "הד. פתוחות"], align: ["R","C","R"], colWidths: cashReportWidths)
         job += makeDebugRow([fmt1(report.depositWithdrawAmount), "", "הפקדה/משיכה"], align: ["R","C","R"], colWidths: cashReportWidths)
         job += makeDebugSeparator(colWidths: cashReportWidths)
 
-        job += makeDebugRow([fmt2(report.cashAmount), "", "סה\"כ במגירה"], align: ["R","C","R"], colWidths: cashReportWidths)
-        job += makeDebugRow([fmt2(report.cashAmount), "מגירה ראשית", ""], align: ["R","R","R"], colWidths: cashReportWidths)
+        job += makeDebugRow([fmt2(printedCashWithTip), "", "סה\"כ במגירה"], align: ["R","C","R"], colWidths: cashReportWidths)
+        job += makeDebugRow([fmt2(printedCashWithTip), "מגירה ראשית", ""], align: ["R","R","R"], colWidths: cashReportWidths)
         job += makeDebugRow([fmt1(report.hostStationDrawerAmount), "עמדת מארחת", ""], align: ["R","R","R"], colWidths: cashReportWidths)
         job += makeDebugSeparator(colWidths: cashReportWidths)
 

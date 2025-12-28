@@ -1,14 +1,30 @@
 import SwiftUI
+import UserNotifications
+import UIKit
 
 extension Notification.Name {
     static let orderReady = Notification.Name("OrderReadyNotification")
+
+    // Optional: react immediately in SwiftUI
+    static let pendingUniversalLink = Notification.Name("PendingUniversalLink")
+    static let studentClaimReceived = Notification.Name("StudentClaimReceived")
+
+
+ 
+   
 }
 
 class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
 
     private let lastReadyOrderKey    = "lastReadyOrderId"
     private let isLastOrderReadyKey  = "isLastOrderReady"
-    private let apnsTokenKey         = "apnsDeviceToken"   // 👈 stored for printing & debugging
+    private let apnsTokenKey         = "apnsDeviceToken"
+
+    // ✅ New: stash universal links for SwiftUI to drain
+    private let pendingUniversalLinkKey = "pendingUniversalLink"
+
+    // ✅ New: student payload stored for Full App (and App Clip if shared)
+    private let pendingStudentDiscountKey = "pendingStudentDiscount"
 
     // MARK: - App launch
     func application(
@@ -20,12 +36,6 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 
         let center = UNUserNotificationCenter.current()
         center.delegate = self
-
-        // 🔇 Removed the automatic prompt:
-        // center.requestAuthorization(options: [.alert, .badge, .sound]) { granted, error in
-        //     print("🔐 Notification auth granted:", granted, "error:", String(describing: error))
-        // }
-
         application.registerForRemoteNotifications()
 
         // If app opened due to remote notification
@@ -33,7 +43,6 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
             print("🚀 Launched from remote notification:", remote)
             storeOrderIdIfPresent(remote)
             UserDefaults.standard.set(true, forKey: isLastOrderReadyKey)
-
             NotificationCenter.default.post(name: .orderReady, object: nil, userInfo: remote)
         } else {
             print("ℹ️ No remote notification in launchOptions")
@@ -43,7 +52,106 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
             print("🔎 Saved APNs token (from last launch):", savedToken)
         }
 
+        // ✅ Cold-launch support: if we already saved a universal link (from prior run)
+        if let s = UserDefaults.standard.string(forKey: pendingUniversalLinkKey),
+           let url = URL(string: s) {
+            handleUniversalLink(url)
+        }
+
         return true
+    }
+
+    // MARK: - Universal Links / Handoff (Advanced Experience, Notes links, etc.)
+    func application(
+        _ application: UIApplication,
+        continue userActivity: NSUserActivity,
+        restorationHandler: @escaping ([UIUserActivityRestoring]?) -> Void
+    ) -> Bool {
+
+        if userActivity.activityType == NSUserActivityTypeBrowsingWeb,
+           let url = userActivity.webpageURL {
+
+            print("🧩 continueUserActivity (Universal Link):", url.absoluteString)
+
+            // Store for SwiftUI to consume (cold launch safe)
+            UserDefaults.standard.set(url.absoluteString, forKey: pendingUniversalLinkKey)
+            UserDefaults.standard.synchronize()
+
+            // Optional immediate signal (if your SwiftUI listens)
+            NotificationCenter.default.post(
+                name: .pendingUniversalLink,
+                object: nil,
+                userInfo: ["url": url.absoluteString]
+            )
+
+            // ✅ ALSO: parse student claim immediately
+            handleUniversalLink(url)
+
+            return true
+        }
+
+        print("ℹ️ continueUserActivity ignored:", userActivity.activityType)
+        return false
+    }
+
+    // MARK: - Universal link handler
+    // MARK: - Universal link handler
+    private func handleUniversalLink(_ url: URL) {
+
+        print("🔗 handleUniversalLink CALLED")
+        print("🔗 url =", url.absoluteString)
+
+        // Log path + query
+        print("🔗 path =", url.path)
+        print("🔗 query =", url.query ?? "<nil>")
+
+        if let claim = StudentClaim.from(url: url) {
+
+            print("🎓 STUDENT CLAIM PARSED ✅")
+            print("🎓 miniAppId =", claim.miniAppId)
+            print("🎓 campaignId =", claim.campaignId)
+            print("🎓 discountPercent =", claim.discountPercent)
+            print("🎓 durationMonths =", claim.durationMonths)
+
+            persistStudentDiscount(claim)
+
+            print("📣 Posting Notification.studentClaimReceived")
+
+            NotificationCenter.default.post(
+                name: .studentClaimReceived,
+                object: nil,
+                userInfo: [
+                    "miniAppId": claim.miniAppId,
+                    "campaignId": claim.campaignId,
+                    "discountPercent": claim.discountPercent,
+                    "durationMonths": claim.durationMonths
+                ]
+            )
+
+        } else {
+            print("❌ NOT a student claim URL")
+        }
+    }
+
+    // MARK: - Persist student discount payload for Full App
+    private func persistStudentDiscount(_ claim: StudentClaim) {
+        let expiresAt = Calendar.current.date(
+            byAdding: .month,
+            value: claim.durationMonths,
+            to: Date()
+        ) ?? Date().addingTimeInterval(60 * 60 * 24 * 30 * Double(claim.durationMonths))
+
+        let payload: [String: Any] = [
+            "miniAppId": claim.miniAppId,
+            "campaignId": claim.campaignId,
+            "discountPercent": claim.discountPercent,
+            "expiresAt": expiresAt.timeIntervalSince1970
+        ]
+
+        UserDefaults.standard.set(payload, forKey: pendingStudentDiscountKey)
+        UserDefaults.standard.synchronize()
+
+        print("✅ Saved pendingStudentDiscount:", payload)
     }
 
     // MARK: - APNs token registration
@@ -51,24 +159,19 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         _ application: UIApplication,
         didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
     ) {
-        // Convert binary token → 64 char hex
         let tokenString = deviceToken.map { String(format: "%02x", $0) }.joined()
         let name = UIDevice.current.name
 
-           registerAdminDevice(
-               token: tokenString,
-               displayName: name,
-               isPrinterManager: false
-           )
+        registerAdminDevice(
+            token: tokenString,
+            displayName: name,
+            isPrinterManager: false
+        )
 
         print("📬 APNs token (hex): \(tokenString)")
 
-        // Persist
         UserDefaults.standard.set(tokenString, forKey: apnsTokenKey)
         UserDefaults.standard.synchronize()
-
-        // Optional: send token to server
-        // sendTokenToServer(tokenString)
     }
 
     func application(
@@ -121,26 +224,20 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
     ) {
         print("📡 [fetch] Silent/background push:", userInfo)
 
-        // Store last ready order (your existing logic)
         storeOrderIdIfPresent(userInfo)
-
-        // Mark the last order as ready (for your UI)
         UserDefaults.standard.set(true, forKey: isLastOrderReadyKey)
         print("✅ isLastOrderReady = true (from silent/background push)")
 
-        // Notify any listeners in the app
         NotificationCenter.default.post(name: .orderReady, object: nil, userInfo: userInfo)
 
-        // 🔥 Trigger auto-printer fetch+print
-#if !APPCLIP    // 👈 Skip printing logic inside App Clip
-    Task {
-        await OrdersAutoPrinter.shared.handleSilentPush(userInfo: userInfo)
-        completionHandler(.newData)
-    }
-    #else
-    completionHandler(.noData)
-    #endif
-        
+#if !APPCLIP
+        Task {
+            await OrdersAutoPrinter.shared.handleSilentPush(userInfo: userInfo)
+            completionHandler(.newData)
+        }
+#else
+        completionHandler(.noData)
+#endif
     }
 
     // MARK: - Store Order ID Helper
@@ -157,6 +254,8 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         UserDefaults.standard.set(orderId, forKey: lastReadyOrderKey)
     }
 }
+
+
 
 // MARK: - RTL env
 struct IsRtlKey: EnvironmentKey {
@@ -195,10 +294,87 @@ func registerAdminDevice(token: String, displayName: String, isPrinterManager: B
 
     Task {
         do {
-            let (data, resp) = try await URLSession.shared.data(for: req)
+            let (data, _) = try await URLSession.shared.data(for: req)
             print("📡 registerAdminDevice:", String(data: data, encoding: .utf8) ?? "")
         } catch {
             print("❌ registerAdminDevice error:", error.localizedDescription)
         }
     }
+}
+struct ActiveDiscount: Codable, Equatable {
+    let campaignId: String
+    let percent: Int
+    let expiresAt: Date
+}
+
+enum StudentDiscountHandoff {
+    static let pendingClaimKey = "pendingStudentClaim.v1"
+
+    static func pullPendingClaim() -> StudentClaim? {
+        let d = MinisShared.sharedDefaults
+        guard let data = d.data(forKey: pendingClaimKey),
+              let claim = try? JSONDecoder().decode(StudentClaim.self, from: data)
+        else { return nil }
+
+        // ✅ one-time
+        d.removeObject(forKey: pendingClaimKey)
+        d.synchronize()
+        return claim
+    }
+}
+
+enum MinisShared {
+    static let groupId = "group.minis"
+    static var sharedDefaults: UserDefaults { UserDefaults(suiteName: groupId)! }
+
+    // Keys
+    static let activeDiscountKey = "activeDiscount.v1"
+
+    static func loadActiveDiscount() -> ActiveDiscount? {
+        let d = sharedDefaults
+        guard let data = d.data(forKey: activeDiscountKey),
+              let disc = try? JSONDecoder().decode(ActiveDiscount.self, from: data)
+        else { return nil }
+
+        if disc.expiresAt < Date() {
+            d.removeObject(forKey: activeDiscountKey)
+            d.synchronize()
+            return nil
+        }
+        return disc
+    }
+
+    static func saveActiveDiscount(_ disc: ActiveDiscount?) {
+        let d = sharedDefaults
+        if let disc, let data = try? JSONEncoder().encode(disc) {
+            d.set(data, forKey: activeDiscountKey)
+        } else {
+            d.removeObject(forKey: activeDiscountKey)
+        }
+        d.synchronize()
+    }
+}
+
+extension Notification.Name {
+    static let myItemsChanged = Notification.Name("myItemsChanged")
+}
+
+func getOrCreateAnonId(appGroupId: String) -> String {
+    if let suite = UserDefaults(suiteName: appGroupId),
+       let existing = suite.string(forKey: "anonUUID"),
+       !existing.isEmpty {
+        return existing
+    }
+
+    if let existing = UserDefaults.standard.string(forKey: "anonUUID"),
+       !existing.isEmpty {
+        return existing
+    }
+
+    let id = UUID().uuidString
+
+    UserDefaults.standard.set(id, forKey: "anonUUID")
+    UserDefaults(suiteName: appGroupId)?.set(id, forKey: "anonUUID")
+
+    return id
 }

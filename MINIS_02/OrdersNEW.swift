@@ -434,39 +434,45 @@ struct AdminOrdersView: View {
 
                         LazyVStack(spacing: 14) {
                             ForEach(visibleOrders) { order in
-                                Button {
-                                    selectedOrder = order
-                                } label: {
-                                    AdminOrderRow(
-                                        item: order,
-                                        onPrint: { printOrder(order) },
-                                        onPrintInvoice: { printInvoice(for: order) },
-                                        onOpenInCashPoint: (order.isUnpaid ? { onSelectUnpaid?(order) } : nil),
-                                        onCloseTeamTable: order.customerName.hasPrefix("שולחן") ? {
-                                            // ✅ close team tab + refresh list
-                                            TeamTabsAPI.close(orderId: order.id) { res in
-                                                DispatchQueue.main.async {
-                                                    switch res {
-                                                    case .success:
-                                                        // optimistic remove (optional)
-                                                        orders.removeAll { $0.id == order.id }
-                                                        // or just refresh from server:
-                                                        Task { await loadOrders(showSpinner: false) }
-                                                        Haptics.success()
-                                                    case .failure(let err):
-                                                        print("❌ close team tab failed:", err)
-                                                        Haptics.error()
-                                                    }
+
+                                let isEod = (mode == .endOfDay)
+                                let isTeam = isTeamTableOrder(order)
+
+                                AdminOrderRow(
+                                    item: order,
+
+                                    // ✅ In EOD, hide print/invoice buttons
+                                    onPrint: isEod ? {} : { printOrder(order) },
+                                    onPrintInvoice: isEod ? {} : { printInvoice(for: order) },
+
+                                    // ✅ In EOD, hide "continue order"
+                                    onOpenInCashPoint: (!isEod && order.isUnpaid) ? { onSelectUnpaid?(order) } : nil,
+
+                                    // ✅ In EOD:
+                                    // - in teamTablesOnly step: allow "סגור שולחן"
+                                    // - in openOrdersOnly step: no team button
+                                    onCloseTeamTable: (isEod && isTeam) ? {
+                                        closeTeamTableOptimistic(orderId: order.id)
+                                    } : (!isEod && isTeam ? {
+                                        TeamTabsAPI.close(orderId: order.id) { res in
+                                            DispatchQueue.main.async {
+                                                switch res {
+                                                case .success:
+                                                    orders.removeAll { $0.id == order.id }
+                                                    Task { await loadOrders(showSpinner: false) }
+                                                    Haptics.success()
+                                                case .failure(let err):
+                                                    print("❌ close team tab failed:", err)
+                                                    Haptics.error()
                                                 }
                                             }
-                                        } : nil
-                                    )
-                                    .contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain)
+                                        }
+                                    } : nil)
+                                )
+                                .contentShape(Rectangle())
+                                .onTapGesture { selectedOrder = order }
                                 .padding(.horizontal)
                             }
-
                             if list.isEmpty {
                                 Text(searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                                      ? (showOpenOnly ? "אין הזמנות פתוחות" : "אין הזמנות")
@@ -490,25 +496,27 @@ struct AdminOrdersView: View {
                     }
                     .buttonStyle(.plain)
                 }
-
+                let isEod = (mode == .endOfDay)
                 // Center pill
                 ToolbarItem(placement: .principal) {
-                    Button {
-                        withAnimation(.spring(response: 0.25, dampingFraction: 0.9)) {
-                            showOpenOnly.toggle()
+                    if !isEod{
+                        Button {
+                            withAnimation(.spring(response: 0.25, dampingFraction: 0.9)) {
+                                showOpenOnly.toggle()
+                            }
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: showOpenOnly ? "checkmark.circle.fill" : "circle")
+                                Text("פתוחות")
+                            }
+                            .font(.system(size: 14, weight: .semibold))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 7)
+                            .background(Color(.systemGray6))
+                            .clipShape(Capsule())
                         }
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: showOpenOnly ? "checkmark.circle.fill" : "circle")
-                            Text("פתוחות")
-                        }
-                        .font(.system(size: 14, weight: .semibold))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 7)
-                        .background(Color(.systemGray6))
-                        .clipShape(Capsule())
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
 
                 // Search capsule
@@ -1484,9 +1492,13 @@ struct AdminOrderRow: View {
             HStack(spacing: 8) {
                 Spacer()
 
+                // ✅ If we're in EOD mode, we pass onOpenInCashPoint == nil.
+                // Use that as a signal to hide ALL action buttons.
+                let isEodRow = (onOpenInCashPoint == nil) && (onCloseTeamTable == nil)
+
                 if isTeamTable, onCloseTeamTable != nil {
                     closeTeamButton
-                } else {
+                } else if !isEodRow {
 
                     if let onOpenInCashPoint {
                         Button {
@@ -1611,15 +1623,8 @@ struct OrdersHostView: View {
             let isLandscape = proxy.size.width > proxy.size.height
 
             Group {
-                if isPad && isLandscape {
-                    DigitalBonesView(onRefundToCashPoint: { bone in
-                        onRefundFromBone?(bone)
-                    })
+                AdminOrdersView(mode: mode, onSelectUnpaid: onSelectUnpaid)   // ✅ FIX
                     .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
-                } else {
-                    AdminOrdersView(mode: mode, onSelectUnpaid: onSelectUnpaid)   // ✅ FIX
-                        .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
-                }
             }
         }
     }
@@ -1730,60 +1735,111 @@ enum OrdersResolveAPI {
     }
 }
 
-enum EODFilter {
-    case all
-    case teamTablesOnly
-    case openOrdersOnly
+struct TipsExpected: Equatable {
+    var cash: Double
+    var card: Double
+    var other: Double
+
+    var total: Double { cash + card + other }
 }
+
+struct TipsDraft: Equatable {
+    var cash: String = ""
+    var card: String = ""
+    var other: String = ""
+
+    func parsed(_ s: String) -> Double {
+        let t = s
+            .replacingOccurrences(of: "₪", with: "")
+            .replacingOccurrences(of: ",", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return Double(t) ?? 0
+    }
+
+    var cashValue: Double  { parsed(cash) }
+    var cardValue: Double  { parsed(card) }
+    var otherValue: Double { parsed(other) }
+
+    var total: Double { cashValue + cardValue + otherValue }
+}
+
+
+
 
 import SwiftUI
 
-
 struct EODWizardView: View {
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.layoutDirection) private var layoutDir
-
     let miniAppId: Int
 
     enum Step: Int, CaseIterable {
-        case teamTables = 0
-        case openOrders = 1
-        case zReport    = 2
+        case openOrders = 0
+        case teamTables = 1
+        case tips       = 2
+        case preview    = 3
 
         var title: String {
             switch self {
-            case .teamTables: return "1/3 שולחנות צוות"
-            case .openOrders: return "2/3 הזמנות פתוחות"
-            case .zReport:    return "3/3 דו״ח Z"
+            case .openOrders: return "1/4 הזמנות פתוחות"
+            case .teamTables: return "2/4 שולחנות צוות"
+            case .tips:       return "3/4 מזומן + טיפים"
+            case .preview:    return "4/4 סיכום"
             }
         }
     }
 
-    @State private var step: Step = .teamTables
+    @State private var step: Step = .openOrders
 
-    // ✅ placeholders for “remaining items” that user must clear
-    @State private var remainingTeamTables: Int = 2
-    @State private var remainingOpenOrders: Int = 3
+    // Remaining “must resolve” counters from AdminOrdersView
+    @State private var remainingOpenOrders: Int = 0
+    @State private var remainingTeamTables: Int = 0
 
-    private var isRtl: Bool { layoutDir == .rightToLeft }
+    // ✅ Tips stage:
+    // system cash already includes tip → you count drawer cash → enter “עדכון מזומן” + “עדכון טיפים”
+    @State private var cashSystemInclTip: Double? = nil
+    @State private var cashCountedText: String = ""
+    @State private var cashAdjText: String = ""
+    @State private var tipsAdjText: String = ""
+
+    @State private var tipsLoading = false
+    @State private var tipsError: String? = nil
+    @State private var didSubmitAdjustment = false
+
+    // ✅ UI: show “פער” + “עדכון פער” only after counted cash was entered
+    @State private var showAfterCounted: Bool = false
+
+    // ✅ Z report flow (Generate -> Print)
+    private enum ZState { case idle, generating, readyToPrint }
+    @State private var zState: ZState = .idle
+    @State private var zResp: ZReportGenerateAPI.Resp? = nil
+    @State private var zError: String? = nil
 
     private var canGoNext: Bool {
         switch step {
-        case .teamTables: return remainingTeamTables == 0
         case .openOrders: return remainingOpenOrders == 0
-        case .zReport:    return false
+        case .teamTables: return remainingTeamTables == 0
+        case .tips:       return canProceedFromTips
+        case .preview:    return false
         }
     }
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 14) {
-
                 header
 
-                // ✅ content
                 Group {
                     switch step {
+                    case .openOrders:
+                        AdminOrdersView(
+                            mode: .endOfDay,
+                            eodFilter: .openOrdersOnly,
+                            onSelectUnpaid: nil,
+                            onRemainingChanged: { remainingOpenOrders = $0 },
+                            onAllResolved: { remainingOpenOrders = 0 }
+                        )
+                        .environment(\.layoutDirection, .rightToLeft)
+
                     case .teamTables:
                         AdminOrdersView(
                             mode: .endOfDay,
@@ -1793,24 +1849,17 @@ struct EODWizardView: View {
                             onAllResolved: { remainingTeamTables = 0 }
                         )
                         .environment(\.layoutDirection, .rightToLeft)
-                        
 
-                    case .openOrders:
-                        placeholderCard(
-                            title: "בטל/סגור את כל ההזמנות הפתוחות",
-                            subtitle: "נשארו: \(remainingOpenOrders)",
-                            primary: ("סמן הזמנה כנסגרה", { if remainingOpenOrders > 0 { remainingOpenOrders -= 1 } }),
-                            secondary: ("איפוס (דמו)", { remainingOpenOrders = 3 })
-                        )
+                    case .tips:
+                        tipsScreen
 
-                    case .zReport:
-                        placeholderZCard
+                    case .preview:
+                        previewScreen
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                // ✅ nav buttons (hidden in final step)
-                if step != .zReport {
+                if step != .preview {
                     navBar
                 }
             }
@@ -1818,15 +1867,25 @@ struct EODWizardView: View {
             .padding(.bottom, 14)
             .background(Color(UIColor.systemGroupedBackground))
             .navigationBarTitleDisplayMode(.inline)
-            
+            .task { await loadCashExpectedIfNeeded() }
         }
-        .environment(\.layoutDirection, .rightToLeft) // ✅ force RTL if you want
+        .environment(\.layoutDirection, .rightToLeft)
+        .environment(\.locale, Locale(identifier: "he_IL"))
     }
 
-    // MARK: - Header
+    // MARK: Header
+
     private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(spacing: 8) {
             HStack {
+                Button(action: { dismiss() }) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 14, weight: .bold))
+                        .padding(10)
+                        .background(Color(.systemGray5))
+                        .clipShape(Circle())
+                }
+                Spacer()
                 Text("סוף יום")
                     .font(.system(size: 22, weight: .bold))
                 Spacer()
@@ -1835,39 +1894,53 @@ struct EODWizardView: View {
                     .foregroundColor(.secondary)
             }
 
-           
+            HStack(spacing: 8) {
+                stepPill("פתוחות", ok: remainingOpenOrders == 0, value: remainingOpenOrders)
+                stepPill("צוות",   ok: remainingTeamTables == 0, value: remainingTeamTables)
+                stepPill("מזומן/טיפ", ok: canProceedFromTips, value: nil)
+            }
         }
         .padding(.top, 10)
     }
 
-    // MARK: - Nav bar
+    private func stepPill(_ title: String, ok: Bool, value: Int?) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: ok ? "checkmark.circle.fill" : "circle")
+            Text(value == nil ? title : "\(title): \(value!)")
+        }
+        .font(.system(size: 13, weight: .semibold))
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(Color(.systemGray6))
+        .clipShape(Capsule())
+        .foregroundColor(.primary)
+    }
+
+    // MARK: Nav
+
     private var navBar: some View {
         HStack(spacing: 12) {
 
-            Button {
-                goBack()
-            } label: {
+            Button { goBack() } label: {
                 Text("חזרה")
                     .font(.system(size: 17, weight: .semibold))
                     .foregroundColor(.primary)
                     .frame(maxWidth: .infinity)
                     .frame(height: 52)
                     .background(Color(.systemGray5))
-                    .clipShape(RoundedRectangle(cornerRadius: 16))
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             }
-            .disabled(step == .teamTables)
-            .opacity(step == .teamTables ? 0.4 : 1)
+            .disabled(step == .openOrders)
+            .opacity(step == .openOrders ? 0.4 : 1)
 
-            Button {
-                goNext()
-            } label: {
+            Button { goNext() } label: {
                 Text("הבא")
                     .font(.system(size: 17, weight: .bold))
                     .foregroundColor(.white)
                     .frame(maxWidth: .infinity)
                     .frame(height: 52)
                     .background(canGoNext ? Color.black : Color.gray.opacity(0.35))
-                    .clipShape(RoundedRectangle(cornerRadius: 16))
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             }
             .disabled(!canGoNext)
         }
@@ -1880,94 +1953,659 @@ struct EODWizardView: View {
 
     private func goNext() {
         guard let next = Step(rawValue: step.rawValue + 1) else { return }
+
+        // ✅ When leaving tips -> submit “עדכון” order to DB, then continue
+        if step == .tips {
+            Task {
+                await submitEodAdjustmentOrderIfNeeded()
+                await MainActor.run { step = next }
+            }
+            return
+        }
+
         step = next
+
+        if next == .tips {
+            Task { await loadCashExpectedIfNeeded() }
+        }
     }
 
-    // MARK: - Placeholder cards
-    private func placeholderCard(
-        title: String,
-        subtitle: String,
-        primary: (String, () -> Void),
-        secondary: (String, () -> Void)
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
+    // MARK: - Tips logic
 
+    private func parseNumber(_ s: String) -> Double {
+        let t = s
+            .replacingOccurrences(of: "₪", with: "")
+            .replacingOccurrences(of: ",", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return Double(t) ?? 0
+    }
+
+    private var countedCash: Double { parseNumber(cashCountedText) }
+    private var cashUpdate: Double  { parseNumber(cashAdjText) }
+    private var tipsUpdate: Double  { parseNumber(tipsAdjText) }
+
+    private var gap: Double {
+        guard let sys = cashSystemInclTip else { return 0 }
+        return countedCash - sys
+    }
+
+    private var totalUpdate: Double { cashUpdate + tipsUpdate }
+
+    private var gapIsZero: Bool { abs(gap) < 0.01 }
+    private var updateMatchesGap: Bool { abs(totalUpdate - gap) < 0.01 }
+
+    private var hasEnteredCountedCash: Bool {
+        let trimmed = cashCountedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !trimmed.isEmpty
+    }
+
+    private var canProceedFromTips: Bool {
+        guard cashSystemInclTip != nil else { return false }
+        guard hasEnteredCountedCash else { return false }
+        return gapIsZero || updateMatchesGap
+    }
+
+    private func resetTipsStage() {
+        cashCountedText = ""
+        cashAdjText = ""
+        tipsAdjText = ""
+        tipsError = nil
+        didSubmitAdjustment = false
+        withAnimation(.spring(response: 0.25, dampingFraction: 0.9)) {
+            showAfterCounted = false
+        }
+    }
+
+    private var tipsScreen: some View {
+        VStack(spacing: 12) {
+
+            VStack(alignment: .trailing, spacing: 8) {
+                HStack {
+                    Text("מזומן + טיפים")
+                        .font(.system(size: 20, weight: .bold))
+                    Spacer()
+
+                    Button {
+                        resetTipsStage()
+                        Haptics.light()
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "arrow.counterclockwise")
+                            Text("איפוס")
+                        }
+                        .font(.system(size: 13, weight: .semibold))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .background(Color(.systemGray6))
+                        .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+
+                    Button {
+                        Task { await reloadCashExpectedFromXReport() }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "arrow.clockwise")
+                            Text("רענן מערכת")
+                        }
+                        .font(.system(size: 13, weight: .semibold))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .background(Color(.systemGray6))
+                        .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                Text("הכנס מזומן נספר במגירה — ואז יוצג פער ועדכון פער.")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .trailing)
+            .padding(16)
+            .background(Color(UIColor.secondarySystemGroupedBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+            if tipsLoading {
+                Spacer()
+                ProgressView()
+                Spacer()
+            } else {
+                VStack(spacing: 12) {
+
+                    if let err = tipsError {
+                        Text(err)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(.red)
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                    }
+
+                    VStack(spacing: 10) {
+                        HStack(spacing: 12) {
+                            Text("מזומן מערכת (כולל טיפ)")
+                                .font(.system(size: 15, weight: .semibold))
+                                .frame(maxWidth: .infinity, alignment: .trailing)
+
+                            Text(formatILS(cashSystemInclTip ?? 0))
+                                .font(.system(size: 18, weight: .bold, design: .rounded))
+                                .monospacedDigit()
+                                .frame(width: 140, alignment: .trailing)
+                        }
+
+                        HStack(spacing: 12) {
+                            Text("נספר במגירה")
+                                .font(.system(size: 15, weight: .semibold))
+                                .frame(maxWidth: .infinity, alignment: .trailing)
+
+                            TextField("0", text: $cashCountedText)
+                                .keyboardType(.numbersAndPunctuation)
+                                .multilineTextAlignment(.trailing)
+                                .font(.system(size: 18, weight: .bold, design: .rounded))
+                                .monospacedDigit()
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 10)
+                                .frame(width: 140, alignment: .trailing)
+                                .background(Color(.systemGray6))
+                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                .onChange(of: cashCountedText) { _ in
+                                    let shouldShow = hasEnteredCountedCash
+                                    if shouldShow != showAfterCounted {
+                                        withAnimation(.spring(response: 0.28, dampingFraction: 0.88)) {
+                                            showAfterCounted = shouldShow
+                                        }
+                                    }
+                                }
+                        }
+
+                        if showAfterCounted {
+                            Divider().padding(.vertical, 2)
+
+                            HStack {
+                                Spacer()
+                                Text("פער: \(formatILS(gap))")
+                                    .font(.system(size: 16, weight: .bold, design: .rounded))
+                                    .monospacedDigit()
+                                    .foregroundColor(gapIsZero ? .secondary : .primary)
+                            }
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                        }
+                    }
+                    .padding(16)
+                    .background(Color(UIColor.secondarySystemGroupedBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+                    if showAfterCounted {
+                        VStack(spacing: 10) {
+                            HStack {
+                                Text("עדכון פער")
+                                    .font(.system(size: 16, weight: .bold))
+                                Spacer()
+                                Text("חייב להשתוות לפער")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundColor(.secondary)
+                            }
+
+                            allocationRow(title: "עדכון מזומן", text: $cashAdjText)
+                            allocationRow(title: "עדכון טיפים", text: $tipsAdjText)
+
+                            Divider().padding(.vertical, 2)
+
+                            HStack {
+                                Text("סה״כ עדכון")
+                                    .font(.system(size: 15, weight: .bold))
+                                Spacer()
+                                Text(formatILS(totalUpdate))
+                                    .font(.system(size: 16, weight: .bold, design: .rounded))
+                                    .monospacedDigit()
+                                    .foregroundColor((gapIsZero || updateMatchesGap) ? .secondary : .red)
+                            }
+
+                            if !gapIsZero && !updateMatchesGap {
+                                HStack {
+                                    Spacer()
+                                    Text("הפער לא נסגר")
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundColor(.red)
+                                }
+                            }
+                        }
+                        .padding(16)
+                        .background(Color(UIColor.secondarySystemGroupedBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+                }
+            }
+
+            Spacer()
+        }
+    }
+
+    private func allocationRow(title: String, text: Binding<String>) -> some View {
+        HStack(spacing: 12) {
             Text(title)
-                .font(.system(size: 20, weight: .bold))
+                .font(.system(size: 15, weight: .semibold))
+                .frame(maxWidth: .infinity, alignment: .trailing)
 
-            Text(subtitle)
+            TextField("0", text: text)
+                .keyboardType(.numbersAndPunctuation)
+                .multilineTextAlignment(.trailing)
+                .font(.system(size: 18, weight: .bold, design: .rounded))
+                .monospacedDigit()
+                .padding(.horizontal, 10)
+                .padding(.vertical, 10)
+                .frame(width: 140, alignment: .trailing)
+                .background(Color(.systemGray6))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+    }
+
+    // MARK: Preview Screen (Generate -> Print + Close)
+    private func previewLine(_ title: String, value: String, isBad: Bool = false) -> some View {
+        HStack {
+            Text(value)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(isBad ? .red : .primary)
+                .monospacedDigit()
+            Spacer()
+            Text(title)
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundColor(.secondary)
+        }
+    }
+    
+    private var previewScreen: some View {
+        VStack(spacing: 12) {
+
+            VStack(alignment: .trailing, spacing: 10) {
+                Text("סיכום סוף יום")
+                    .font(.system(size: 20, weight: .bold))
+
+                previewLine("הזמנות פתוחות", value: remainingOpenOrders == 0 ? "✅ סגור" : "❌ נשארו \(remainingOpenOrders)")
+                previewLine("שולחנות צוות",  value: remainingTeamTables == 0 ? "✅ סגור" : "❌ נשארו \(remainingTeamTables)")
+
+                if let sys = cashSystemInclTip {
+                    previewLine("מזומן מערכת (כולל טיפ)", value: formatILS(sys))
+                    previewLine("נספר במגירה", value: formatILS(countedCash))
+                    if showAfterCounted {
+                        previewLine("פער", value: formatILS(gap), isBad: !gapIsZero && !updateMatchesGap)
+                    }
+                    previewLine("עדכון מזומן", value: formatILS(cashUpdate))
+                    previewLine("עדכון טיפים", value: formatILS(tipsUpdate))
+                    previewLine("סה״כ עדכון", value: formatILS(totalUpdate), isBad: !gapIsZero && !updateMatchesGap)
+                }
+            }
+            .padding(16)
+            .background(Color(UIColor.secondarySystemGroupedBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+            if let zError, !zError.isEmpty {
+                Text(zError)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(.red)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .padding(.horizontal, 6)
+            } else if let r = zResp, r.ok {
+                let idText = r.zReportId.map { "#\($0)" } ?? ""
+                Text("✅ דו״ח הופק \(idText)")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .padding(.horizontal, 6)
+            }
 
             Spacer()
 
-            HStack(spacing: 12) {
-                Button(action: secondary.1) {
-                    Text(secondary.0)
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundColor(.primary)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 48)
-                        .background(Color(.systemGray5))
-                        .clipShape(RoundedRectangle(cornerRadius: 14))
-                }
+            if zState == .readyToPrint {
+                HStack(spacing: 12) {
+                    Button {
+                        Haptics.success()
+                        print("🖨️ PRINT Z clicked — zReportId =", zResp?.zReportId ?? -1)
+                    } label: {
+                        Text("הדפס")
+                            .font(.system(size: 18, weight: .bold))
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 56)
+                            .background(Color.black)
+                            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    }
 
-                Button(action: primary.1) {
-                    Text(primary.0)
-                        .font(.system(size: 16, weight: .bold))
+                    Button {
+                        dismiss()
+                    } label: {
+                        Text("סגור")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundColor(.primary)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 56)
+                            .background(Color(.systemGray5))
+                            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    }
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            } else {
+                Button {
+                    handleZPrimary()
+                } label: {
+                    Text(zPrimaryTitle)
+                        .font(.system(size: 18, weight: .bold))
                         .foregroundColor(.white)
                         .frame(maxWidth: .infinity)
-                        .frame(height: 48)
+                        .frame(height: 56)
                         .background(Color.black)
-                        .clipShape(RoundedRectangle(cornerRadius: 14))
+                        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                 }
+                .disabled(zState == .generating)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
-        .padding(16)
-        .background(Color(UIColor.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 18))
+        .animation(.spring(response: 0.28, dampingFraction: 0.88), value: zState)
     }
 
-    private var placeholderZCard: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("דו״ח Z")
-                .font(.system(size: 20, weight: .bold))
+    private var zPrimaryTitle: String {
+        switch zState {
+        case .idle:         return "הפק דוח"
+        case .generating:   return "מפיק…"
+        case .readyToPrint: return "הדפס"
+        }
+    }
 
-            Text("כאן נציג Preview של דו״ח Z + שם מנהל + כפתור סגור Z.")
-                .font(.system(size: 14))
-                .foregroundColor(.secondary)
+    private func handleZPrimary() {
+        switch zState {
+        case .idle:
+            Task { await generateZNow() }
+        case .generating:
+            return
+        case .readyToPrint:
+            return
+        }
+    }
 
-            Spacer()
+    @MainActor
+    private func generateZNow() async {
+        zError = nil
+        zResp = nil
+        zState = .generating
+        Haptics.light()
 
-            HStack(spacing: 12) {
-                Button {
-                    dismiss()
-                } label: {
-                    Text("בטל")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundColor(.primary)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 52)
-                        .background(Color(.systemGray5))
-                        .clipShape(RoundedRectangle(cornerRadius: 16))
-                }
+        do {
+            let toEmail = "omer@studionative.io"
+            let resp = try await ZReportGenerateAPI.generate(miniAppId: miniAppId, to: toEmail)
+            zResp = resp
 
-                Button {
-                    // placeholder action
-                    dismiss()
-                } label: {
-                    Text("סגור Z")
-                        .font(.system(size: 16, weight: .bold))
-                        .foregroundColor(.white)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 52)
-                        .background(Color.black)
-                        .clipShape(RoundedRectangle(cornerRadius: 16))
+            if resp.ok {
+                Haptics.success()
+                zState = .readyToPrint
+            } else {
+                zError = "הפקת הדוח נכשלה"
+                zState = .idle
+                Haptics.error()
+            }
+        } catch {
+            let ns = error as NSError
+            let body = ns.userInfo["body"] as? String ?? ""
+            zError = body.isEmpty ? "שגיאה בהפקת דו״ח Z" : "שגיאה בהפקת דו״ח Z: \(body)"
+            zState = .idle
+            Haptics.error()
+        }
+    }
+
+    // MARK: - Fetch system cash+tip from X report
+
+    private func loadCashExpectedIfNeeded() async {
+        guard cashSystemInclTip == nil, !tipsLoading else { return }
+        await reloadCashExpectedFromXReport()
+    }
+
+    private func reloadCashExpectedFromXReport() async {
+        tipsLoading = true
+        tipsError = nil
+        defer { tipsLoading = false }
+
+        do {
+            let x = try await XReportAPI.fetch(miniAppId: miniAppId)
+            let cashWithTip = (x.agg.cashTotal) + (x.agg.tipsTotal)
+            cashSystemInclTip = cashWithTip
+        } catch {
+            let ns = error as NSError
+            let body = ns.userInfo["body"] as? String ?? ""
+            tipsError = body.isEmpty ? "שגיאה בטעינת X" : "שגיאה בטעינת X: \(body)"
+            cashSystemInclTip = nil
+        }
+    }
+
+    // MARK: - Submit “עדכון” as an order in DB on Next (tips step)
+    private var cashUpdateRaw: Double { cashUpdate }     // your parsed field
+    private var tipsUpdateRaw: Double { tipsUpdate }
+
+    private var needsTinyCashHack: Bool {
+        cashUpdateRaw <= 0.01 && tipsUpdateRaw > 0.01
+    }
+
+    // ✅ choose 0.2 (0.1 sometimes gets rounded away / ignored)
+    private var cashUpdateForDb: Double {
+        needsTinyCashHack ? 0.2 : cashUpdateRaw
+    }
+
+    private var totalUpdateForDb: Double {
+        cashUpdateForDb + tipsUpdateRaw
+    }
+    private func makeEodAdjustmentEntries() -> [BasketEntry] {
+        let item = ShellMenuItem(
+            id: -900_001,
+            name: "עדכון",
+            price: cashUpdateForDb,          // ✅
+            category: "EOD",
+            modifiers: nil,
+            imageURL: nil,
+            description: nil,
+            status: 1,
+            stockQuantity: nil,
+            printer: nil
+        )
+
+        return [
+            BasketEntry(
+                id: 1,
+                item: item,
+                quantity: 1,
+                subtitle: nil,
+                unitPrice: cashUpdateForDb     // ✅
+            )
+        ]
+    }
+
+    private func submitEodAdjustmentOrderIfNeeded() async {
+        guard step == .tips else { return }
+        guard !didSubmitAdjustment else { return }
+
+        let shouldSubmit = (!gapIsZero) || abs(totalUpdate) > 0.01
+        guard shouldSubmit else {
+            didSubmitAdjustment = true
+            return
+        }
+
+        didSubmitAdjustment = true
+
+        // ✅ totals we want server to store
+        let totals: [String: Any] = [
+            "subtotal": cashUpdateForDb,               // ✅
+            "discount": 0,
+            "excluded": 0,
+            "tip": tipsUpdateRaw,
+            "total": cashUpdateForDb,                  // ✅
+            "grandTotal": totalUpdateForDb,            // ✅
+            "currency": "ILS",
+
+            // optional debug marker (so you can filter it later)
+            "eodTinyCashHack": needsTinyCashHack
+        ]
+
+        let entries = makeEodAdjustmentEntries()
+
+        await withCheckedContinuation { cont in
+            let payment = OrderAPI.PaymentSummary(
+                method: .cash,
+                cashAmount: cashUpdateForDb,            // ✅
+                cardAmount: 0
+            )
+
+            OrderAPI.submitOrder(
+                entries: entries,
+                total: cashUpdateForDb,                 // ✅ THIS is critical
+                diningMode: .dineIn,
+                source: "cashpoint",
+                customerName: "עדכון סוף יום",
+                customerPhone: nil,
+                payment: payment,
+                zcreditMeta: nil,
+                ticketNumber: nil,
+                totals: totals
+            ) { result in
+                DispatchQueue.main.async {
+                    switch result {
+                    case .success(let oid):
+                        print("✅ EOD update saved. orderId=\(oid) tinyHack=\(self.needsTinyCashHack)")
+                        Haptics.success()
+                    case .failure(let err):
+                        print("❌ EOD update submit failed:", err)
+                        Haptics.error()
+                        didSubmitAdjustment = false
+                    }
+                    cont.resume()
                 }
             }
         }
-        .padding(16)
-        .background(Color(UIColor.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 18))
+    }
+
+   
+    // MARK: Formatting
+
+    private func formatILS(_ v: Double) -> String {
+        String(format: "₪%.0f", v)
     }
 }
+
+// MARK: - Z Report API (debug curl + response)
+
+enum ZReportGenerateAPI {
+
+    struct Resp: Decodable {
+        let ok: Bool
+        let miniAppId: Int?
+        let zReportId: Int?
+        let rangeFromUtc: String?
+        let rangeToUtc: String?
+        let vatRate: Double?
+        let emailedTo: String?
+        let subject: String?
+    }
+
+    static func generate(miniAppId: Int, to: String?) async throws -> Resp {
+        var comps = URLComponents(string: "https://minis.studio/api/reports/z")!
+        comps.queryItems = [
+            .init(name: "miniAppId", value: String(miniAppId))
+        ]
+        if let to, !to.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            comps.queryItems?.append(.init(name: "to", value: to.trimmingCharacters(in: .whitespacesAndNewlines)))
+        }
+        let url = comps.url!
+
+        var req = URLRequest(url: url, timeoutInterval: 90)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        // ✅ avoid IIS 411 Length Required
+        req.httpBody = Data()
+
+        print("🧾 Z REPORT cURL:")
+        print(#"curl -sS -i -X POST "\#(url.absoluteString)" -H "Accept: application/json" -d "" "#)
+
+        let start = Date()
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        let ms = Int(Date().timeIntervalSince(start) * 1000)
+
+        guard let http = resp as? HTTPURLResponse else {
+            let text = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
+            print("❌ Z REPORT no HTTPResponse (\(ms)ms)\n\(text)")
+            throw NSError(domain: "ZReportGenerateAPI", code: -2, userInfo: ["body": text])
+        }
+
+        let text = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
+        print("📥 Z REPORT HTTP \(http.statusCode) (\(ms)ms)")
+        print("📦 Z REPORT body:\n\(text)")
+
+        guard (200...299).contains(http.statusCode) else {
+            throw NSError(domain: "ZReportGenerateAPI", code: http.statusCode, userInfo: ["body": text])
+        }
+
+        return try JSONDecoder().decode(Resp.self, from: data)
+    }
+}
+
+// MARK: - XReport fetch (adjust the endpoint/DTO to match your backend)
+
+enum XReportAPI {
+
+    static func fetch(miniAppId: Int) async throws -> XReportApiResponse {
+
+        let url = URL(string: "https://minis.studio/api/xreport?miniAppId=\(miniAppId)")!
+
+        // ✅ print curl
+        print(#"🧾 XREPORT cURL:"#)
+        print(#"curl -sS -i -X GET "\#(url.absoluteString)" -H "Accept: application/json""#)
+
+        var req = URLRequest(url: url, timeoutInterval: 15)
+        req.httpMethod = "GET"
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        let start = Date()
+        let (raw, resp) = try await URLSession.shared.data(for: req)
+        let ms = Int(Date().timeIntervalSince(start) * 1000)
+
+        guard let http = resp as? HTTPURLResponse else {
+            let body = String(data: raw, encoding: .utf8) ?? "<non-utf8 \(raw.count) bytes>"
+            print("❌ XREPORT no HTTPResponse (\(ms)ms)\n\(body)")
+            throw NSError(domain: "XReportAPI", code: -2, userInfo: ["body": body])
+        }
+
+        let body = String(data: raw, encoding: .utf8) ?? "<non-utf8 \(raw.count) bytes>"
+        print("📥 XREPORT HTTP \(http.statusCode) (\(ms)ms)")
+        if !(200...299).contains(http.statusCode) {
+            print("📦 XREPORT body:\n\(body)")
+            throw NSError(domain: "XReportAPI", code: http.statusCode, userInfo: ["body": body])
+        }
+
+        do {
+            return try JSONDecoder().decode(XReportApiResponse.self, from: raw)
+        } catch {
+            print("❌ XREPORT decode failed:", error)
+            print("📦 XREPORT raw:\n\(body)")
+            throw error
+        }
+    }
+}
+
+// MARK: - TipsAPI (stub: system cash already includes tip)
+
+enum TipsAPI {
+    struct Expected: Equatable {
+        var cashInclTip: Double
+    }
+
+    static func fetchExpected(miniAppId: Int) async throws -> Expected {
+        // ✅ replace with your real endpoint later
+        try await Task.sleep(nanoseconds: 180_000_000)
+        return .init(cashInclTip: 340) // demo
+    }
+    
+}
+
+
+enum EODFilter {
+    case all
+    case teamTablesOnly
+    case openOrdersOnly
+}
+

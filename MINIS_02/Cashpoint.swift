@@ -33,6 +33,7 @@ struct CashPointView: View {
     @State private var showLastInvoicePrompt: Bool = false
     @State private var zRestoreMode: Bool = false
     @State private var zRestoreDate: Date = Calendar.current.date(byAdding: .day, value: -1, to: Date()) ?? Date()
+    @StateObject private var net = NetworkMonitor.shared
     private var isTeamTabMode: Bool { activeTeamTab != nil }
     
     @StateObject private var stockToggles = StockToggleStore(
@@ -84,12 +85,13 @@ struct CashPointView: View {
     @State private var showEODWizard = false
     @State private var showRefundFlow = false
     @State private var refundInput: String = ""
+    @State private var showStudentHandshakeSheet = false
     private struct ReorderCategoriesReq: Encodable {
         let miniAppId: Int
         let order: [String]
     }
 
-    
+    @State private var showOutboxLog = false
     @State private var pinpadsExpanded: Bool = false
 
     private let pinpads: [(title: String, id: String)] = [
@@ -782,10 +784,7 @@ struct CashPointView: View {
                         } label: {
                             Text(isRtl ? "בטל" : "Cancel")
                                 .font(.system(size: 14, weight: .semibold))
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 6)
-                                .background(Color(.systemGray6))
-                                .foregroundColor(.primary)
+                                
                                 .clipShape(Capsule())
                         }
                         .buttonStyle(.plain)
@@ -1096,16 +1095,8 @@ struct CashPointView: View {
 
                     // ✅ TEAM TAB: 3 buttons
                     if isTeamTabMode {
-
-                        Button {
-                            startNewOrderFromPayLater()   // this should already set activeTeamTab=nil (you added that)
-                        } label: {
-                            Text("לקוח חדש")
-                                .font(.system(size: 15, weight: .semibold))
-                                .foregroundColor(.primary)
-                                .frame(width: 110, height: 44)
-                                .background(Color(.systemGray5))
-                                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        NewOrderButton(title: "נקה") {
+                            startNewOrderFromPayLater()   // already clears activeTeamTab 👍
                         }
                         .buttonStyle(.plain)
 
@@ -1133,6 +1124,9 @@ struct CashPointView: View {
                                 return
                             }
                             printUpdatedUnpaidOrder()
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                                      startNewOrderFromPayLater()
+                                  }
                         } label: {
                             Text(canPrintNewLines ? "הדפס" : "הודפס")
                                 .font(.system(size: 16, weight: .bold))
@@ -1147,17 +1141,9 @@ struct CashPointView: View {
                     } else if isPayLaterMode {
 
                         // ✅ NORMAL PAY-LATER (customer): keep your existing left button
-                        Button {
-                            startNewOrderFromPayLater()
-                        } label: {
-                            Text("לקוח חדש")
-                                .font(.system(size: 16, weight: .semibold))
-                                .foregroundColor(.primary)
-                                .frame(width: 120, height: 48)
-                                .background(Color(.systemGray5))
-                                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        NewOrderButton(title: "נקה2") {
+                            startNewOrderFromPayLater()   // already clears activeTeamTab 👍
                         }
-                        .buttonStyle(.plain)
 
                         // ✅ Normal pay-later primary action (Pay / Send)
                         Button {
@@ -2119,7 +2105,33 @@ struct CashPointView: View {
         return api.items.filter { $0.category == selectedCategory }
     }
    
-    
+    struct NewOrderButton: View {
+        let title: String
+        let action: () -> Void
+        @Environment(\.layoutDirection) private var dir
+
+        var body: some View {
+            Button {
+                Haptics.light()
+                action()
+            } label: {
+                HStack(spacing: 8) {
+                    // ✅ Chevron BACK – leading
+                    Image(systemName: dir == .rightToLeft ? "chevron.right" : "chevron.left")
+                        .font(.system(size: 14, weight: .bold))
+
+                    Text(title)
+                        .font(.system(size: 17, weight: .bold))
+                }
+                .foregroundColor(.white)
+                .frame(height: 46)
+                .padding(.horizontal, 16)
+                .background(Color.black)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
+            .buttonStyle(.plain)
+        }
+    }
    
     private func remainingStock(for item: ShellMenuItem) -> Int? {
         stockAdjustments[item.id]
@@ -2174,24 +2186,26 @@ struct CashPointView: View {
         
     }
     private var currentUnpaidOrderTitle: String {
+        // 🧩 Team tab stays as-is
         if let tab = activeTeamTab {
-            // Team tab title
-            if let oid = unpaidOrderId {
-                return "\(tab.titleHe) #\(oid)"
-            } else {
-                return tab.titleHe
-            }
+            return tab.titleHe
         }
 
-        // existing customer unpaid logic:
-        guard let oid = unpaidOrderId else { return "" }
-
+        // 👤 Prefer customer name
         let cleanName = posSavedName
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "Customer", with: "")
 
-        if cleanName.isEmpty { return "הזמנה \(oid)" }
-        return "הזמנה \(oid) \(cleanName)"
+        if !cleanName.isEmpty {
+            return cleanName
+        }
+
+        // 🔁 Fallback only if no name
+        if let oid = unpaidOrderId {
+            return "הזמנה \(oid)"
+        }
+
+        return "הזמנה פתוחה"
     }
     private struct BasketSection: Identifiable {
         let id: Int
@@ -2780,6 +2794,11 @@ struct CashPointView: View {
                     refundInput = ""
                     showRefundFlow = true
                 }
+                
+                fullRow("הנחת סטודנטים", "graduationcap.fill") {
+                    showSideMenu = false
+                    showStudentHandshakeSheet = true
+                }
 
                 // TEAM TABS parent row — FULL WIDTH CLICKABLE
                 Button {
@@ -2902,6 +2921,11 @@ struct CashPointView: View {
                     }
                     .padding(.leading,  isRtl ? 0  : 32)
                     .padding(.trailing, isRtl ? 32 : 0)
+                }
+                
+                fullRow("לוג", "doc.plaintext") {
+                    showSideMenu = false
+                    showOutboxLog = true
                 }
             }
             .padding(.top, 8)
@@ -3214,7 +3238,7 @@ struct CashPointView: View {
                                             .buttonStyle(.plain)
                                         }
                                     }
-                                    .padding(.horizontal, 12)
+                                    .padding(.horizontal, 0)
                                     .padding(.vertical, 8)
                                     .background(Color(.secondarySystemBackground))
                                     .clipShape(RoundedRectangle(cornerRadius: 12))
@@ -3754,6 +3778,14 @@ struct CashPointView: View {
                             }
                         }
                         .frame(maxWidth: .infinity)
+                        .sheet(isPresented: $showStudentHandshakeSheet) {
+                            StudentHandshakeWebSheet(url: URL(string: "https://minis.studio/handshake")!)
+                                .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
+                        }
+                        .sheet(isPresented: $showOutboxLog) {
+                            OutboxLogView()
+                                .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
+                        }
                         .sheet(isPresented: $showTeamTabsSheet) {
                             TeamTabsSheet { tab in
                                 showTeamTabsSheet = false
@@ -3901,9 +3933,10 @@ struct CashPointView: View {
             .onReceive(backlogPoll) { _ in
                 updatePendingBacklog()
             }
+            
             .onAppear {
                 updatePendingBacklog()
-
+                OrderOutbox.shared.drainNow()
                 isPayLaterMode = false
                 lockedLineIds.removeAll()
                 lineSessionTime.removeAll()
@@ -4018,6 +4051,7 @@ struct CashPointView: View {
                     mode: adminMode,
                     onSelectUnpaid: { unpaidOrder in
                         if adminMode == .normal {
+                            isPayLaterMode = true
                             restoreUnpaidOrder(unpaidOrder)
                             showOrdersAdmin = false
                         } else {
@@ -4104,6 +4138,7 @@ struct CashPointView: View {
                     api.load(skipCache: true)
                 }
             }
+            .onChange(of: isPayLaterMode) { print("isPayLaterMode =", $0) }
             .fullScreenCover(isPresented: $showOrderFlow) {
                 OrderFlowView(
                     onSendToKitchen: {
@@ -4118,7 +4153,6 @@ struct CashPointView: View {
                         // 🔢 Shared ticket number for slip + server
                         let ticketNumber: Int = {
                             if let existing = unpaidOrderId {
-                                // If server already gave us an id for this order (slider used before)
                                 return existing
                             }
                             if let pending = pendingTicketNumber {
@@ -4155,7 +4189,6 @@ struct CashPointView: View {
                             cardAmount: 0
                         )
 
-                        // Optional meta to match your curl
                         let meta: [String: Any] = [
                             "paymentMethod": "unpaid",
                             "cashAmount": 0,
@@ -4163,7 +4196,7 @@ struct CashPointView: View {
                         ]
 
                         OrderAPI.submitOrder(
-                            orderId: nil,                    // new order
+                            orderId: nil,
                             entries: entriesArray,
                             total: totalForPrint,
                             diningMode: diningMode,
@@ -4173,34 +4206,34 @@ struct CashPointView: View {
                             payment: unpaidSummary,
                             zcreditMeta: meta,
                             ticketNumber: ticketNumber,
-
-                            // ✅ NEW (team tabs support)
                             orderType: activeTeamTab == nil ? nil : "teamTab",
                             tabKey: activeTeamTab?.rawValue
-                        )  { result in
+                        ) { result in
                             DispatchQueue.main.async {
                                 switch result {
                                 case .success(let serverOrderId):
-                                    // Save so completeOrder can UPDATE this order
                                     unpaidOrderId = serverOrderId
                                     print("🟢 slider unpaid submit → orderId=\(serverOrderId) ticket=\(ticketNumber)")
                                 case .failure(let error):
                                     print("❌ slider unpaid submit failed:", error)
-                                    // here you could show a small warning if you want
                                 }
                             }
                         }
                     },
+
                     total: finalTotal,
                     isRtl: isRtl,
                     diningMode: $diningMode,
                     requiresPhoneStep: requiresPhoneStep,
+
                     onCancel: {
                         showOrderFlow = false
                         if let first = categories.first {
                             selectedCategory = first
                         }
                     },
+
+                    // ✅ NOW: this only submits — must NOT close the sheet inside completeOrder
                     onCompleted: { phone, name, summary, discountOff, tip in
                         completeOrder(
                             customerPhone: phone,
@@ -4210,11 +4243,53 @@ struct CashPointView: View {
                             tipAmount: tip
                         )
                     },
+
+                    // ✅ NEW: waiter clicks "סיים" inside OrderFlowView → only then we close & reset
+                    onFinish: {
+                        showOrderFlow = false
+
+                        // Keep your reset in ONE place (here)
+                        basket.removeAll()
+                        nextBasketLineId = 1
+
+                        // reset modifiers/edit UI state (safe)
+                        expandedBasketLineId = nil
+                        noteDrafts.removeAll()
+                        optionSelections.removeAll()
+                        additionSelections.removeAll()
+                        basketSwipeOffsets.removeAll()
+
+                        // reset discount UI
+                        discountMode = .none
+                        discountAllSelected = true
+                        discountedLineIds.removeAll()
+                        customDiscountText = ""
+
+                        // reset OTH UI
+                        excludeAllSelected = false
+                        excludedLineIds.removeAll()
+
+                        // reset pay-later context
+                        isPayLaterMode = false
+                        unpaidOrderId = nil
+                        lockedLineIds.removeAll()
+                        lineSessionTime.removeAll()
+
+                        // reset order flags
+                        hasPrintedFromSwipe = false
+                        pendingTicketNumber = nil
+                        hasChosenServiceMode = false
+                        diningMode = .dineIn
+
+                        Haptics.success()
+                    },
+
                     allowPayLater: (!isPayLaterMode) || hasAddedLinesInPayLater,
                     skipServiceStep: hasChosenServiceMode,
                     onServiceChosen: {
-                        hasChosenServiceMode = true   // mark service step as chosen from inside flow
-                    }
+                        hasChosenServiceMode = true
+                    },
+                    startAtCharge: isPayLaterMode
                 )
             }
             .fullScreenCover(item: $adminDraft) { draft in
@@ -4622,7 +4697,7 @@ struct CashPointView: View {
                     showLastInvoicePrompt = true
 
                     let currentId = snapshot.id
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 20) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 60) {
                         if lastOrder?.id == currentId {
                             showLastInvoicePrompt = false
                         }
@@ -4661,10 +4736,7 @@ struct CashPointView: View {
                 discountedLineIds.removeAll()
                 customDiscountText = ""
 
-                basket.removeAll()
-                showOrderFlow = false
-                diningMode = .dineIn
-                hasChosenServiceMode = false
+              
             }
         }
     }
@@ -5669,7 +5741,7 @@ struct CashPointView: View {
         @State private var managerName: String = ""
  
         private var cashWithTip: Double {
-            model.data.cashAmount + model.data.tipBaseTotal - 1
+            model.data.cashAmount + model.data.tipBaseTotal
         }
 
         private var collectionsTotalWithTip: Double {
@@ -6786,6 +6858,31 @@ struct OrderFlowView: View {
         case charge
     }
     
+    private var hasConfirmedName: Bool {
+        let n = posSavedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return n.count >= 2
+    }
+
+    private var hasConfirmedPhone: Bool {
+        let d = posSavedPhone.filter(\.isNumber)
+        return d.count == 10 && d.first == "0"
+    }
+
+    private func goToNextStepAfterService() {
+        // ✅ skip name if already saved
+        if !hasConfirmedName {
+            step = .name
+            return
+        }
+
+        // ✅ skip phone if not required OR already saved
+        if requiresPhoneStep {
+            step = hasConfirmedPhone ? .charge : .phone
+        } else {
+            step = .charge
+        }
+    }
+    
     private func persistDraftContactForSession() {
         let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
         if n.count >= 2 {
@@ -6808,21 +6905,7 @@ struct OrderFlowView: View {
     
    
     
-    private func goToNextStepAfterService() {
-        // ✅ Only skip name/phone if they were confirmed in this session
-        guard didConfirmNameThisSession else {
-            step = .name
-            return
-        }
-
-        // If confirmed, we can still decide whether to show phone
-        if requiresPhoneStep {
-            let hasValidPhone = phoneDigits.filter(\.isNumber).count == 10
-            step = hasValidPhone ? .charge : .phone
-        } else {
-            step = .charge
-        }
-    }
+  
 
     @State private var lastResultWasUnknown: Bool = false
     struct AppConfig {
@@ -6839,6 +6922,7 @@ struct OrderFlowView: View {
     @State private var hasApprovedCardPayment: Bool = false
     @State private var cardPaidTotal: Double = 0
     @State private var cashPaidTotal: Double = 0
+    
     
     private let bill20URL  = "https://www.leftovercurrency.com/app/uploads/2018/06/20-israeli-new-sheqalim-banknote-rachel-bluwstein-obverse-1-433x235.jpg"
     private let bill50URL  = "https://www.leftovercurrency.com/app/uploads/2017/04/50-israeli-new-shekels-banknote-shaul-tchernichovsky-obverse-1-433x221.jpg"
@@ -6985,16 +7069,21 @@ struct OrderFlowView: View {
     let requiresPhoneStep: Bool
     let onCancel: () -> Void
     let onCompleted: (String?, String?, OrderAPI.PaymentSummary, Double, Double) -> Void
+    let onFinish: () -> Void
     let allowPayLater: Bool
     let skipServiceStep: Bool
     let onServiceChosen: () -> Void
+    let startAtCharge: Bool
     private func buildPaymentSummary() -> OrderAPI.PaymentSummary {
-        let totalPaid = cardPaidTotal + cashPaidTotal
+        let card = cardPaidTotal
+        let cash = cashPaidTotal
 
         let method: OrderAPI.PaymentMethod
-         if cardPaidTotal > 0 && cashPaidTotal > 0 {
+        if card <= 0 && cash <= 0 {
+            method = .unpaid
+        } else if card > 0 && cash > 0 {
             method = .mixed
-        } else if cardPaidTotal > 0 {
+        } else if card > 0 {
             method = .card
         } else {
             method = .cash
@@ -7002,8 +7091,8 @@ struct OrderFlowView: View {
 
         return OrderAPI.PaymentSummary(
             method: method,
-            cashAmount: cashPaidTotal,
-            cardAmount: cardPaidTotal
+            cashAmount: cash,
+            cardAmount: card
         )
     }
 
@@ -7061,7 +7150,10 @@ struct OrderFlowView: View {
         formatIL(phoneDigits)
     }
 
-
+    private var canFinishNow: Bool {
+        // payment complete (card/cash/split/manual) -> remaining is 0
+        remainingToPay <= 0.001 && (cardPaidTotal + cashPaidTotal) > 0.001
+    }
     @ViewBuilder
     private func billImageButton(amount: Int, imageURL: String) -> some View {
         Button {
@@ -7112,6 +7204,7 @@ struct OrderFlowView: View {
         guard !trimmed.isEmpty else { return 0 }
         return Double(trimmed) ?? 0
     }
+    
 
     private var currentTargetAmount: Double {
         if let manual = manualCashTargetAmount {
@@ -7186,18 +7279,7 @@ struct OrderFlowView: View {
                                     }
                                     .padding(.bottom, 0)
                                 }
-                        .onAppear {
-                                    // Initialize outstanding amount on first visit
-                                    if remainingToPay == 0 {
-                                        remainingToPay = initialPaymentTarget
-                                    }
-
-                                    // Auto-start ZCredit only for full-card flow (no split, no cash, no manual amount)
-                                    if !paymentStarted && !payingWithCash && !isSplitMode && manualCashTargetAmount == nil {
-                                        paymentStarted = true
-                                        startPayment()
-                                    }
-                                }
+                      
                 }
 
                 Spacer()
@@ -7229,7 +7311,38 @@ struct OrderFlowView: View {
                 .transition(.opacity)
             }
         }
+      
         .onAppear {
+            print(startAtCharge)
+               if startAtCharge {
+                   step = .charge
+                   paymentStarted = false
+                   payError = nil
+                   isPaying = false
+                   return
+               }
+
+            if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                   name = posSavedName
+               }
+               phoneDigits = posSavedPhone
+
+               // ✅ Decide first step based on what already exists
+               if skipServiceStep {
+                   goToNextStepAfterService()
+               } else {
+                   step = .service
+               }
+                    // Initialize outstanding amount on first visit
+                    if remainingToPay == 0 {
+                        remainingToPay = initialPaymentTarget
+                    }
+
+                    // Auto-start ZCredit only for full-card flow (no split, no cash, no manual amount)
+                    if !paymentStarted && !payingWithCash && !isSplitMode && manualCashTargetAmount == nil {
+                        paymentStarted = true
+                        startPayment()
+                    }
             // Load from AppStorage for later steps
             if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                    name = posSavedName
@@ -7534,6 +7647,48 @@ struct OrderFlowView: View {
             startPayment()
         }
     }
+    
+    private struct TerminalActivityRing: View {
+        let isActive: Bool
+        let label: String
+
+        @State private var rotate = false
+
+        var body: some View {
+            VStack(spacing: 8) {
+                ZStack {
+                    Circle()
+                        .stroke(Color.primary.opacity(0.12), lineWidth: 6)
+
+                    Circle()
+                        .trim(from: 0.05, to: 0.35)
+                        .stroke(
+                            Color.primary,
+                            style: StrokeStyle(lineWidth: 6, lineCap: .round)
+                        )
+                        .rotationEffect(.degrees(rotate ? 360 : 0))
+                        .animation(
+                            isActive
+                            ? .linear(duration: 1.0).repeatForever(autoreverses: false)
+                            : .default,
+                            value: rotate
+                        )
+                }
+                .frame(width: 100, height: 100)
+
+              
+            }
+            .frame(maxWidth: .infinity)
+            .onAppear {
+                if isActive {
+                    rotate = true
+                }
+            }
+            .onChange(of: isActive) { active in
+                rotate = active
+            }
+        }
+    }
     // MARK: - Step: Charge (card OR cash)
     private func toggleStudentDiscount() {
         // 1️⃣ Flip discount flag
@@ -7571,7 +7726,10 @@ struct OrderFlowView: View {
         }
     }
     private var chargeStep: some View {
-
+        let terminalActive =
+            isPaying &&
+            paymentStarted &&
+            !payingWithCash
         // ✅ Amount logic (single source of truth for display)
         let baseWithTip: Double = totalWithTip
         let alreadyPaid: Double = cardPaidTotal + cashPaidTotal
@@ -7579,6 +7737,10 @@ struct OrderFlowView: View {
 
         let studentDiscountValue: Double = max(total - effectiveTotal, 0)
         let isPhone = UIDevice.current.userInterfaceIdiom == .phone
+
+        // ✅ fixed slots so layout never jumps
+        let ringSlotH: CGFloat = 86
+        let errorSlotH: CGFloat = 28
 
         return VStack {
             Spacer()
@@ -7796,18 +7958,42 @@ struct OrderFlowView: View {
                 }
 
                 // Main prompt
+                // Main prompt
                 Text(isRtl ? "הכנס או הצמד כרטיס" : "Insert or tap card")
                     .font(.system(size: 24, weight: .bold))
                     .padding(.top, 8)
 
-                // Card error
-                if payError != nil {
-                    Text(isRtl ? "התשלום נכשל, נסה שוב..." : "Payment failed, please try again.")
-                        .foregroundColor(.red)
-                        .font(.system(size: 16, weight: .semibold))
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 40)
+                // ✅ INLINE terminal indicator slot (always occupies space)
+                Group {
+                    if isPaying && paymentStarted && !payingWithCash {
+                        TerminalActivityRing(
+                            isActive: true,
+                            label: isRtl ? "ממתין למסוף…" : "Waiting for terminal…"
+                        )
+                        .padding(.top, 40)
+                    } else {
+                        Spacer().frame(height: 44) // keeps layout stable
+                    }
                 }
+                .frame(height: 72)
+
+                // ✅ Error slot (also fixed height)
+                Group {
+                    if let payError, !payError.isEmpty {
+                        Text(isRtl ? "התשלום נכשל, נסה שוב..." : "Payment failed, please try again.")
+                            
+                            .font(.system(size: 16, weight: .semibold))
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 40)
+                            .padding(.bottom, 100)
+                            
+                    } else {
+                        Spacer().frame(height: 22)
+                    }
+                }
+                .frame(height: errorSlotH)
+                .frame(maxWidth: .infinity)
+                
 
                 // Card / Cash buttons
                 VStack(spacing: 12) {
@@ -7823,10 +8009,15 @@ struct OrderFlowView: View {
                                 .font(.system(size: 18, weight: .semibold))
                                 .foregroundColor(.white)
                                 .frame(width: 240, height: 50)
-                                .background(Color.black)
+                                .background(
+                                    terminalActive
+                                    ? Color.gray.opacity(0.4)
+                                    : Color.black
+                                )
                                 .clipShape(RoundedRectangle(cornerRadius: 18))
                         }
-                        .disabled(isPaying || hasApprovedCardPayment)
+                        .disabled(terminalActive || hasApprovedCardPayment)
+                        .animation(.easeInOut(duration: 0.2), value: terminalActive)
                         .simultaneousGesture(
                             LongPressGesture(minimumDuration: 1.2, maximumDistance: 14)
                                 .onEnded { _ in
@@ -7874,7 +8065,7 @@ struct OrderFlowView: View {
                         }
                     }
                 }
-                .padding(.top, 8)
+                .padding(.top, 4)
             }
             .padding(.horizontal, 28)
             .padding(.top, 80)
@@ -7916,6 +8107,8 @@ struct OrderFlowView: View {
 
             Spacer()
         }
+        // ✅ keep transitions smooth but subtle
+        .animation(.spring(response: 0.25, dampingFraction: 0.9), value: isPaying)
     }
 
     // MARK: - Split sheet (rows)
@@ -8692,9 +8885,12 @@ struct OrderFlowView: View {
     }
 
     private func completeWithoutPayment() {
+        // stop any terminal flow
         if !AppConfig.isDemoMode {
             ZCreditPaymentHandler.shared.cancelCurrent()
         }
+
+        // reset payment UI flags
         isPaying = false
         payError = nil
         paymentStarted = false
@@ -8705,27 +8901,111 @@ struct OrderFlowView: View {
         // no money taken
         cardPaidTotal = 0
         cashPaidTotal = 0
+        remainingToPay = 0
 
-        playSuccessAndCompleteOrder()
+        // build submit payload NOW (no animation)
+        let phoneParam = phoneDigits.trimmedIsEmpty ? nil : phoneDigits
+        let nameParam  = name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : name
+
+        let summary = OrderAPI.PaymentSummary(
+            method: .unpaid,
+            cashAmount: 0,
+            cardAmount: 0
+        )
+
+        let discountOff: Double = {
+            guard studentDiscountActive else { return 0 }
+            return max(0, total - effectiveTotal)
+        }()
+
+        let tipOff = max(0, tipAmount)
+
+        // fire submit (CashPointView will call submitOrder)
+        onCompleted(phoneParam, nameParam, summary, discountOff, tipOff)
+
+        // ✅ dismiss immediately (don’t wait for server)
+        DispatchQueue.main.async {
+            onFinish()
+        }
     }
+    private struct TerminalProgressRing: View {
+        var label: String = ""
 
+        @State private var spin: Double = 0
+        @State private var pulse: CGFloat = 1.0
+
+        var body: some View {
+            ZStack {
+                // soft dim behind ring only (doesn't affect layout)
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .fill(Color.black.opacity(0.06))
+                    .blur(radius: 0.2)
+
+                VStack(spacing: 14) {
+                    ZStack {
+                        // outer faint track
+                        Circle()
+                            .stroke(Color.black.opacity(0.08), lineWidth: 10)
+                            .frame(width: 120, height: 120)
+
+                        // spinning arc
+                        Circle()
+                            .trim(from: 0.08, to: 0.72)
+                            .stroke(Color.black, style: StrokeStyle(lineWidth: 10, lineCap: .round))
+                            .frame(width: 120, height: 120)
+                            .rotationEffect(.degrees(spin))
+
+                        // inner pulse
+                        Circle()
+                            .fill(Color.black.opacity(0.10))
+                            .frame(width: 70, height: 70)
+                            .scaleEffect(pulse)
+
+                        Image(systemName: "creditcard.fill")
+                            .font(.system(size: 22, weight: .bold))
+                            .foregroundColor(.black)
+                    }
+
+                    Text(label)
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundColor(.black)
+
+                    Text("אל תסגור את המסך")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.black.opacity(0.55))
+                }
+                .padding(.horizontal, 22)
+                .padding(.vertical, 20)
+            }
+            .frame(width: 260, height: 240)
+            .scaleEffect(0.98)
+            .onAppear {
+                // smooth endless spin
+                withAnimation(.linear(duration: 1.0).repeatForever(autoreverses: false)) {
+                    spin = 360
+                }
+                // gentle pulse
+                withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+                    pulse = 1.08
+                }
+            }
+        }
+    }
     private func completeWithCash() {
         if !AppConfig.isDemoMode {
             ZCreditPaymentHandler.shared.cancelCurrent()
         }
 
-        // Common UI reset
+        // Common UI reset (but DO NOT dismiss screens here)
         isPaying = false
         payError = nil
         paymentStarted = false
-        payingWithCash = false
-        cashPaid = false          // so next time the cash screen starts “fresh”
 
         // 💰 How much cash did we just take in THIS action?
         let thisCash: Double
 
         if let manual = manualCashTargetAmount {
-            // Manual "Pay on the bill" amount (from the partial-payment pad)
+            // Manual "Pay on the bill" amount
             thisCash = manual
 
         } else if isSplitMode,
@@ -8735,42 +9015,29 @@ struct OrderFlowView: View {
             thisCash = Double(splitParts[idx].amount)
 
         } else {
-            // No manual, no split:
-            // waiter types how much cash was RECEIVED (e.g. 200),
-            // but the actual payment we apply to the order is capped by what is still due.
+            // Normal cash: cashier types cash received, but we apply at most what is due
             let target  = (remainingToPay > 0 ? remainingToPay : initialPaymentTarget)
-            let entered = cashAmount   // money handed to cashier
-
-            if entered > 0 {
-                // e.g. order 90, customer gives 200 → apply 90, give 110 change
-                thisCash = min(entered, target)
-            } else {
-                // no input → assume exact amount due
-                thisCash = target
-            }
+            let entered = cashAmount
+            thisCash = (entered > 0) ? min(entered, target) : target
         }
 
         cashPaidTotal += thisCash
 
-        // 1️⃣ Manual "Pay on the bill" partial cash
+        // 1️⃣ Manual partial cash
         if let manual = manualCashTargetAmount {
             remainingToPay = max(remainingToPay - manual, 0)
             manualCashTargetAmount = nil
             activeSplitIndex = nil
 
-            if remainingToPay > 0 {
-                // e.g. 3 total, paid 1 → remain 2 → stay in payment flow (NO submit)
-                return
-            } else {
-                // manual cash covered the rest → finish order
+            if remainingToPay <= 0 {
                 playSuccessAndCompleteOrder()
-                return
             }
+            return
         }
 
         // 2️⃣ Split-mode cash (one split part)
         if isSplitMode, let idx = activeSplitIndex {
-            markPartPaid(idx)        // updates remainingToPay
+            markPartPaid(idx)
             activeSplitIndex = nil
             manualCashTargetAmount = nil
 
@@ -8780,7 +9047,7 @@ struct OrderFlowView: View {
             return
         }
 
-        // 3️⃣ Simple non-split cash (may be partial!)
+        // 3️⃣ Simple non-split cash (may be partial)
         if remainingToPay == 0 {
             remainingToPay = initialPaymentTarget
         }
@@ -8788,12 +9055,7 @@ struct OrderFlowView: View {
         remainingToPay = max(remainingToPay - thisCash, 0)
 
         if remainingToPay <= 0 {
-            // All paid (maybe card + cash mix) → submit order
             playSuccessAndCompleteOrder()
-        } else {
-            // e.g. total 3, paid 1 → remainingToPay = 2
-            // 👉 stay in charge step, show 2 as remaining, NO submit.
-            return
         }
     }
 
@@ -8930,6 +9192,7 @@ struct OrderFlowView: View {
                         PrinterManager.shared.openCashDrawer()
                         cashPaid = true
                         playCashSuccessOnly()
+                        completeWithCash()
                     } label: {
                         Text(isRtl ? "שולם" : "Paid")
                             .font(.system(size: 18, weight: .bold))
@@ -8950,7 +9213,7 @@ struct OrderFlowView: View {
                       
 
                         Button {
-                            completeWithCash()
+                            onFinish()
                         } label: {
                             Text(isRtl ? "סיים" : "Finish")
                                 .font(.system(size: 18, weight: .bold))
