@@ -121,7 +121,8 @@ final class MenuApiModel: ObservableObject {
                 if let order = wrapper.categoryOrder, !order.isEmpty {
                     await MainActor.run {
                         self.categoryOrder = order
-                        UserDefaults.standard.set(order, forKey: "categoryOrder")  // optional cache
+                        let shopId = UserDefaults.standard.string(forKey: "shopId") ?? "0"
+                        UserDefaults.standard.set(order, forKey: "cash.categoryOrder.shop\(shopId)")
                     }
                 }
 
@@ -656,6 +657,11 @@ enum OrderAPI {
             "orderSource": normalizedSource
         ]
 
+        if let zcreditMeta, !zcreditMeta.isEmpty {
+            payload["zcredit"] = zcreditMeta           // ✅ best: namespaced
+            // or: payload["paymentMeta"] = zcreditMeta // alternative
+        }
+        
         if let orderId { payload["orderId"] = orderId }
         if let ticketNumber { payload["ticketNumber"] = ticketNumber }
 
@@ -1991,25 +1997,24 @@ import Foundation
 
 @MainActor
 final class ReportPreviewModel: ObservableObject {
-    @Published var data: PrinterManager.SalesReportData
-    @Published var isLoading: Bool = false
+    @Published var data: PrinterManager.SalesReportData?
+    private let initial: PrinterManager.SalesReportData   // ✅ keep a clean base
+
+    @Published var isLoading = false
     @Published var loadError: String? = nil
     @Published var vatRate: Double = 0.18
 
     init(initial: PrinterManager.SalesReportData) {
-        self.data = initial
+        self.initial = initial
+        self.data = nil          // ✅ empty until load finishes
     }
+    
     func printCurrentReport(type: CashPointView.ReportType) {
-        // Prevent printing while loading / error
         if isLoading { return }
         if loadError != nil { return }
+        guard let d = data else { return }     // ✅ add this
 
-        // IMPORTANT:
-        // data already contains restored Z totals if restoreMode == true
-        PrinterManager.shared.printSalesReport(
-            data,
-            type: type
-        )
+        PrinterManager.shared.printSalesReport(d, type: type)
     }
 
     // ✅ NEW: optional date param for restore (used for Z restore)
@@ -2017,72 +2022,55 @@ final class ReportPreviewModel: ObservableObject {
         guard !isLoading else { return }
         isLoading = true
         loadError = nil
+        data = nil                  // ✅ clears UI while loading
         defer { isLoading = false }
 
         do {
             switch type {
+
             case .x:
                 let res = try await fetchXReport(miniAppId: shopId)
-                self.data = PrinterManager.SalesReportData.applyingXReport(res, onto: self.data)
+                self.data = PrinterManager.SalesReportData
+                    .applyingXReport(res, onto: initial)   // ✅ use initial (clean base)
 
             case .z:
-                // ✅ Restore date (Z) → call /api/zreports/by-day?day=YYYY-MM-DD
+                // ✅ Restore date (Z)
                 if let date {
                     let tz = TimeZone(identifier: "Asia/Jerusalem") ?? .current
                     let ymd = Self.ymd(date, tz: tz)
 
                     let row = try await fetchZByDay(miniAppId: shopId, dayYMD: ymd)
-
-                    // ✅ vat rate comes from DB row
                     self.vatRate = row.VatRate
 
-                    // ✅ Map DB totals into your report preview model
-                    var d = self.data
+                    var d = initial   // ✅ clean base, no stale values
 
-                    // -------------------------
-                    // Sales (gross + net)
-                    // -------------------------
+                    // Sales
                     d.totalSalesIncVat = row.GrossTotal
-                    d.grandTotal       = row.GrossTotal - row.VatTotal   // net (ex VAT)
+                    d.grandTotal       = row.NetTotal
 
-                    // -------------------------
-                    // Tips ✅
-                    // -------------------------
+                    // Tips
                     d.tipBaseTotal = row.TipsTotal
                     d.tipsTotal    = row.TipsTotal
 
-                    // -------------------------
-                    // Payments (collections)
-                    // ✅ IMPORTANT: cashAmount INCLUDES tips
-                    // -------------------------
+                    // Payments (cash includes tips)
                     let cashWithTips = row.CashTotal + row.TipsTotal
-
                     d.cashAmount = cashWithTips
                     d.cardAmount = row.CardTotal
-
                     d.cashCount  = row.CashCount
                     d.cardCount  = row.CardCount
 
-                    // total collections (cash-with-tips + card)
                     d.collectionsTotalAmount = cashWithTips + row.CardTotal
                     d.collectionsTotalCount  = row.CashCount + row.CardCount + row.MixedCount
 
-                    // -------------------------
                     // Cash report section
-                    // If you want drawer totals to reflect "cash incl tips"
-                    // -------------------------
-                    d.closedDrawersAmount      = cashWithTips
-                    d.drawerTotalAmount        = cashWithTips
-                    d.mainDrawerAmount         = cashWithTips
-                    // keep host station / open drawers / deposits from DB if you have them;
-                    // otherwise zero them to avoid stale values:
-                    d.openDrawersAmount        = 0
-                    d.depositWithdrawAmount    = 0
-                    d.hostStationDrawerAmount  = 0
+                    d.closedDrawersAmount     = cashWithTips
+                    d.drawerTotalAmount       = cashWithTips
+                    d.mainDrawerAmount        = cashWithTips
+                    d.openDrawersAmount       = 0
+                    d.depositWithdrawAmount   = 0
+                    d.hostStationDrawerAmount = 0
 
-                    // -------------------------
-                    // Optional: clear / set “restaurant/TA” so no stale values
-                    // -------------------------
+                    // Service split
                     d.totalRestaurantIncVat = row.RestaurantGross
                     d.totalTAIncVat         = row.TaGross
                     d.dinersRestaurant      = row.RestaurantCount
@@ -2090,31 +2078,29 @@ final class ReportPreviewModel: ObservableObject {
                     d.ppaRestaurant         = 0
                     d.ppaTA                 = 0
 
-                    // Optional: per-channel tips not available yet
-                    d.tipRestaurant       = 0
-                    d.tipBarTakeaway      = 0
-                    d.extraTipTotal       = 0
-                    d.extraTipRestaurant  = 0
-                    d.extraTipBar         = 0
+                    // Not available yet
+                    d.tipRestaurant      = 0
+                    d.tipBarTakeaway     = 0
+                    d.extraTipTotal      = 0
+                    d.extraTipRestaurant = 0
+                    d.extraTipBar        = 0
 
                     self.data = d
                     return
                 }
 
-                // ✅ Normal Z (no restore date): keep your existing behaviour for now
+                // ✅ Normal Z (no restore date) — for now you’re using X endpoint logic
                 let res = try await fetchXReport(miniAppId: shopId)
-                self.data = PrinterManager.SalesReportData.applyingXReport(res, onto: self.data)
+                self.data = PrinterManager.SalesReportData
+                    .applyingXReport(res, onto: initial)   // ✅ use initial (not zero)
+            }
 
-                // ✅ Normal Z (no restore date) – keep your existing behaviour for now
-}
         } catch {
-            // ✅ NEVER show empty error
             let ns = error as NSError
             let body = (ns.userInfo[NSLocalizedDescriptionKey] as? String) ?? ""
             self.loadError = body.isEmpty ? String(describing: error) : body
         }
     }
-
     // MARK: - X report
 
     private func fetchXReport(miniAppId: Int) async throws -> XReportApiResponse {
@@ -2985,3 +2971,42 @@ private func diningModeFromIntent(_ raw: String) -> DiningMode {
     }
 }
 
+
+ func emptySalesReportData() -> PrinterManager.SalesReportData {
+    PrinterManager.SalesReportData(
+        ppaRestaurant: 0,
+        dinersRestaurant: 0,
+        totalRestaurantIncVat: 0,
+        ppaRestaurantValue: 0,
+        ppaTA: 0,
+        dinersTA: 0,
+        totalTAIncVat: 0,
+        totalSalesIncVat: 0,
+        tipsTotal: 0,
+        grandTotal: 0,
+        cashAmount: 0,
+        cashCount: 0,
+        cardAmount: 0,
+        cardCount: 0,
+        collectionsTotalAmount: 0,
+        collectionsTotalCount: 0,
+        closedDrawersAmount: 0,
+        openDrawersAmount: 0,
+        depositWithdrawAmount: 0,
+        drawerTotalAmount: 0,
+        mainDrawerAmount: 0,
+        hostStationDrawerAmount: 0,
+        tipBaseTotal: 0,
+        tipRestaurant: 0,
+        tipBarTakeaway: 0,
+        extraTipTotal: 0,
+        extraTipRestaurant: 0,
+        extraTipBar: 0,
+        ordersOTHAmount: 0,  ordersOTHCount: 0,
+        itemsOTHAmount: 0,   itemsOTHCount: 0,
+        canceledItemsAmount: 0, canceledItemsCount: 0,
+        refundedItemsAmount: 0, refundedItemsCount: 0,
+        discountsAmount: 0,   discountsCount: 0,
+        discountsRefundAmount: 0, discountsRefundCount: 0
+    )
+}

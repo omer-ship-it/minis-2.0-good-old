@@ -17,7 +17,11 @@ struct DigitalBonesView: View {
             }
         }
     }
-    
+    @AppStorage("DigitalBones.selectedStation")
+    private var selectedStationRaw: String = Station.kitchen.rawValue
+
+    @State private var selectedStation: Station = .kitchen
+    @State private var toastText: String? = nil
     private func resolvePrinter(for line: BonesLineDTO) -> String? {
         // 1) station from server
         if let s = line.station?.trimmingCharacters(in: .whitespacesAndNewlines), !s.isEmpty {
@@ -25,6 +29,69 @@ struct DigitalBonesView: View {
         }
         // 2) printer from menu JSON by productId
         return MenuCatalog.shared.printer(for: line.productId)
+    }
+    
+    private func showToast(_ text: String) {
+        withAnimation(.easeInOut(duration: 0.15)) { toastText = text }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            withAnimation(.easeInOut(duration: 0.15)) { toastText = nil }
+        }
+    }
+
+    private func normalizeILPhoneToE164(_ raw: String?) -> String? {
+        let s = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.isEmpty { return nil }
+        if s.hasPrefix("+") { return s }
+        let digits = s.replacingOccurrences(of: "[^0-9]", with: "", options: .regularExpression)
+        if digits.hasPrefix("0"), digits.count >= 9 { return "+972" + digits.dropFirst() }
+        if digits.hasPrefix("972") { return "+" + digits }
+        return nil
+    }
+
+    private func callCustomer(_ bone: Bone) {
+        guard let toRaw = normalizeILPhoneToE164(bone.customerPhone) else {
+            showToast("אין טלפון")
+            print("📞 CALL DEBUG: missing phone, raw=", bone.customerPhone ?? "nil")
+            return
+        }
+
+        // ✅ IMPORTANT: force-encode "+" so server doesn't treat it as space
+        let encodedTo = toRaw.replacingOccurrences(of: "+", with: "%2B")
+
+        guard let url = URL(string: "https://minis.studio/api/admin/voice/call?to=\(encodedTo)") else {
+            showToast("Bad URL")
+            print("📞 CALL DEBUG: bad URL from toRaw=", toRaw, "encodedTo=", encodedTo)
+            return
+        }
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.httpBody = Data() // avoids IIS 411
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        print("📞 CALL DEBUG → POST", url.absoluteString)
+
+        Task {
+            do {
+                let (data, resp) = try await URLSession.shared.data(for: req)
+
+                let http = resp as? HTTPURLResponse
+                let code = http?.statusCode ?? -1
+                let body = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
+
+                print("📞 CALL DEBUG ← status:", code)
+                print("📞 CALL DEBUG ← body:", body)
+
+                if code == 200 {
+                    showToast("Called")
+                } else {
+                    showToast("Call failed (\(code))")
+                }
+            } catch {
+                print("📞 CALL DEBUG ❌ network error:", error.localizedDescription)
+                showToast("Call failed")
+            }
+        }
     }
 
     private func stationFromPrinter(_ p: String?) -> Station {
@@ -40,6 +107,7 @@ struct DigitalBonesView: View {
         var orderId: Int
         var orderNumber: String
         var customerName: String
+        var customerPhone: String?
         var items: [String]
         var timeText: String
         var serviceText: String?
@@ -113,7 +181,39 @@ struct DigitalBonesView: View {
         var entries: [BasketEntry] = []
         var nextLineId = 1
 
+        print("🖨️ [BONES PRINT] orderId=\(order.id) lines=\(order.lines.count)")
+
         for ln in order.lines {
+            let stationRaw = (ln.station ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let catalogPrinterRaw = MenuCatalog.shared.printer(for: ln.productId)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+            let resolved = resolvePrinter(for: ln)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased() ?? ""
+
+            let productIdText = ln.productId.map(String.init) ?? "nil"
+
+            // ✅ strict Kitchen-only
+            let isKitchen = (resolved == "kitchen")
+
+            if !isKitchen {
+                print("""
+                ⏭️ [SKIP] productId=\(productIdText) name="\(ln.name)"
+                   station="\((stationRaw))"
+                   catalogPrinter="\((catalogPrinterRaw))"
+                   resolvedPrinter="\((resolved))"
+                """)
+                continue
+            }
+
+            print("""
+            ✅ [KEEP] productId=\(productIdText) name="\(ln.name)"
+               station="\((stationRaw))"
+               catalogPrinter="\((catalogPrinterRaw))"
+               resolvedPrinter="\((resolved))"
+            """)
+
             let qty = max(ln.qty, 1)
             let cleanName = ln.name.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -124,10 +224,7 @@ struct DigitalBonesView: View {
                 .filter { !$0.isEmpty }
                 .joined(separator: " · ")
 
-            // ✅ resolve printer
-            let resolvedPrinter = resolvePrinter(for: ln)
-
-            // ✅ build item: prefer MenuCatalog (has printer), else fallback with printer
+            // Prefer MenuCatalog item (has printer/price if loaded)
             let item: ShellMenuItem = {
                 if let menuItem = MenuCatalog.shared.item(for: ln.productId) {
                     return menuItem
@@ -142,9 +239,11 @@ struct DigitalBonesView: View {
                     description: nil,
                     status: nil,
                     stockQuantity: nil,
-                    printer: resolvedPrinter ?? "Bar"
+                    printer: "kitchen"
                 )
             }()
+
+            let unit = MenuCatalog.shared.price(for: ln.productId)
 
             entries.append(
                 BasketEntry(
@@ -152,20 +251,17 @@ struct DigitalBonesView: View {
                     item: item,
                     quantity: qty,
                     subtitle: modsClean.isEmpty ? nil : modsClean,
-                    unitPrice: 0
+                    unitPrice: unit
                 )
             )
             nextLineId += 1
         }
 
+        print("🖨️ [BONES PRINT] keptLines=\(entries.count)")
         return entries
     }
     // MARK: - State
 
-    @AppStorage("DigitalBones.selectedStation")
-    private var selectedStationRaw: String = Station.bar.rawValue   // persisted raw value
-
-    @State private var selectedStation: Station = .bar              // real mutable state
     @State private var showStationPicker = false
 
     @State private var toPrepare: [Bone] = []      // top row
@@ -188,6 +284,66 @@ struct DigitalBonesView: View {
         .autoconnect()
 
     // MARK: - Body
+    
+    private func normalizedPrinterKey(_ raw: String?) -> String {
+        let s = (raw ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        // ✅ support hebrew / variants
+        if s.contains("מטבח") { return "kitchen" }
+        if s.contains("kitchen") { return "kitchen" }
+
+        if s.contains("בר") { return "bar" }
+        if s.contains("bar") { return "bar" }
+
+        if s.contains("bakery") || s.contains("מאפה") || s.contains("ווטרינה") || s.contains("ויטרינה") {
+            return "bakery"
+        }
+
+        return s
+    }
+
+    private func isKitchenLine(_ line: BonesLineDTO) -> Bool {
+        // ✅ STRICT: use Product.printer from MenuCatalog (menu JSON)
+        let productPrinterRaw: String? = {
+            if let pid = line.productId,
+               let item = MenuCatalog.shared.item(for: pid) {
+                return item.printer
+            }
+            // fallback if item(for:) not available
+            return MenuCatalog.shared.printer(for: line.productId)
+        }()
+
+        let productKey = normalizedPrinterKey(productPrinterRaw)
+
+        // ✅ If we have a productId, we enforce catalog printer strictly
+        if line.productId != nil {
+            let ok = (productKey == "kitchen")
+
+            if !ok {
+                let pid = line.productId.map(String.init) ?? "nil"
+              //  print("⏭️ [BONES UI SKIP - STRICT] pid=\(pid) name=\(line.name) productPrinter=\(productKey)")
+            } else {
+                let pid = line.productId.map(String.init) ?? "nil"
+                print("✅ [BONES UI KEEP - STRICT] pid=\(pid) name=\(line.name) productPrinter=\(productKey)")
+            }
+
+            return ok
+        }
+
+        // ✅ If productId is missing, fallback to your old resolve logic (best-effort)
+        let resolvedKey = normalizedPrinterKey(resolvePrinter(for: line))
+        let ok = (resolvedKey == "kitchen")
+
+        if !ok {
+            print("⏭️ [BONES UI SKIP - NO PID] name=\(line.name) resolved=\(resolvedKey)")
+        } else {
+            print("✅ [BONES UI KEEP - NO PID] name=\(line.name) resolved=\(resolvedKey)")
+        }
+
+        return ok
+    }
 
     var body: some View {
         GeometryReader { geo in
@@ -328,26 +484,28 @@ struct DigitalBonesView: View {
                                     ScrollView(.horizontal, showsIndicators: false) {
                                         HStack(alignment: .top, spacing: hSpacing) {
                                             // received / בהכנה
-                                            ForEach(toPrepare) { bone in
-                                                BoneCardView(
-                                                    bone: bone,
-                                                    slotLabel: nil,
-                                                    actionTitle: "פרטים",
-                                                    actionColor: brandColor,
-                                                    maxTicketHeight: max(topMaxTicketHeight, bottomMaxTicketHeight)
-                                                ) {
-                                                    withAnimation {
-                                                        selectedBone = bone
+                                            ForEach(readySlots.indices, id: \.self) { slotIndex in
+                                                if let bone = readySlots[slotIndex] {
+                                                    BoneCardView(
+                                                        bone: bone,
+                                                        slotLabel: "עמדה \(slotIndex + 1)",
+                                                        actionTitle: "נאסף",
+                                                        actionColor: brandColor,
+                                                        maxTicketHeight: bottomMaxTicketHeight,
+                                                        action: { markCollectedUI(at: slotIndex) },
+                                                        secondaryTitle: "התקשר",
+                                                        secondaryAction: { callCustomer(bone) }
+                                                    )
+                                                    .frame(width: cardWidth)
+                                                    .onTapGesture {
+                                                        withAnimation(.easeInOut(duration: 0.2)) {
+                                                            selectedBone = bone
+                                                        }
                                                     }
-                                                }
-                                                .frame(width: cardWidth)
-                                                .onTapGesture {
-                                                    withAnimation {
-                                                        selectedBone = bone
-                                                    }
+                                                } else {
+                                                    EmptySlotView(index: slotIndex, width: cardWidth)
                                                 }
                                             }
-                                            
                                             // ready (if you want, but it's already flattened into readyBones)
                                             ForEach(readyBones) { bone in
                                                 BoneCardView(
@@ -558,17 +716,18 @@ struct DigitalBonesView: View {
                                         .padding(.bottom, 4)
                                         
                                         HStack(alignment: .top, spacing: hSpacing) {
-                                            ForEach(readySlots.indices, id: \.self) { index in
-                                                if let bone = readySlots[index] {
+                                            ForEach(readySlots.indices, id: \.self) { slotIndex in
+                                                if let bone = readySlots[slotIndex] {
                                                     BoneCardView(
                                                         bone: bone,
-                                                        slotLabel: "עמדה \(index + 1)",
+                                                        slotLabel: "עמדה \(slotIndex + 1)",
                                                         actionTitle: "נאסף",
                                                         actionColor: brandColor,
-                                                        maxTicketHeight: bottomMaxTicketHeight
-                                                    ) {
-                                                        markCollectedUI(at: index)
-                                                    }
+                                                        maxTicketHeight: bottomMaxTicketHeight,
+                                                        action: { markCollectedUI(at: slotIndex) },
+                                                        secondaryTitle: "התקשר",
+                                                        secondaryAction: { callCustomer(bone) }
+                                                    )
                                                     .frame(width: cardWidth)
                                                     .onTapGesture {
                                                         withAnimation(.easeInOut(duration: 0.2)) {
@@ -576,7 +735,7 @@ struct DigitalBonesView: View {
                                                         }
                                                     }
                                                 } else {
-                                                    EmptySlotView(index: index, width: cardWidth)
+                                                    EmptySlotView(index: slotIndex, width: cardWidth)
                                                 }
                                             }
                                         }
@@ -638,6 +797,20 @@ struct DigitalBonesView: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
                     }
+                    if let t = toastText {
+                        VStack {
+                            Spacer()
+                            Text(t)
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 10)
+                                .background(Color.black.opacity(0.75))
+                                .clipShape(Capsule())
+                                .padding(.bottom, 26)
+                        }
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
 
                     // Overlay only in active tab (or in both, if you like)
                     if let bone = selectedBone {
@@ -680,7 +853,8 @@ struct DigitalBonesView: View {
                                             entries: entriesArray,
                                             total: total,
                                             diningMode: mode,
-                                            customerName: nameSnapshot
+                                            customerName: nameSnapshot,
+                                            customerPhone: nil
                                         )
                                     },
                                     onResendMessage: {
@@ -732,6 +906,7 @@ struct DigitalBonesView: View {
         }
         .onAppear {
             selectedStation = Station(rawValue: selectedStationRaw) ?? .kitchen
+            selectedStationRaw = Station.kitchen.rawValue
         }
         .task {
             await loadOrders(showSpinner: true)
@@ -917,7 +1092,9 @@ struct DigitalBonesView: View {
         let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 
         let stationFilteredBase = allOrders.filter { order in
-            order.stations.contains(selectedStation)
+            // ✅ only show orders that have kitchen items
+            let items = order.stationItems[.kitchen] ?? []
+            return !items.isEmpty
         }
 
         let relevant: [BoneOrder]
@@ -936,7 +1113,7 @@ struct DigitalBonesView: View {
 
         func stationBone(from order: BoneOrder) -> Bone {
             var b = order.bone
-            b.items = order.stationItems[selectedStation] ?? order.bone.items
+            b.items = order.stationItems[.kitchen] ?? []   // ✅ always kitchen
             return b
         }
 
@@ -996,6 +1173,7 @@ struct DigitalBonesView: View {
         let scheduledFor: Date?
         let customerName: String
         let customerDisplayName: String?
+        let customerPhone: String?          // ✅ NEW
         let totalGBP: Double
         let itemSummary: String
         let isDelivery: Bool
@@ -1003,18 +1181,16 @@ struct DigitalBonesView: View {
         let lines: [BonesLineDTO]
         let status: Int?
 
-        // 👇 NEW
+        // existing extras
         let currency: String?
-        let service: String?          // "ta" / "sit"
-        let paymentMethod: String?    // "paid" / "unpaid" etc.
+        let service: String?
+        let paymentMethod: String?
 
         enum CodingKeys: String, CodingKey {
             case id, ticketNumber, source, bucket, stage, placedAt, scheduledFor,
-                 customerName, customerDisplayName, totalGBP, itemSummary,
+                 customerName, customerDisplayName, customerPhone, totalGBP, itemSummary,
                  isDelivery, shortCode, lines, status
             case Status = "Status"
-
-            // 👇 NEW KEYS (match JSON)
             case currency
             case service
             case paymentMethod
@@ -1022,22 +1198,26 @@ struct DigitalBonesView: View {
 
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
-            id           = try c.decode(Int.self,    forKey: .id)
-            ticketNumber = try? c.decodeIfPresent(Int.self, forKey: .ticketNumber)
+
+            id           = try c.decode(Int.self, forKey: .id)
+            ticketNumber = try c.decodeIfPresent(Int.self, forKey: .ticketNumber)
             source       = try c.decode(String.self, forKey: .source)
             bucket       = try c.decode(String.self, forKey: .bucket)
             stage        = try c.decode(String.self, forKey: .stage)
-            placedAt     = try c.decode(Date.self,   forKey: .placedAt)
-            scheduledFor = try? c.decodeIfPresent(Date.self, forKey: .scheduledFor)
-            customerName = try c.decode(String.self, forKey: .customerName)
-            customerDisplayName = try? c.decodeIfPresent(String.self, forKey: .customerDisplayName)
+            placedAt     = try c.decode(Date.self, forKey: .placedAt)
+            scheduledFor = try c.decodeIfPresent(Date.self, forKey: .scheduledFor)
+
+            customerName        = try c.decode(String.self, forKey: .customerName)
+            customerDisplayName = try c.decodeIfPresent(String.self, forKey: .customerDisplayName)
+            customerPhone       = try c.decodeIfPresent(String.self, forKey: .customerPhone)
+
             totalGBP     = try c.decode(Double.self, forKey: .totalGBP)
             itemSummary  = try c.decode(String.self, forKey: .itemSummary)
-            isDelivery   = try c.decode(Bool.self,   forKey: .isDelivery)
-            shortCode    = try? c.decodeIfPresent(String.self, forKey: .shortCode)
+            isDelivery   = try c.decode(Bool.self, forKey: .isDelivery)
+            shortCode    = try c.decodeIfPresent(String.self, forKey: .shortCode)
             lines        = try c.decode([BonesLineDTO].self, forKey: .lines)
 
-            // existing status fallback logic
+            // status fallback logic (kept exactly)
             if let s = try? c.decodeIfPresent(Int.self, forKey: .status) {
                 status = s
             } else if let sStr = try? c.decodeIfPresent(String.self, forKey: .status),
@@ -1052,10 +1232,9 @@ struct DigitalBonesView: View {
                 status = nil
             }
 
-            // 👇 NEW FIELD DECODING
-            currency      = try? c.decodeIfPresent(String.self, forKey: .currency)
-            service       = try? c.decodeIfPresent(String.self, forKey: .service)
-            paymentMethod = try? c.decodeIfPresent(String.self, forKey: .paymentMethod)
+            currency      = try c.decodeIfPresent(String.self, forKey: .currency)
+            service       = try c.decodeIfPresent(String.self, forKey: .service)
+            paymentMethod = try c.decodeIfPresent(String.self, forKey: .paymentMethod)
         }
     }
     
@@ -1180,37 +1359,34 @@ struct DigitalBonesView: View {
         ]
 
         for l in dto.lines {
+
+            // ✅ HARD FILTER: kitchen lines only
+            guard isKitchenLine(l) else { continue }
+
             let qty = max(l.qty, 1)
 
             let modsRaw = l.modifiers ?? ""
             let separators = CharacterSet(charactersIn: "•·")
             let modifierParts = modsRaw
                 .components(separatedBy: separators)
-                .map { $0.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines) }
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty }
 
             let hasSizeWord = modsRaw.contains("גודל")
-            let baseName = l.name.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+            let baseName = l.name.trimmingCharacters(in: .whitespacesAndNewlines)
 
             let adjustedName: String = {
-                if baseName == "אספרסו", !hasSizeWord {
-                    return "אספרסו קצר"
-                }
-                if baseName == "הפוך", !hasSizeWord {
-                    return "הפוך קטן"
-                }
+                if baseName == "אספרסו", !hasSizeWord { return "אספרסו קצר" }
+                if baseName == "הפוך",   !hasSizeWord { return "הפוך קטן" }
                 return baseName
             }()
 
             let entry = RawEntry(name: adjustedName, qty: qty, modifiers: modifierParts)
 
-            // For whole-order view (invoice etc.)
             rawEntriesAll.append(entry)
-
-            // For per-station view
-            let st = classifyStation(for: l)
-            rawEntriesByStation[st, default: []].append(entry)
+            rawEntriesByStation[.kitchen, default: []].append(entry)  // ✅ only kitchen
         }
+        
 
         func mergedEntries(from entries: [RawEntry]) -> [RawEntry] {
             var merged: [RawEntry] = []
@@ -1246,9 +1422,10 @@ struct DigitalBonesView: View {
         let mergedBar     = mergedEntries(from: rawEntriesByStation[.bar] ?? [])
         let mergedKitchen = mergedEntries(from: rawEntriesByStation[.kitchen] ?? [])
 
+
         var stationItems: [Station: [String]] = [:]
-        stationItems[.bar]     = buildItemLines(from: mergedBar)
         stationItems[.kitchen] = buildItemLines(from: mergedKitchen)
+        stationItems[.bar] = []   // ✅ keep empty so nothing leaks
 
         // Invoice items use the mergedAll (whole order)
         let totalQty = max(1, dto.lines.reduce(0) { $0 + max($1.qty, 1) })
@@ -1266,10 +1443,10 @@ struct DigitalBonesView: View {
         }
 
         // Stations set (which stations are involved)
-        let stationsSet = Set(dto.lines.map { classifyStation(for: $0) })
+        let stationsSet: Set<Station> = mergedKitchen.isEmpty ? [] : [.kitchen]
 
         // Default bone items = full order (used for e.g. invoice overlay if you want)
-        let boneAllItems = buildItemLines(from: mergedAll)
+        let boneAllItems = buildItemLines(from: mergedKitchen)
         let displayNumber = dto.ticketNumber ?? dto.id
 
         let bone = Bone(
@@ -1277,7 +1454,7 @@ struct DigitalBonesView: View {
             orderId: dto.id,
             orderNumber: String(displayNumber),
             customerName: displayName.replacingOccurrences(of: "Customer", with: ""),
-            items: boneAllItems,
+            customerPhone: dto.customerPhone, items: boneAllItems,
             timeText: timeText,
             serviceText: serviceText
         )
@@ -1357,6 +1534,7 @@ struct DigitalBonesView: View {
                 return
             }
 
+            
             let oldIds = Set(allOrders.map { $0.id })
             let mappedOrders = parsed.orders.map(mapOrder(_:))
 
@@ -1840,6 +2018,7 @@ fileprivate func makeKDSAdminOrder(from bone: DigitalBonesView.Bone) -> KDSAdmin
         placedAt: Date(),
         scheduledFor: nil,
         customerName: bone.customerName,
+        customerPhone: bone.customerPhone,   // ✅ ADD THIS
         totalGBP: totalGBP,
         itemSummary: "",
         isDelivery: false,

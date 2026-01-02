@@ -554,9 +554,27 @@ func visualHebrew(_ s: String) -> String {
     String(s.reversed())
 }
 
+func containsHebrew(_ s: String) -> Bool {
+    return s.range(of: #"\p{Hebrew}"#, options: .regularExpression) != nil
+}
+
+/// (optional) better heuristic for mixed strings like "John (יוחנן)"
+func isMostlyHebrew(_ s: String) -> Bool {
+    var he = 0
+    var latin = 0
+    for scalar in s.unicodeScalars {
+        if CharacterSet(charactersIn: "\u{0590}"..."\u{05FF}").contains(scalar) { he += 1 }
+        else if CharacterSet.letters.contains(scalar) { latin += 1 }
+    }
+    return he > latin
+}
 /// Encode Hebrew line as Windows-1255 (or ISO-8859-8), with LF at the end
+/// Encode line as Windows-1255 (or ISO-8859-8), with LF at the end.
+/// ✅ Hebrew gets visual flip, English stays normal.
 func hebrewLineData(_ s: String) -> Data {
-    let visual = visualHebrew(s)
+    // Choose ONE of these:
+    // let visual = containsHebrew(s) ? visualHebrew(s) : s
+    let visual = isMostlyHebrew(s) ? visualHebrew(s) : s   // better for mixed text
 
     // Try Windows-1255
     let win1255Enc = CFStringConvertEncodingToNSStringEncoding(
@@ -574,9 +592,10 @@ func hebrewLineData(_ s: String) -> Data {
         return d + Data([0x0A])
     }
 
-    // Last fallback: UTF-8 (won't look right, but avoids crash)
+    // Last fallback: UTF-8
     return Data((visual + "\n").utf8)
 }
+
 fileprivate func stationFromFilter(_ f: StationFilter) -> Station? {
     switch f {
     case .all:     return nil
@@ -782,6 +801,30 @@ final class PrinterManager {
     private let TabitBarPrinterIP     = "10.100.10.234"
     private let TabitBakeryPrinterIP  = "10.100.10.230"   // adjust if needed
     private let TabitKitchenPrinterIP = "10.100.10.232"
+    private let KitchenBackPrinterIP = "10.100.10.238"
+    // ✅ Rongta KitchenBack tuning (make it match the others)
+    private let kitchenBackFamily: PrinterFamily = .ron      // uses ESC t 33
+    private let kitchenBackRotated: Bool = false              // or false if you don’t want rotation
+    private let kitchenBackLineWidth: Int = 42               // match the rest
+    
+    private func sortForPrint(_ lines: [KDSOrderLine]) -> [KDSOrderLine] {
+        lines.sorted {
+            // stable, deterministic
+            let s0 = ($0.station ?? "").lowercased()
+            let s1 = ($1.station ?? "").lowercased()
+            if s0 != s1 { return s0 < s1 }
+
+            let c0 = normalizeCategory($0.category ?? "")
+            let c1 = normalizeCategory($1.category ?? "")
+            if c0 != c1 { return c0 < c1 }
+
+            let n0 = $0.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            let n1 = $1.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            if n0 != n1 { return n0 < n1 }
+
+            return ($0.productId ?? 0) < ($1.productId ?? 0)
+        }
+    }
 
     // MARK: - Which set is active? (global toggle)
 
@@ -790,6 +833,13 @@ final class PrinterManager {
         case tabit
     }
 
+    private func isToastLine(_ ln: KDSOrderLine) -> Bool {
+        let name = ln.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if name.contains("טוסט") { return true }
+        if name.lowercased().contains("toast") { return true }
+        return false
+    }
+    
     private let printerSetKey = "kds.printer.set"
 
     var activePrinterSet: PrinterSet {
@@ -986,27 +1036,38 @@ final class PrinterManager {
 
     // MARK: - Tax invoice
     let taBarText = "** TA **"  // or "TA"
+    func reverseNumber(_ s: String) -> String {
+        String(s.reversed())
+    }
     
     func printTaxInvoice(
         invoiceNumber: Int,
         date: Date = Date(),
         customerName: String?,
         items: [InvoiceItem],
-        vatRate: Double = 0.18
+        vatRate: Double = 0.18,
+
+        // ✅ Required to make this a "Tax Invoice / Receipt" (i.e., paid now)
+        paidAmount: Double,
+        paymentMethod: String,        // e.g. "Credit Card" / "Cash" / "Transfer"
+        cardBrand: String? = nil,      // e.g. "Visa"
+        cardLast4: String? = nil,      // e.g. "1234"
+        installments: Int? = nil       // e.g. 3
     ) {
         // ---- BUSINESS DETAILS ----
         let businessName    = "בית העם קונדיטוריה ויין בע\"מ"
         let businessAddress = "מנורה 3 ירושלים"
-        let businessPhone   = "טלפון: 0500000000"
-        let businessVatId   = "ח.פ / עוסק מורשה: 516784139"
+        let businessPhone   = "טלפון: 000000050"
+        let businessVatId   = "ח.פ / עוסק מורשה: 931487615"
 
         // ---- DATE / META ----
         let df = DateFormatter()
         df.locale = Locale(identifier: "he_IL")
         df.dateFormat = "dd/MM/yyyy  HH:mm"
-        let dateText = df.string(from: date)
+        let dateText = reverseNumber(df.string(from: date))
 
-        let invoiceIdText = "‎חשבונית מס/קבלה #\(invoiceNumber)"
+        // ✅ Must say Tax Invoice / Receipt when paid
+        let invoiceIdText = "חשבונית מס/קבלה #\(reverseNumber(String(invoiceNumber)))"
 
         let safeCustomer = (customerName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let customerLine = safeCustomer.isEmpty ? "ללא שם לקוח" : "לקוח: \(safeCustomer)"
@@ -1016,29 +1077,47 @@ final class PrinterManager {
         let net = gross / (1.0 + vatRate)
         let vatAmount = gross - net
 
-        func money(_ value: Double) -> String {
-            String(format: "%.2f", value)
+        func money(_ value: Double) -> String { String(format: "%.2f", value) }
+
+        // ---- PAYMENT (Receipt) LINES ----
+        func paymentLines() -> [String] {
+            var lines: [String] = []
+            lines.append("שולם: \(reverseNumber(money(paidAmount)))")
+            lines.append("אמצעי תשלום: \(paymentMethod)")
+
+            if let last4 = cardLast4?.trimmingCharacters(in: .whitespacesAndNewlines), !last4.isEmpty {
+                var cardLine = "כרטיס: **** \(last4)"
+                if let brand = cardBrand?.trimmingCharacters(in: .whitespacesAndNewlines), !brand.isEmpty {
+                    cardLine += " \(brand)"
+                }
+                lines.append(cardLine)
+            }
+
+            if let n = installments, n > 1 {
+                lines.append("תשלומים: \(n)")
+            }
+
+            return lines
         }
 
         // ---- DEBUG PREVIEW ----
-        Swift.print("══════════ TAX INVOICE PREVIEW #\(invoiceNumber) ══════════")
-        Swift.print("תאריך: \(dateText)")
-        Swift.print("לקוח: \(safeCustomer.isEmpty ? "ללא שם לקוח" : safeCustomer)")
+        Swift.print("══════════ TAX INVOICE/RECEIPT PREVIEW #\(invoiceNumber) ══════════")
+        Swift.print("Date: \(dateText)")
+        Swift.print("Customer: \(safeCustomer.isEmpty ? "No customer name" : safeCustomer)")
         Swift.print("────────────────────────────────────────────")
         for item in items {
             Swift.print("• \(item.quantity)x \(item.name) → \(money(item.lineTotal))")
         }
         Swift.print("────────────────────────────────────────────")
-        Swift.print("סה\"כ לפני מע\"מ: \(money(net))")
-        Swift.print("מע\"מ \(Int(vatRate * 100))%: \(money(vatAmount))")
-        Swift.print("סה\"כ לתשלום: \(money(gross))")
+        Swift.print("Net (before VAT): \(money(net))")
+        Swift.print("VAT \(Int(vatRate * 100))%: \(money(vatAmount))")
+        Swift.print("Total: \(money(gross))")
+        Swift.print("Paid: \(money(paidAmount)) via \(paymentMethod)")
         Swift.print("════════════════════════════════════════════\n")
 
         // ---- LAYOUT CONSTANTS ----
         let lineWidth = 42
-        func separatorLine() -> Data {
-            asciiLine(String(repeating: "-", count: lineWidth))
-        }
+        func separatorLine() -> Data { asciiLine(String(repeating: "-", count: lineWidth)) }
 
         // ---- BUILD ESC/POS JOB ----
         var job = Data()
@@ -1048,10 +1127,10 @@ final class PrinterManager {
         let fam = activeFamily
         job += escSelectHebrew(fam.codePage)
 
-        // ===== TITLE: חשבונית מס (BIG, CENTER) =====
+        // ===== TITLE (BIG, CENTER) =====
         job += EscPos.align(1)
         job += EscPos.style(doubleHeight: true, doubleWidth: true, bold: true)
-        job += hebrewLineData("חשבונית מס")
+        job += hebrewLineData("חשבונית מס/קבלה") // ✅ fixed
 
         // ===== BUSINESS DETAILS (CENTER) =====
         job += EscPos.feed(1)
@@ -1069,6 +1148,12 @@ final class PrinterManager {
         job += hebrewLineData("תאריך: \(dateText)")
         job += hebrewLineData(customerLine)
 
+        // ===== PAYMENT META (CENTER) =====
+        job += EscPos.feed(1)
+        for line in paymentLines() {
+            job += hebrewLineData(line)
+        }
+
         // ===== SEPARATOR =====
         job += EscPos.feed(1)
         job += EscPos.align(0)
@@ -1080,17 +1165,10 @@ final class PrinterManager {
 
         func stripModsForInvoice(_ s: String) -> String {
             var x = s
-
-            // If modifiers appended on next line
             if let r = x.range(of: "\n") { x = String(x[..<r.lowerBound]) }
-
-            // If modifiers appended with separators
             if let r = x.range(of: "·") { x = String(x[..<r.lowerBound]) }
             if let r = x.range(of: ",") { x = String(x[..<r.lowerBound]) }
-
-            // If you have patterns like "Milk: Oat" and want only left side:
             if let r = x.range(of: ":") { x = String(x[..<r.lowerBound]) }
-
             return x.trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
@@ -1106,6 +1184,7 @@ final class PrinterManager {
                 leftPadding: 1
             )
         }
+
         // ===== SEPARATOR =====
         job += EscPos.feed(1)
         job += EscPos.align(0)
@@ -1123,8 +1202,9 @@ final class PrinterManager {
             leftPadding: 1
         )
 
+        // ✅ fixed: 81% -> vatRate
         job += hebrewMixedLineData(
-            label: "מע\"מ 81%",
+            label: "מע\"מ %81",
             price: money(vatAmount),
             totalWidth: lineWidth,
             leftPadding: 1
@@ -1138,7 +1218,15 @@ final class PrinterManager {
             leftPadding: 1
         )
 
+        // Optional but useful: show paid amount (receipt clarity)
         job += EscPos.style(doubleHeight: false, doubleWidth: false, bold: false)
+        job += hebrewMixedLineData(
+            label: "שולם",
+            price: money(paidAmount),
+            totalWidth: lineWidth,
+            leftPadding: 1
+        )
+
         job += EscPos.align(0)
         job += EscPos.feed(4)
         job += EscPos.cut
@@ -1157,11 +1245,10 @@ final class PrinterManager {
         }
 
         let allLines = o.lines
-
-        let kitchenLines: [KDSOrderLine] = allLines.filter { classifyStation(for: $0) == .kitchen }
-        let bakeryLines:  [KDSOrderLine] = allLines.filter { classifyStation(for: $0) == .bakery }
-        let barLines:     [KDSOrderLine] = allLines.filter { classifyStation(for: $0) == .bar }
-
+        let kitchenLines = sortForPrint(allLines.filter { classifyStation(for: $0) == .kitchen })
+        let bakeryLines  = sortForPrint(allLines.filter { classifyStation(for: $0) == .bakery })
+        let barLines     = sortForPrint(allLines.filter { classifyStation(for: $0) == .bar })
+        
         switch station {
         case .kitchen:
             guard !kitchenLines.isEmpty else {
@@ -1169,14 +1256,41 @@ final class PrinterManager {
                 return
             }
 
-            debugTicketPreview(order: o, lines: kitchenLines, stationLabel: "Kitchen")
+            // ✅ Always print ALL kitchen lines to Kitchen (unchanged)
+            do {
+                debugTicketPreview(order: o, lines: kitchenLines, stationLabel: "Kitchen")
+                let host = activeKitchenIP
+                let fam  = activeFamily
+                let job  = makeJob(order: o, lines: kitchenLines, rotated: false, family: fam)
+                Swift.print("🧑‍🍳 KITCHEN: sending \(job.count) bytes to \(host):\(port)")
+                send(job, host: host, dedupeKey: "bone|\(o.id)|kitchen")
+            }
 
-            let host = activeKitchenIP
-            let fam  = activeFamily
-            let job  = makeJob(order: o, lines: kitchenLines, rotated: false, family: fam)
-            Swift.print("🧑‍🍳 KITCHEN: sending \(job.count) bytes to \(host):\(port)")
-            let dk = "bone|\(o.id)|kitchen"
-            send(job, host: host, dedupeKey: dk)
+            // ✅ Additionally print ONLY toast lines to KitchenBack (Rongta)
+            let toastLines = kitchenLines.filter { isToastLine($0) }
+            if !toastLines.isEmpty {
+                debugTicketPreview(order: o, lines: toastLines, stationLabel: "KitchenBack (טוסט)")
+
+                let host = KitchenBackPrinterIP
+
+                // 🔥 FORCE Rongta decoding (ESC t 33) regardless of activePrinterSet
+                let backFamily: PrinterFamily = .ron
+
+                // If your Rongta is physically rotated, set rotated: true (kept true here)
+                let backJob = makeJob(
+                    order: o,
+                    lines: toastLines,
+                    rotated: kitchenBackRotated,
+                    family: kitchenBackFamily,
+                    lineWidth: kitchenBackLineWidth
+                )
+
+                Swift.print("🧑‍🍳 KITCHENBACK (RONGTA): sending \(backJob.count) bytes to \(host):\(port)")
+                send(backJob, host: host, dedupeKey: "bone|\(o.id)|kitchenback|toast")
+            }
+
+            return
+            
 
         case .bakery:
             Swift.print("🧁 BAKERY printing order #\(o.id), lines=",
@@ -1266,6 +1380,11 @@ final class PrinterManager {
 
         let allLines = o.lines
 
+        // ✅ sort once if you added sortForPrint(...)
+        // let kitchenLines = sortForPrint(allLines.filter { classifyStation(for: $0) == .kitchen })
+        // let bakeryLines  = sortForPrint(allLines.filter { classifyStation(for: $0) == .bakery })
+        // let barLines     = sortForPrint(allLines.filter { classifyStation(for: $0) == .bar })
+
         let kitchenLines: [KDSOrderLine] = allLines.filter { classifyStation(for: $0) == .kitchen }
         let bakeryLines:  [KDSOrderLine] = allLines.filter { classifyStation(for: $0) == .bakery }
         let barLines:     [KDSOrderLine] = allLines.filter { classifyStation(for: $0) == .bar }
@@ -1277,52 +1396,82 @@ final class PrinterManager {
 
         let fam = activeFamily
 
+        // ✅ Precompute toast subset BEFORE using it anywhere
+        let toastLines = kitchenLines.filter { isToastLine($0) }
+
+        // ---------------- KITCHEN ----------------
         if !kitchenLines.isEmpty {
-            debugTicketPreview(order: o,
-                               lines: kitchenLines,
-                               stationLabel: "Kitchen (split all)")
+            debugTicketPreview(order: o, lines: kitchenLines, stationLabel: "Kitchen (split all)")
 
             let host = activeKitchenIP
-            let rotated = fam.supportsRotation   // Ron → true, Tabit → false
-            let job = makeJob(order: o,
-                              lines: kitchenLines,
-                              rotated: rotated,
-                              family: fam)
+            let rotated = fam.supportsRotation
+
+            let job = makeJob(
+                order: o,
+                lines: kitchenLines,                 // ✅ kitchen gets ALL kitchen lines
+                rotated: rotated,
+                family: fam,
+                lineWidth: 42                        // or your default variable
+            )
+
             Swift.print("🧑‍🍳 SPLIT-ALL KITCHEN: sending \(job.count) bytes to \(host):\(port)")
-            let dk = "bone|\(o.id)|kitchen"
-            send(job, host: host, dedupeKey: dk)
+            send(job, host: host, dedupeKey: "bone|\(o.id)|kitchen")
         }
 
+        // ---------------- KITCHEN BACK (RONGTA) ----------------
+        if !toastLines.isEmpty {
+            debugTicketPreview(order: o, lines: toastLines, stationLabel: "KitchenBack (split all) טוסט")
+
+            let host = KitchenBackPrinterIP
+
+            let job = makeJob(
+                order: o,
+                lines: toastLines,
+                rotated: kitchenBackRotated,         // ✅ your knob (true/false)
+                family: kitchenBackFamily,           // ✅ forced .ron
+                lineWidth: kitchenBackLineWidth      // ✅ 42 (or 32 if 58mm)
+            )
+
+            Swift.print("🧑‍🍳 SPLIT-ALL KITCHENBACK: sending \(job.count) bytes to \(host):\(port)")
+            send(job, host: host, dedupeKey: "bone|\(o.id)|kitchenback|toast")
+        }
+
+        // ---------------- BAKERY ----------------
         if !bakeryLines.isEmpty {
-            debugTicketPreview(order: o,
-                               lines: bakeryLines,
-                               stationLabel: "Bakery (split all)")
+            debugTicketPreview(order: o, lines: bakeryLines, stationLabel: "Bakery (split all)")
 
             let host = activeBakeryIP
             let rotated = fam.supportsRotation
-            let job = makeJob(order: o,
-                              lines: bakeryLines,
-                              rotated: rotated,
-                              family: fam)
+
+            let job = makeJob(
+                order: o,
+                lines: bakeryLines,
+                rotated: rotated,
+                family: fam,
+                lineWidth: 42
+            )
+
             Swift.print("🧁 SPLIT-ALL BAKERY: sending \(job.count) bytes to \(host):\(port)")
-            let dk = "bone|\(o.id)|bakery"
-            send(job, host: host, dedupeKey: dk)
+            send(job, host: host, dedupeKey: "bone|\(o.id)|bakery")
         }
 
+        // ---------------- BAR ----------------
         if !barLines.isEmpty {
-            debugTicketPreview(order: o,
-                               lines: barLines,
-                               stationLabel: "Bar (split all)")
+            debugTicketPreview(order: o, lines: barLines, stationLabel: "Bar (split all)")
 
             let host = activeBarIP
             let rotated = fam.supportsRotation
-            let job = makeJob(order: o,
-                              lines: barLines,
-                              rotated: rotated,
-                              family: fam)
+
+            let job = makeJob(
+                order: o,
+                lines: barLines,
+                rotated: rotated,
+                family: fam,
+                lineWidth: 42
+            )
+
             Swift.print("🍹 SPLIT-ALL BAR: sending \(job.count) bytes to \(host):\(port)")
-            let dk = "bone|\(o.id)|bar"
-            send(job, host: host, dedupeKey: dk)
+            send(job, host: host, dedupeKey: "bone|\(o.id)|bar")
         }
     }
 
@@ -1389,16 +1538,30 @@ final class PrinterManager {
 
     // MARK: - makeJob core (same logic, now family-aware for rotation)
 
-    private func makeJob(order o: KDSAdminOrder,
-                         lines: [KDSOrderLine],
-                         rotated: Bool = false,
-                         family: PrinterFamily) -> Data {
+    private func makeJob(
+        order o: KDSAdminOrder,
+        lines: [KDSOrderLine],
+        rotated: Bool = false,
+        family: PrinterFamily,
+        lineWidth: Int = 42
+    ) -> Data {
 
         struct PrintItem {
             var nameWithSize: String
             var qty: Int
             var modsClean: String
         }
+
+        
+        let phoneLine: String? = {
+            let p = o.customerPhone?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !p.isEmpty else { return nil }
+            // Optional: don’t print phone for team tables
+            if (o.customerName.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("שולחן")) { return nil }
+            return p
+        }()
+        // ✅ Single separator derived from lineWidth (keeps Rongta + others identical)
+        let sep = String(repeating: "-", count: max(8, lineWidth))
 
         let caution: String = {
             let name = o.customerName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1412,6 +1575,7 @@ final class PrinterManager {
         df.dateFormat = "HH:mm   dd/MM/yyyy"
         let orderMeta1 = df.string(from: o.placedAt)
 
+        // ===== STEP 1: Build print items =====
         var rawItems: [PrintItem] = []
 
         for ln in lines {
@@ -1423,19 +1587,12 @@ final class PrinterManager {
 
             let nameWithSize: String = {
                 if cleanName == "אספרסו" || cleanName == "מקיאטו" {
-                    if modsLower.contains("כפול") {
-                        return "\(cleanName) כפול"
-                    } else {
-                        return cleanName
-                    }
+                    return modsLower.contains("כפול") ? "\(cleanName) כפול" : cleanName
                 }
 
                 if cleanName == "הפוך" || cleanName == "אמריקנו" {
-                    if let size = sizeWord, !size.isEmpty {
-                        return "\(cleanName) \(size)"
-                    } else {
-                        return "\(cleanName) קטן"
-                    }
+                    if let size = sizeWord, !size.isEmpty { return "\(cleanName) \(size)" }
+                    return "\(cleanName) קטן"
                 }
 
                 if let size = sizeWord, !size.isEmpty {
@@ -1464,6 +1621,7 @@ final class PrinterManager {
             )
         }
 
+        // ===== STEP 2: Merge items with same title + no modifiers =====
         var mergedItems: [PrintItem] = []
 
         for item in rawItems {
@@ -1480,6 +1638,7 @@ final class PrinterManager {
             }
         }
 
+        // ===== STEP 3: Build ESC/POS =====
         var job = Data()
         job += EscPos.initPrinter
 
@@ -1493,7 +1652,6 @@ final class PrinterManager {
         }
 
         let rawService = o.service?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-
         let isTakeAwayService =
             rawService == "ta" ||
             rawService.contains("take") ||
@@ -1505,20 +1663,24 @@ final class PrinterManager {
         let modifierIndent = "  "
 
         if shouldRotate {
-            // Rotated layout (same as you had, just gated by shouldRotate)
+            // ================= ROTATED =================
             job += EscPos.align(1)
-            job += EscPos.style(doubleHeight: true,
-                                doubleWidth: true,
-                                bold: true)
+            job += EscPos.style(doubleHeight: true, doubleWidth: true, bold: true)
             job += asciiLine(orderIdText)
             job += EscPos.feed(1)
 
             job += EscPos.align(1)
-            job += EscPos.style(doubleHeight: true,
-                                doubleWidth: true,
-                                bold: true)
+            job += EscPos.style(doubleHeight: true, doubleWidth: true, bold: true)
             job += hebrewLineData(caution)
             job += EscPos.feed(1)
+            
+            if let p = o.customerPhone?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !p.isEmpty {
+                job += EscPos.align(1)
+                job += EscPos.style(doubleHeight: false, doubleWidth: true, bold: true)
+                job += asciiLine(p)          // ✅ keep digits stable
+                job += EscPos.feed(1)
+            }
 
             if isTakeAwayService {
                 job += EscPos.feed(1)
@@ -1526,22 +1688,17 @@ final class PrinterManager {
                 job += EscPos.feed(1)
             }
 
-            job += EscPos.style(doubleHeight: false,
-                                doubleWidth: false,
-                                bold: false)
+            job += EscPos.style(doubleHeight: false, doubleWidth: false, bold: false)
             job += EscPos.align(0)
-            job += asciiLine("------------------------------------------------")
+            job += asciiLine(sep)
             job += EscPos.feed(1)
 
             for item in mergedItems.reversed() {
 
                 if !item.modsClean.isEmpty {
                     job += EscPos.feed(1)
-
                     job += EscPos.align(2)
-                    job += EscPos.style(doubleHeight: false,
-                                        doubleWidth: true,
-                                        bold: false)
+                    job += EscPos.style(doubleHeight: false, doubleWidth: true, bold: false)
 
                     let lines = item.modsClean
                         .split(whereSeparator: { $0 == "\n" || $0 == "\r\n" })
@@ -1550,34 +1707,34 @@ final class PrinterManager {
                     if lines.isEmpty {
                         job += hebrewLineData(modifierIndent + item.modsClean)
                     } else {
-                        for m in lines {
-                            job += hebrewLineData(modifierIndent + m)
-                        }
+                        for m in lines { job += hebrewLineData(modifierIndent + m) }
                     }
                 }
 
                 job += EscPos.align(2)
-                job += EscPos.style(doubleHeight: true,
-                                    doubleWidth: true,
-                                    bold: true)
-
-                let title = "\(item.qty) \(item.nameWithSize)"
-                job += hebrewLineData(title)
+                job += EscPos.style(doubleHeight: true, doubleWidth: true, bold: true)
+                job += hebrewLineData("\(item.qty) \(item.nameWithSize)")
 
                 job += EscPos.feed(1)
-                job += EscPos.style(doubleHeight: false,
-                                    doubleWidth: false,
-                                    bold: false)
+                job += EscPos.style(doubleHeight: false, doubleWidth: false, bold: false)
                 job += EscPos.align(0)
-                job += asciiLine("------------------------------------------------")
+                job += asciiLine(sep)
                 job += EscPos.feed(1)
             }
 
-            job += EscPos.style(doubleHeight: false,
-                                doubleWidth: false,
+            // ✅ Date / time – BIG (match regular printers)
+            job += EscPos.align(1)   // CENTER
+
+            job += EscPos.style(doubleHeight: true,
+                                doubleWidth: true,
                                 bold: false)
             job += asciiLine(orderMeta1)
 
+            // reset after
+            job += EscPos.style(doubleHeight: false,
+                                doubleWidth: false,
+                                bold: false)
+            
             if isTakeAwayService {
                 job += EscPos.feed(1)
                 job += makeBlackTitle(taBarText, totalWidth: 24)
@@ -1585,21 +1742,17 @@ final class PrinterManager {
             }
 
         } else {
-            
+            // ================= NON-ROTATED =================
             job += EscPos.align(1)
-            job += EscPos.style(doubleHeight: true,
-                                doubleWidth: true,
-                                bold: true)
+            job += EscPos.style(doubleHeight: true, doubleWidth: true, bold: true)
             job += asciiLine(orderIdText)
             job += EscPos.feed(1)
 
-            // Non-rotated layout (your original path)
-           
             let isTeamTable = caution.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("שולחן")
 
             if isTeamTable {
                 job += EscPos.feed(1)
-                job += makeBlackTitle(caution, totalWidth: 24)   // ✅ black bar
+                job += makeBlackTitle(caution, totalWidth: 24)
                 job += EscPos.feed(1)
             } else {
                 job += EscPos.align(1)
@@ -1609,45 +1762,43 @@ final class PrinterManager {
                 job += EscPos.align(0)
                 job += EscPos.feed(1)
             }
-            
+
+           
+            // 🖤 PHONE — BLACK ROW
+            if let p = phoneLine {
+                job += EscPos.feed(1)
+                job += makeBlackTitle(p, totalWidth: 24)
+                job += EscPos.feed(1)
+            }
+
+            job += EscPos.style(doubleHeight: false, doubleWidth: false, bold: false)
+            job += EscPos.align(0)
+            job += EscPos.feed(1)
             if isTakeAwayService {
                 job += EscPos.feed(1)
                 job += makeBlackTitle(taBarText, totalWidth: 24)
                 job += EscPos.feed(1)
             }
 
-
-            job += EscPos.align(2)
-            job += EscPos.style(doubleHeight: true,
-                                doubleWidth: true,
-                                bold: false)
+            job += EscPos.align(1)
+            job += EscPos.style(doubleHeight: true, doubleWidth: true, bold: false)
             job += asciiLine(orderMeta1)
 
-            job += EscPos.style(doubleHeight: false,
-                                doubleWidth: false,
-                                bold: false)
+            job += EscPos.style(doubleHeight: false, doubleWidth: false, bold: false)
             job += EscPos.align(0)
-            job += asciiLine("------------------------------------------------")
-
+            job += asciiLine(sep)
             job += EscPos.feed(1)
 
             for item in mergedItems.reversed() {
 
                 job += EscPos.align(2)
-                job += EscPos.style(doubleHeight: true,
-                                    doubleWidth: true,
-                                    bold: true)
-
-                let title = "\(item.qty) \(item.nameWithSize)"
-                job += hebrewLineData(title)
+                job += EscPos.style(doubleHeight: true, doubleWidth: true, bold: true)
+                job += hebrewLineData("\(item.qty) \(item.nameWithSize)")
 
                 if !item.modsClean.isEmpty {
                     job += EscPos.feed(1)
-
                     job += EscPos.align(2)
-                    job += EscPos.style(doubleHeight: false,
-                                        doubleWidth: true,
-                                        bold: false)
+                    job += EscPos.style(doubleHeight: false, doubleWidth: true, bold: false)
 
                     let lines = item.modsClean
                         .split(whereSeparator: { $0 == "\n" || $0 == "\r\n" })
@@ -1656,50 +1807,40 @@ final class PrinterManager {
                     if lines.isEmpty {
                         job += hebrewLineData(modifierIndent + item.modsClean)
                     } else {
-                        for m in lines {
-                            job += hebrewLineData(modifierIndent + m)
-                        }
+                        for m in lines { job += hebrewLineData(modifierIndent + m) }
                     }
                 }
 
                 job += EscPos.feed(1)
-                job += EscPos.style(doubleHeight: false,
-                                    doubleWidth: false,
-                                    bold: false)
+                job += EscPos.style(doubleHeight: false, doubleWidth: false, bold: false)
                 job += EscPos.align(0)
-                job += asciiLine("------------------------------------------------")
+                job += asciiLine(sep)
                 job += EscPos.feed(1)
             }
 
-        
-            
             job += EscPos.align(1)
-            job += EscPos.style(doubleHeight: true,
-                                doubleWidth: true,
-                                bold: true)
+            job += EscPos.style(doubleHeight: true, doubleWidth: true, bold: true)
             job += asciiLine(orderIdText)
             job += EscPos.feed(1)
 
-           
             if isTeamTable {
                 job += EscPos.feed(1)
-                job += makeBlackTitle(caution, totalWidth: 24)   // ✅ black bar
+                job += makeBlackTitle(caution, totalWidth: 24)
                 job += EscPos.feed(1)
             } else {
                 job += hebrewLineData(caution)
                 job += EscPos.feed(2)
             }
+
             if isTakeAwayService {
                 job += EscPos.feed(1)
                 job += makeBlackTitle(taBarText, totalWidth: 24)
                 job += EscPos.feed(1)
             }
-
         }
 
-        job += EscPos.style(doubleHeight: false,
-                            doubleWidth: false,
-                            bold: false)
+        // RESET + bottom padding
+        job += EscPos.style(doubleHeight: false, doubleWidth: false, bold: false)
         job += EscPos.align(0)
         job += EscPos.feed(6)
 
@@ -1708,7 +1849,6 @@ final class PrinterManager {
         }
 
         job += EscPos.cut
-
         return job
     }
 }
@@ -1945,7 +2085,7 @@ extension PrinterManager {
         job.append(contentsOf: [0x1B, 0x21, 0x00])
 
         job += makeDebugRow(["בית העם קונדיטוריה ויין בע\"מ"], align: ["C"], colWidths: [48])
-        job += makeDebugRow(["ח.פ / ע.מ. 516784139"], align: ["C"], colWidths: [48])
+        job += makeDebugRow(["ח.פ / ע.מ. 931487615"], align: ["C"], colWidths: [48])
         job += EscPos.feed(1)
 
         job.append(contentsOf: [0x1B, 0x21, 0x10])
@@ -2063,7 +2203,7 @@ extension PrinterManager {
       
         // ✅ THIS is what you want to print as "cash" (cash + tips)
         let printedTips = max(report.tipBaseTotal - printTipAdjustment, 0)
-        let printedCashWithTip = max(report.cashAmount + printedTips, 0)
+        let printedCashWithTip = max(report.cashAmount + report.tipBaseTotal   , 0)
 
         // ✅ Totals for printing (cash already includes tip now)
         let printedCollectionsTotal = printedCashWithTip + report.cardAmount
@@ -2184,7 +2324,7 @@ extension PrinterManager {
 
         job += makeDebugRow(
             ["", "",
-             fmt1(report.grandTotal),
+             fmt1(report.totalSalesIncVat + report.tipsTotal),
              "סה\"כ   \(reverseNumber(fmt1(exVat(report.grandTotal))))"
             ],
             align: ["R","R","R","R"],
@@ -2282,11 +2422,18 @@ extension PrinterManager {
         entries: [BasketEntry],
         total: Double,
         diningMode: DiningMode,
-        customerName: String?
+        customerName: String?,
+        customerPhone: String?
     ) {
-        Swift.print("🧾 [PM] printCashPointSplit order=\(orderNumber) " +
-                    "lines=\(entries.count) total=\(total) mode=\(diningMode) " +
-                    "customer=\(customerName ?? "-")")
+        Swift.print("""
+        🧾 [PM] printCashPointSplit
+          order=\(orderNumber)
+          lines=\(entries.count)
+          total=\(total)
+          mode=\(diningMode)
+          customer=\(customerName ?? "-")
+          phone=\(customerPhone ?? "NIL")
+        """)
 
         let lines: [KDSOrderLine] = entries.map { entry in
             KDSOrderLine(
@@ -2310,13 +2457,13 @@ extension PrinterManager {
             placedAt: Date(),
             scheduledFor: nil,
             customerName: customerName ?? "",
-            totalGBP: total,
+            customerPhone: customerPhone, totalGBP: total,
             itemSummary: "",
             isDelivery: false,
             shortCode: nil,
             lines: lines,
             service: diningMode == .dineIn ? "sit" : "ta",
-            name: customerName
+            name: customerName,
         )
         for ln in lines {
             Swift.print("🧾 line:", ln.name, "| category:", ln.category ?? "-", "| station:", ln.station ?? "nil")

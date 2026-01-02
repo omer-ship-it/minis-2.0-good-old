@@ -107,10 +107,12 @@ private struct AutoOrderDTO: Decodable {
     let lines: [AutoLineDTO]
     let status: Int?
     let service: String?
-
+    let customerPhone: String?
+    
     enum CodingKeys: String, CodingKey {
         case id, source, bucket, stage, placedAt, scheduledFor,
-             customerName, customerDisplayName, totalGBP, itemSummary,
+             customerName, customerDisplayName, customerPhone,   // ✅ add
+             totalGBP, itemSummary,
              isDelivery, shortCode, lines, status
         case Status = "Status"
         case service
@@ -132,6 +134,7 @@ private struct AutoOrderDTO: Decodable {
         isDelivery   = try c.decode(Bool.self,   forKey: .isDelivery)
         shortCode    = try? c.decodeIfPresent(String.self, forKey: .shortCode)
         lines        = try c.decode([AutoLineDTO].self, forKey: .lines)
+        customerPhone = try? c.decodeIfPresent(String.self, forKey: .customerPhone)
 
         if let s = try? c.decodeIfPresent(Int.self, forKey: .status) {
             status = s
@@ -178,11 +181,18 @@ final class OrdersAutoPrinter {
         let station: String           // ✅ canonical: "kitchen" / "bar" / "bakery"
     }
 
+    private func isToastName(_ s: String) -> Bool {
+        let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.contains("טוסט") { return true }
+        if t.lowercased().contains("toast") { return true }
+        return false
+    }
     private struct SimpleOrder {
         let id: Int
         let source: String
         let bucket: String
         let customerName: String
+        let customerPhone: String?    // ✅ NEW
         let subtitle: String
         let total: Double
         let placedAt: Date
@@ -331,7 +341,7 @@ final class OrdersAutoPrinter {
             let perUnit  = totalQty > 0 ? dto.totalGBP / Double(totalQty) : dto.totalGBP
 
             let items: [SimpleLine] = dto.lines.enumerated().map { idx, l in
-                let resolved = resolvePrinter(productId: l.productId, station: l.station)
+                let resolved = resolvePrinter(productId: l.productId, station: l.station, name: l.name)
                 return SimpleLine(
                     id: l.itemId ?? idx,
                     productId: l.productId,
@@ -349,6 +359,7 @@ final class OrdersAutoPrinter {
                 source: dto.source,
                 bucket: dto.bucket,
                 customerName: displayName,
+                customerPhone: dto.customerPhone,   // ✅ NEW
                 subtitle: dto.itemSummary,
                 total: dto.totalGBP,
                 placedAt: dto.placedAt,
@@ -392,8 +403,14 @@ final class OrdersAutoPrinter {
     }
 
     // ✅ Simple + safe: API printer wins if present, else catalog, else bar.
-    private func resolvePrinter(productId: Int?, station: String?) -> String {
-        // 1️⃣ Catalog (your shop json) is the truth
+    private func resolvePrinter(productId: Int?, station: String?, name: String) -> String {
+
+        // ✅ HARD RULE: טוסט always routes as kitchen (so it prints kitchen + kitchenBack)
+        if isToastName(name) {
+            return "kitchen"
+        }
+
+        // 1️⃣ Catalog (shop json) is the truth
         if let cat = normalizePrinter(MenuCatalog.shared.printer(for: productId)) {
             return cat
         }
@@ -433,7 +450,8 @@ final class OrdersAutoPrinter {
                 entries: list,
                 total: list.reduce(0.0) { $0 + (Double($1.quantity) * $1.unitPrice) },
                 diningMode: mode,
-                customerName: order.customerName
+                customerName: order.customerName,
+                customerPhone: order.customerPhone      // ✅ NEW
             )
         }
 

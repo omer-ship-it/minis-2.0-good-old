@@ -11,7 +11,7 @@ struct MINIS_02App: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @Environment(\.scenePhase) private var scenePhase
 
-    @AppStorage("cashPointMode") private var cashPointMode: Bool = true
+    @AppStorage("cashPointMode") private var cashPointMode: Bool = false
     @AppStorage("shopId") private var shopId: String = "12"
     @AppStorage("miniAppId") private var miniAppId: Int = 0
     @AppStorage("launchMenuOnce") private var launchMenuOnce: Bool = false
@@ -75,10 +75,13 @@ struct MINIS_02App: App {
         // 🔥 Global RTL for UIKit (menus, alerts, etc.)
         //UIView.appearance().semanticContentAttribute = .forceRightToLeft
 
-        UISegmentedControl.appearance().setTitleTextAttributes(
-            [.foregroundColor: UIColor.black],
-            for: .selected
-        )
+        let seg = UISegmentedControl.appearance()
+
+        seg.setTitleTextAttributes([.foregroundColor: UIColor.label], for: .normal)
+        seg.setTitleTextAttributes([.foregroundColor: UIColor.label], for: .selected)
+
+        // Optional: make selected pill follow tint correctly
+        seg.selectedSegmentTintColor = UIColor.tertiarySystemFill
 
      
         
@@ -99,6 +102,8 @@ struct MINIS_02App: App {
                 } else {
                     HomeView()
                         .environment(\.layoutDirection, .leftToRight)
+                        .tint(.primary)
+                    
                 }
             }
             .environment(\.isRtl, direction == "rtl")

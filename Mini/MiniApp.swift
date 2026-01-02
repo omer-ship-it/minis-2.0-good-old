@@ -1,11 +1,19 @@
 import SwiftUI
 import StripeCore
 import UIKit
+import NetworkExtension
 
 @main
 struct MiniApp: App {
 
     @AppStorage("direction") private var direction: String = "ltr"
+
+    // ✅ Beit Ha’am guest Wi-Fi
+    private let wifiSSID = "Beit Ha Am"
+    private let wifiPass = "10203040"
+
+    // ✅ Throttle Wi-Fi prompt (avoid re-prompting every launch)
+    private let kDidTryJoinWiFi = "didTryJoinWiFi.v1"
 
     // ✅ Present ONLY when we actually have a claim
     @State private var studentClaim: StudentClaim? = nil
@@ -52,6 +60,9 @@ struct MiniApp: App {
                 }
             }
             .onAppear {
+                // ✅ Wi-Fi join (App Clip will show the system “Join Wi-Fi” prompt once)
+                joinBeitHaAmWiFiIfNeeded()
+
                 parseMiniIfNeeded()
 
                 // ✅ 1) Full App / App Clip can both pick up a pending claim saved in App Group
@@ -62,10 +73,10 @@ struct MiniApp: App {
                    let url = URL(string: s) {
                     processIncoming(url)
                 }
-                
+
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                       pingInstall()
-                   }
+                    pingInstall()
+                }
             }
 
             // ✅ While already running (most important)
@@ -79,8 +90,6 @@ struct MiniApp: App {
             .onOpenURL { url in
                 processIncoming(url)
             }
-            
-            
 
             // ✅ Present ONLY if claim exists -> never blank
             .fullScreenCover(item: $studentClaim) { claim in
@@ -113,7 +122,6 @@ struct MiniApp: App {
 
         // ✅ ping again now that we definitely have a referrer/source context
         pingInstall()
-        
     }
 
     // MARK: - App Group claim handoff
@@ -129,7 +137,6 @@ struct MiniApp: App {
         guard let suite = UserDefaults(suiteName: appGroupId) else { return }
         guard let data = suite.data(forKey: kPendingStudentClaim) else { return }
         guard let claim = try? JSONDecoder().decode(StudentClaim.self, from: data) else {
-            // If corrupted, clear it
             suite.removeObject(forKey: kPendingStudentClaim)
             suite.synchronize()
             return
@@ -156,8 +163,7 @@ struct MiniApp: App {
             applyMiniCustomization(from: data)
         }.resume()
     }
-    
-    
+
     private struct InstallPingPayload: Codable {
         let anonId: String
         let platform: String      // "appclip"
@@ -177,12 +183,10 @@ struct MiniApp: App {
             let id = UUID().uuidString
             suite.set(id, forKey: "anonUUID")
             suite.synchronize()
-            // also mirror to standard (optional)
             UserDefaults.standard.set(id, forKey: "anonUUID")
             return id
         }
 
-        // fallback
         if let existing = UserDefaults.standard.string(forKey: "anonUUID"), !existing.isEmpty {
             return existing
         }
@@ -192,15 +196,12 @@ struct MiniApp: App {
     }
 
     private func buildInstallAttribution() -> (source: String?, campaign: String?, referrer: String?) {
-        // Best-effort from a stored universal link (if any)
         if let s = UserDefaults.standard.string(forKey: kPendingUniversalLink),
            let url = URL(string: s) {
 
-            // example heuristics (tweak anytime)
             let host = url.host?.lowercased()
             let path = url.path.lowercased()
 
-            // Use UTM if present
             let comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
             let q = comps?.queryItems ?? []
             let utmSource = q.first(where: { $0.name.lowercased() == "utm_source" })?.value
@@ -213,12 +214,10 @@ struct MiniApp: App {
 
             let campaign = utmCampaign
 
-            // Keep a short referrer (no huge URLs in DB)
             let ref = (host ?? "link") + url.path
             return (source, campaign, ref)
         }
 
-        // fallback – you can also store your own keys in the future
         return (nil, nil, nil)
     }
 
@@ -237,7 +236,6 @@ struct MiniApp: App {
             referrer: attrib.referrer
         )
 
-        
         guard let url = URL(string: "https://minis.studio/api/installs/ping") else { return }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
@@ -260,4 +258,31 @@ struct MiniApp: App {
         }.resume()
     }
 
+    // MARK: - Wi-Fi join (Guest Wi-Fi with password)
+    private func joinBeitHaAmWiFiIfNeeded() {
+        // ✅ Prevent repeated prompts
+        let std = UserDefaults.standard
+        if std.bool(forKey: kDidTryJoinWiFi) { return }
+        std.set(true, forKey: kDidTryJoinWiFi)
+
+        let config = NEHotspotConfiguration(
+            ssid: wifiSSID,
+            passphrase: wifiPass,
+            isWEP: false
+        )
+        config.joinOnce = true
+
+        NEHotspotConfigurationManager.shared.apply(config) { error in
+            if let error = error as NSError? {
+                if error.domain == NEHotspotConfigurationErrorDomain,
+                   error.code == NEHotspotConfigurationError.alreadyAssociated.rawValue {
+                    print("📶 Wi-Fi: already associated")
+                    return
+                }
+                print("📶 Wi-Fi join error:", error.localizedDescription)
+            } else {
+                print("📶 Wi-Fi: joined \(self.wifiSSID)")
+            }
+        }
+    }
 }

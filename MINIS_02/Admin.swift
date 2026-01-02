@@ -182,6 +182,15 @@ struct AdminProductEditorView: View {
         case .edit:   return isRtl ? "עריכת מוצר" : "Edit Product"
         }
     }
+    
+    private func normalizePrinter(_ raw: String) -> String {
+        let t = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        switch t {
+        case "kitchen", "מטבח": return PrinterStation.kitchen.rawValue
+        case "bakery", "מאפייה": return PrinterStation.bakery.rawValue
+        default: return PrinterStation.bar.rawValue
+        }
+    }
 
     // MARK: - Image header
 
@@ -343,19 +352,26 @@ struct AdminProductEditorView: View {
                     .font(.primariesDemi(14))
 
                 Picker("", selection: Binding(
-                    get: {
-                        PrinterStation(rawValue: draft.printer) ?? .bar
-                    },
-                    set: { newVal in
-                        draft.printer = newVal.rawValue
-                    }
+                    get: { PrinterStation(rawValue: draft.printer) ?? .bar },
+                    set: { draft.printer = $0.rawValue }
                 )) {
                     ForEach(PrinterStation.allCases) { s in
-                        Text(isRtl ? s.titleHe : s.rawValue).tag(s)
+                        Text(isRtl ? s.titleHe : s.rawValue)
+                            .foregroundStyle(.primary)
+                            .tag(s)
                     }
                 }
                 .pickerStyle(.segmented)
                 .tint(.primary)
+                .onAppear {
+                    let fixed = normalizePrinter(draft.printer)
+                    if draft.printer != fixed {
+                        print("🖨️ normalize printer '\(draft.printer)' -> '\(fixed)'")
+                        draft.printer = fixed
+                    } else {
+                        print("🖨️ printer on appear:", draft.printer)
+                    }
+                }
             }
         }
     }

@@ -378,3 +378,4 @@ func getOrCreateAnonId(appGroupId: String) -> String {
 
     return id
 }
+

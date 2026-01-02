@@ -178,6 +178,7 @@ struct KDSAdminOrder: Identifiable, Hashable {
     let placedAt: Date
     let scheduledFor: Date?
     let customerName: String
+    let customerPhone: String?              // ✅ NEW
     let totalGBP: Double
     let itemSummary: String
     let isDelivery: Bool
@@ -611,60 +612,9 @@ final class KDSOrdersVM: ObservableObject {
                 return
             }
 
-            // --- Map DTO → view models ---
-            let mapped: [KDSAdminOrder] = parsed.orders.map { dto in
-                let bs: (bucket: KDSOrderBucket, stage: KDSAdminOrder.Stage) = {
-                    if let s = dto.status { return mapStatus(s) }
-                    return mapStrings(bucket: dto.bucket, stage: dto.stage)
-                }()
-                var order = KDSAdminOrder(
-                    id: dto.id,
-                    source: dto.isDelivery ? .delivery : .kiosk,
-                    tableLabel: nil,
-                    bucket: bs.bucket,
-                    stage: bs.stage,
-                    placedAt: dto.placedAt,
-                    scheduledFor: dto.scheduledFor,
-                    customerName: dto.customerName,
-                    totalGBP: dto.totalGBP,
-                    itemSummary: dto.itemSummary,
-                    isDelivery: dto.isDelivery,
-                    shortCode: dto.shortCode,
-                    lines: dto.lines.map { l in
-                        KDSOrderLine(
-                            itemId: l.itemId,
-                            productId: l.productId,
-                            name: l.name,
-                            qty: l.qty,
-                            category: l.category,
-                            status: l.status,
-                            station: l.station,
-                            modifiers: l.modifiers
-                        )
-                    },
-                    service: dto.service?.lowercased(),
-                    name: dto.name?.lowercased()
-                )
-                if let ss = dto.stationsStatus {
-                    var dict: [Station:Int] = [:]
-                    for (k,v) in ss {
-                        if let st = stationFromString(k) { dict[st] = v }
-                    }
-                    order.stationStatus = dict
-                }
-                return order
-            }
+              
 
-            // Debug sample
-            if let o = mapped.first(where: { $0.id == 2862 }) {
-                let stations = o.stations.map(\.rawValue).joined(separator: ",")
-                let ss = o.stationStatus.map { "\($0.key.rawValue)=\($0.value)" }.joined(separator: ",")
-                let cats = o.lines.map { $0.category ?? "nil" }.joined(separator: " | ")
-                print("🧪 2862 stations=\(stations)  stationStatus={\(ss)}")
-                print("🧪 2862 categories=\(cats)")
-            }
-            print("✅ Loaded \(mapped.count) orders, first statuses:", mapped.prefix(5).map { $0.stage })
-
+            
             // === Compute to-print set (no placedAt gating) ===
             let previousById = Dictionary(uniqueKeysWithValues: self.all.map { ($0.id, $0) })
 
@@ -708,70 +658,6 @@ final class KDSOrdersVM: ObservableObject {
 
             var toPrint: [KDSAdminOrder] = []
 
-            for cur in mapped {
-                // only Active & not picked up
-                guard cur.bucket == .active, cur.stage != .pickedUp else { continue }
-
-                // station gating by current UI tab (with heuristics)
-                guard matchesCurrentStation(cur) else {
-                    let stText = stationsForOrder(cur).map(\.rawValue).joined(separator: ",")
-                  //  print("⏭️ Skip \(cur.id): stations=[\(stText)] not matching \(stationFilter.rawValue)")
-                    continue
-                }
-
-                if previousById[cur.id] == nil {
-                    // first time seen → print
-                  //  print("🆕 First-seen ID → print \(cur.id)")
-                    toPrint.append(cur)
-                } else if let prev = previousById[cur.id] {
-                    // activation transition (e.g., Scheduled -> Active) → print once
-                    if prev.bucket != .active && cur.bucket == .active {
-                     //   print("🔁 Activated → print \(cur.id) (prev=\(prev.bucket) → cur=active)")
-                        toPrint.append(cur)
-                    } else if let uiStation = stationFromFilter(stationFilter) {
-                        // Optional: station-delta print — when order first touches current station
-                        let prevStations = Set(prev.lines.compactMap { lineStation($0) })
-                        let curStations  = stationsForOrder(cur)
-                        if !prevStations.contains(uiStation) && curStations.contains(uiStation) {
-                          //  print("🔀 Station-delta → print \(cur.id) (newly touches \(uiStation.rawValue))")
-                            toPrint.append(cur)
-                        }
-                    }
-                }
-            }
-
-            // === Mutate state AFTER computing toPrint ===
-            self.all = mapped
-            self.lastServerLoad = Date()
-            guard allowAutoPrint else {
-                     //  print("⏸️  Skipping auto-print (startup delay active)")
-                       return
-                   }
-            // 🔔 Auto-print (deduped)
-            if !toPrint.isEmpty {
-                let currentStationFilter = self.stationFilter
-                var actuallyQueued: [Int] = []
-
-                for ord in toPrint {
-                    let key = "\(ord.id)|\(currentStationFilter.rawValue)"
-                    if !printedKeys.contains(key) {
-                        PrinterManager.shared.print(order: ord, for: currentStationFilter)
-                        printedKeys.insert(key)
-                        actuallyQueued.append(ord.id)
-                    } else {
-                      ///  print("🛑 Dedupe: \(ord.id) already printed for \(currentStationFilter.rawValue)")
-                    }
-                }
-
-                if !actuallyQueued.isEmpty {
-                    playAlertSound()
-                //    print("🔔 Auto-printed:", actuallyQueued)
-                } else {
-                 //   print("ℹ️ Nothing new to send after dedupe.")
-                }
-            } else {
-             //   print("ℹ️ No orders qualified for printing this cycle.")
-            }
 
         } catch {
           //  print("❌ admin/orders network error:", error.localizedDescription)

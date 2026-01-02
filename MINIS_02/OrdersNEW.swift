@@ -47,16 +47,19 @@ struct AdminOrderLineItem: Identifiable, Hashable {
 
 struct AdminOrderItem: Identifiable, Hashable {
     let id: Int
-    var orderId: String          // string order id
+    var orderId: String
     var customerName: String
     var subtitle: String
-    var source: String           // קופה / קיוסק / מיני …
+    var source: String
     var status: AdminOrderStatus
     var placedAt: Date
     var items: [AdminOrderLineItem]
-    var total: Double            // order total
-    var stations: Set<AdminStation>   // 👈 which stations this order touches
-    var isUnpaid: Bool                // 👈 NEW
+    var total: Double
+    var stations: Set<AdminStation>
+    var isUnpaid: Bool
+    var paymentMethod: String?
+
+    var customerPhone: String?    // ✅ ADD THIS
 }
 
 // MARK: - API DTOs
@@ -84,7 +87,7 @@ private struct LineDTO: Decodable {
 
 private struct OrderDTO: Decodable {
     let id: Int
-    let ticketNumber: Int?        // 👈 local slip number from DB (if present)
+    let ticketNumber: Int?        // local slip number from DB (if present)
     let source: String
     let bucket: String
     let stage: String
@@ -92,17 +95,19 @@ private struct OrderDTO: Decodable {
     let scheduledFor: Date?
     let customerName: String
     let customerDisplayName: String?
+    let customerPhone: String?    // ✅ NEW
     let totalGBP: Double
     let itemSummary: String
     let isDelivery: Bool
     let shortCode: String?
     let lines: [LineDTO]
     let status: Int?
-    let paymentMethod: String?    // 👈 NEW
+    let paymentMethod: String?
 
     enum CodingKeys: String, CodingKey {
         case id, source, bucket, stage, placedAt, scheduledFor,
-             customerName, customerDisplayName, totalGBP, itemSummary,
+             customerName, customerDisplayName, customerPhone, // ✅ NEW
+             totalGBP, itemSummary,
              isDelivery, shortCode, lines, status, paymentMethod, ticketNumber
         case Status = "Status"
     }
@@ -110,23 +115,25 @@ private struct OrderDTO: Decodable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
 
-        id               = try c.decode(Int.self,    forKey: .id)
-        // 👇 NEW: decode ticketNumber if present
-        ticketNumber     = try? c.decodeIfPresent(Int.self, forKey: .ticketNumber)
+        id           = try c.decode(Int.self, forKey: .id)
+        ticketNumber = try? c.decodeIfPresent(Int.self, forKey: .ticketNumber)
 
-        source           = try c.decode(String.self, forKey: .source)
-        bucket           = try c.decode(String.self, forKey: .bucket)
-        stage            = try c.decode(String.self, forKey: .stage)
-        placedAt         = try c.decode(Date.self,   forKey: .placedAt)
-        scheduledFor     = try? c.decodeIfPresent(Date.self, forKey: .scheduledFor)
-        customerName     = try c.decode(String.self, forKey: .customerName)
+        source       = try c.decode(String.self, forKey: .source)
+        bucket       = try c.decode(String.self, forKey: .bucket)
+        stage        = try c.decode(String.self, forKey: .stage)
+        placedAt     = try c.decode(Date.self, forKey: .placedAt)
+        scheduledFor = try? c.decodeIfPresent(Date.self, forKey: .scheduledFor)
+
+        customerName        = try c.decode(String.self, forKey: .customerName)
         customerDisplayName = try? c.decodeIfPresent(String.self, forKey: .customerDisplayName)
-        totalGBP         = try c.decode(Double.self, forKey: .totalGBP)
-        itemSummary      = try c.decode(String.self, forKey: .itemSummary)
-        isDelivery       = try c.decode(Bool.self,   forKey: .isDelivery)
-        shortCode        = try? c.decodeIfPresent(String.self, forKey: .shortCode)
-        lines            = try c.decode([LineDTO].self, forKey: .lines)
-        paymentMethod    = try? c.decodeIfPresent(String.self, forKey: .paymentMethod)
+        customerPhone       = try? c.decodeIfPresent(String.self, forKey: .customerPhone) // ✅ NEW
+
+        totalGBP     = try c.decode(Double.self, forKey: .totalGBP)
+        itemSummary  = try c.decode(String.self, forKey: .itemSummary)
+        isDelivery   = try c.decode(Bool.self, forKey: .isDelivery)
+        shortCode    = try? c.decodeIfPresent(String.self, forKey: .shortCode)
+        lines        = try c.decode([LineDTO].self, forKey: .lines)
+        paymentMethod = try? c.decodeIfPresent(String.self, forKey: .paymentMethod)
 
         // robust status decoding as before
         if let s = try? c.decodeIfPresent(Int.self, forKey: .status) {
@@ -358,7 +365,9 @@ struct AdminOrdersView: View {
                     items: lineItems,
                     total: dto.totalGBP,
                     stations: stationSet,
-                    isUnpaid: isUnpaid
+                    isUnpaid: isUnpaid,
+                    paymentMethod: dto.paymentMethod,
+                    customerPhone: dto.customerPhone          // ✅ NEW
                 )
             }
 
@@ -441,19 +450,16 @@ struct AdminOrdersView: View {
                                 AdminOrderRow(
                                     item: order,
 
-                                    // ✅ In EOD, hide print/invoice buttons
+                                    // ✅ EOD: hide ALL row buttons by passing nil for all actions
                                     onPrint: isEod ? {} : { printOrder(order) },
                                     onPrintInvoice: isEod ? {} : { printInvoice(for: order) },
 
-                                    // ✅ In EOD, hide "continue order"
-                                    onOpenInCashPoint: (!isEod && order.isUnpaid) ? { onSelectUnpaid?(order) } : nil,
+                                    // ✅ IMPORTANT: in EOD we still want tap-to-open-details,
+                                    // but row should NOT show buttons => keep this nil in EOD.
+                                    onOpenInCashPoint: isEod ? nil : ((order.isUnpaid) ? { onSelectUnpaid?(order) } : nil),
 
-                                    // ✅ In EOD:
-                                    // - in teamTablesOnly step: allow "סגור שולחן"
-                                    // - in openOrdersOnly step: no team button
-                                    onCloseTeamTable: (isEod && isTeam) ? {
-                                        closeTeamTableOptimistic(orderId: order.id)
-                                    } : (!isEod && isTeam ? {
+                                    // ✅ EOD: also hide "סגור שולחן" button on the row card
+                                    onCloseTeamTable: isEod ? nil : (isTeam ? {
                                         TeamTabsAPI.close(orderId: order.id) { res in
                                             DispatchQueue.main.async {
                                                 switch res {
@@ -587,10 +593,14 @@ struct AdminOrdersView: View {
                     printInvoice(for: order)
                     selectedOrder = nil
                 },
-                onContinue: (mode == .normal && order.isUnpaid)
+                onContinue: order.isUnpaid
                     ? {
-                        onSelectUnpaid?(order)
+                        // 1) Close the details screen
                         selectedOrder = nil
+
+                        // 2) Bring the order back to the main page & restore into basket
+                        // Parent (CashPointView) already implements this via onSelectUnpaid.
+                        onSelectUnpaid?(order)
                     }
                     : nil
             )
@@ -654,10 +664,14 @@ struct AdminOrdersView: View {
         let onPrintBon: () -> Void
         let onPrintInvoice: () -> Void
         let onContinue: (() -> Void)?
+
         @State private var metaLines: [OrderBasketLineDTO] = []
         @State private var isLoadingMeta = false
+
         // Local-only cancellation state (by row index to avoid duplicate ids breaking List)
         @State private var cancelledRowIndexes: Set<Int> = []
+
+        private var isEOD: Bool { mode == .endOfDay }
 
         private var displayName: String {
             let s = order.customerName
@@ -665,7 +679,7 @@ struct AdminOrdersView: View {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             return s.isEmpty ? "לקוח" : s
         }
-        
+
         private func loadMeta() {
             isLoadingMeta = true
             TeamTabsAPI.fetchOrderMetadata(orderId: order.id) { res in
@@ -694,26 +708,21 @@ struct AdminOrdersView: View {
             return activeSum > 0 ? activeSum : order.total
         }
 
-        private var amountText: String {
-            String(format: "₪%.0f", effectiveTotal)
-        }
+        private var amountText: String { String(format: "₪%.0f", effectiveTotal) }
+
         private var timeString: String {
             let adjusted = Calendar.current.date(byAdding: .hour, value: 2, to: order.placedAt) ?? order.placedAt
             return DateTimeFormatter.cachedFormatter.string(from: adjusted)
         }
-        
-    
+
         var body: some View {
-            // ✅ Use a plain container; the presenting cover already sets RTL
             ZStack {
                 Color(.systemGroupedBackground).ignoresSafeArea()
 
                 List {
-                    
+
                     VStack(alignment: .trailing, spacing: 6) {
 
-                        // ⏱️ Time + status (already working)
-                        // ✅ Top line: TIME is most important (leading, big)
                         HStack(spacing: 8) {
                             Text(timeString)
                                 .font(.system(size: 22, weight: .heavy))
@@ -729,24 +738,17 @@ struct AdminOrdersView: View {
                         }
 
                         HStack {
-                            // 👤 Customer name (same style as row)
                             Text(displayName)
                                 .font(.system(size: 20, weight: .bold))
                                 .foregroundColor(.primary)
                                 .lineLimit(1)
 
-                            // ✅ Subtitle important (primary)
-                            
-
-                            // ✅ Secondary line: order id + source
-                        
                             Spacer()
                         }
-                        
+
                         HStack {
-                            // 👤 Customer name (same style as row)
                             Text(order.orderId)
-                                .font(.system(size: 15, weight: .bold))   // ✅ same as row
+                                .font(.system(size: 15, weight: .bold))
                                 .foregroundColor(.primary)
                                 .lineLimit(1)
                                 .multilineTextAlignment(.trailing)
@@ -754,9 +756,7 @@ struct AdminOrdersView: View {
                         }
                     }
 
-                    Section(
-                        header: Text("פריטים")
-                    ) {
+                    Section(header: Text("פריטים")) {
                         if order.items.isEmpty {
                             Text("אין פריטים להזמנה")
                                 .foregroundColor(.secondary)
@@ -766,8 +766,16 @@ struct AdminOrdersView: View {
                             ForEach(Array(order.items.enumerated()), id: \.offset) { idx, line in
                                 orderLineRow(line, isCancelled: cancelledRowIndexes.contains(idx))
                                     .listRowInsets(EdgeInsets(top: 10, leading: 16, bottom: 10, trailing: 16))
-                                    // ✅ In RTL, "leading" is the natural side for swipe actions in Hebrew UX
                                     .swipeActions(edge: .leading, allowsFullSwipe: false) {
+
+                                        Button {
+                                            Haptics.light()
+                                            toggleCancelIndex(idx)
+                                        } label: {
+                                            Text("OTH")
+                                        }
+                                        .tint(.gray)
+
                                         Button {
                                             Haptics.light()
                                             toggleCancelIndex(idx)
@@ -787,26 +795,23 @@ struct AdminOrdersView: View {
                 }
                 .listStyle(.insetGrouped)
                 .scrollContentBackground(.hidden)
-                .safeAreaInset(edge: .top) {
-                    topBar
-                }
+                .safeAreaInset(edge: .top) { topBar }
                 .safeAreaInset(edge: .bottom) {
-                    bottomActions.background(.ultraThinMaterial)
+                    bottomActions
+                        .background(.ultraThinMaterial)
                 }
             }
-            .environment(\.layoutDirection, .rightToLeft)     // ✅ force RTL
-                .environment(\.locale, Locale(identifier: "he_IL"))
+            .environment(\.layoutDirection, .rightToLeft)
+            .environment(\.locale, Locale(identifier: "he_IL"))
         }
 
-        // MARK: - Top bar (custom, avoids nav direction weirdness)
+        // MARK: - Top bar
         private var topBar: some View {
             HStack {
-                // Title centered
                 Text("פרטי הזמנה")
                     .font(.system(size: 17, weight: .bold))
                     .frame(maxWidth: .infinity, alignment: .center)
 
-                // Close on the RIGHT (Hebrew UX)
                 Button(action: onClose) {
                     Image(systemName: "xmark")
                         .font(.system(size: 16, weight: .bold))
@@ -821,51 +826,14 @@ struct AdminOrdersView: View {
             .background(.ultraThinMaterial)
         }
 
-        // MARK: - Header
-        private var headerSection: some View {
-            Section {
-                VStack(alignment: .trailing, spacing: 10) {
-                    HStack {
-                        statusPill
-                        Spacer()
-                        Text(displayName)
-                            .font(.system(size: 26, weight: .bold))
-                            .lineLimit(1)
-                            .multilineTextAlignment(.trailing)
-                    }
-
-                    HStack(spacing: 10) {
-                        infoChip(title: "סטטוס", value: statusText)
-                        infoChip(title: amountLabel, value: amountText)
-                    }
-                }
-                .padding(.vertical, 6)
-            }
-        }
-
         private var statusPill: some View {
             Text(statusText)
                 .font(.system(size: 13, weight: .bold))
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
-                .background(order.isUnpaid ? Color.black.opacity(0.18) : Color.black.opacity(0.18))
-                .foregroundColor(order.isUnpaid ? .black : .black)
+                .background(Color.black.opacity(0.18))
+                .foregroundColor(.black)
                 .clipShape(Capsule())
-        }
-
-        private func infoChip(title: String, value: String) -> some View {
-            VStack(alignment: .trailing, spacing: 2) {
-                Text(title)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(.secondary)
-                Text(value)
-                    .font(.system(size: 18, weight: .heavy, design: .rounded))
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .frame(maxWidth: .infinity, alignment: .trailing)
-            .background(Color(.secondarySystemGroupedBackground))
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
 
         // MARK: - Row
@@ -886,16 +854,13 @@ struct AdminOrdersView: View {
                         .multilineTextAlignment(.trailing)
                         .strikethrough(isCancelled)
                         .opacity(isCancelled ? 0.45 : 1.0)
-                    
+
                     Spacer()
+
                     Text(String(format: "₪%.0f", lineTotal))
                         .font(.system(size: 16, weight: .bold))
                         .foregroundColor(.secondary)
                         .opacity(isCancelled ? 0.45 : 1.0)
-
-                  
-
-                  
                 }
 
                 if let mods = line.modifiersText,
@@ -927,17 +892,14 @@ struct AdminOrdersView: View {
             let line = order.items[idx]
             let newValue = !cancelledRowIndexes.contains(idx)
 
-            // optimistic UI
             if newValue { cancelledRowIndexes.insert(idx) }
             else { cancelledRowIndexes.remove(idx) }
 
-            // Try using basketLineId if present (may be wrong, retry will fix)
             if let basketId = line.basketLineId, basketId > 0 {
                 sendCancelLineId(basketId, idx: idx, line: line, newValue: newValue)
                 return
             }
 
-            // No basketLineId -> fetch metadata first
             TeamTabsAPI.fetchOrderMetadata(orderId: order.id) { res in
                 switch res {
                 case .success(let meta):
@@ -952,7 +914,6 @@ struct AdminOrdersView: View {
                     guard let match else {
                         print("❌ could not match item '\(line.name)' pid=\(line.productId ?? -1)")
                         DispatchQueue.main.async {
-                            // revert
                             if newValue { cancelledRowIndexes.remove(idx) }
                             else { cancelledRowIndexes.insert(idx) }
                         }
@@ -984,7 +945,6 @@ struct AdminOrdersView: View {
                         DispatchQueue.main.async { onResolved() }
                     }
                 case .failure(let err):
-                    // ✅ If server says "lineId not found", retry using metadata
                     let ns = err as NSError
                     let body = ns.userInfo["body"] as? String ?? ""
                     if ns.code == 404 && body.contains("lineId not found in basket") {
@@ -1047,14 +1007,20 @@ struct AdminOrdersView: View {
                 }
             }
         }
-        
-        
 
         // MARK: - Bottom actions
+      
+        @ViewBuilder
         private var bottomActions: some View {
             VStack(spacing: 10) {
-                if let onContinue {
-                    Button(action: onContinue) {
+
+                // ✅ EOD MODE — always show Continue
+                if isEOD {
+                    Button {
+                        Haptics.light()
+                        print("➡️ Continue tapped. onContinue is nil? \(onContinue == nil)")
+                        onContinue?()
+                    } label: {
                         Text("המשך הזמנה")
                             .font(.system(size: 17, weight: .bold))
                             .foregroundColor(.white)
@@ -1064,30 +1030,45 @@ struct AdminOrdersView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                     }
                     .buttonStyle(.plain)
-                }
+                    .disabled(onContinue == nil)
+                    .opacity(onContinue == nil ? 0.35 : 1.0)
+                } else {
 
-                HStack(spacing: 12) {
-                    Button(action: onPrintBon) {
-                        Text("בונבון")
-                            .font(.system(size: 16, weight: .bold))
-                            .foregroundColor(.white)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 50)
-                            .background(Color.black)
-                            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    // ✅ NORMAL MODE — unchanged
+                    if let onContinue {
+                        Button(action: onContinue) {
+                            Text("המשך הזמנה")
+                                .font(.system(size: 17, weight: .bold))
+                                .foregroundColor(.white)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 52)
+                                .background(Color.black)
+                                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
 
-                    Button(action: onPrintInvoice) {
-                        Text("חשבונית")
-                            .font(.system(size: 16, weight: .bold))
-                            .foregroundColor(.white)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 50)
-                            .background(Color.black)
-                            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    HStack(spacing: 12) {
+                        Button(action: onPrintBon) {
+                            Text("בונבון")
+                                .font(.system(size: 16, weight: .bold))
+                                .foregroundColor(.white)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 50)
+                                .background(Color.black)
+                                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        }
+
+                        Button(action: onPrintInvoice) {
+                            Text("חשבונית")
+                                .font(.system(size: 16, weight: .bold))
+                                .foregroundColor(.white)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 50)
+                                .background(Color.black)
+                                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        }
                     }
-                    .buttonStyle(.plain)
                 }
             }
             .padding(.horizontal, 16)
@@ -1225,15 +1206,47 @@ struct AdminOrdersView: View {
             .replacingOccurrences(of: "Customer", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
+        // ✅ If unpaid, don’t print "Tax Invoice/Receipt"
+        let pmRaw = (order.paymentMethod ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if order.isUnpaid || pmRaw == "unpaid" {
+            Swift.print("⚠️ Order \(order.id) is unpaid — skipping Tax Invoice / Receipt")
+            return
+        }
+
+        let paidAmount = order.total
+
+        // ✅ Hebrew label (what prints on the receipt)
+        let paymentMethodHeb: String = {
+            switch pmRaw {
+            case "cash", "mezuman":
+                return "מזומן"
+            case "card", "credit", "cc", "zcredit", "stripe", "square":
+                return "אשראי"
+            case "applepay":
+                return "אפל פיי"
+            case "googlepay":
+                return "גוגל פיי"
+            case "":
+                // fallback if server didn’t send it
+                return "אשראי"
+            default:
+                return pmRaw
+            }
+        }()
+
         PrinterManager.shared.printTaxInvoice(
             invoiceNumber: order.id,
             date: order.placedAt,
             customerName: customer.isEmpty ? "לקוח" : customer,
             items: items,
-            vatRate: 0.17
+            vatRate: 0.18,
+            paidAmount: paidAmount,
+            paymentMethod: paymentMethodHeb,
+            cardBrand: nil,
+            cardLast4: nil,
+            installments: nil
         )
     }
-
     private func makeInvoiceItems(from order: AdminOrderItem) -> [InvoiceItem] {
         let lines = order.items
         let sumKnownLines = lines.reduce(0.0) { acc, li in
@@ -1250,7 +1263,7 @@ struct AdminOrdersView: View {
             let qInt = max(1, li.quantity)
             let fullName: String = {
                 if let mods = li.modifiersText, !mods.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    return "\(li.name) (\(mods))"
+                    return "\(li.name)"
                 }
                 return li.name
             }()
@@ -1269,7 +1282,8 @@ struct AdminOrdersView: View {
             entries: entries,
             total: order.total,
             diningMode: mode,
-            customerName: order.customerName
+            customerName: order.customerName,
+            customerPhone: order.customerPhone       // ✅ NEW
         )
     }
 
@@ -1766,144 +1780,111 @@ struct TipsDraft: Equatable {
 
 
 
-import SwiftUI
-
 struct EODWizardView: View {
     @Environment(\.dismiss) private var dismiss
     let miniAppId: Int
-
-    enum Step: Int, CaseIterable {
-        case openOrders = 0
-        case teamTables = 1
-        case tips       = 2
-        case preview    = 3
-
-        var title: String {
-            switch self {
-            case .openOrders: return "1/4 הזמנות פתוחות"
-            case .teamTables: return "2/4 שולחנות צוות"
-            case .tips:       return "3/4 מזומן + טיפים"
-            case .preview:    return "4/4 סיכום"
-            }
-        }
-    }
-
-    @State private var step: Step = .openOrders
-
-    // Remaining “must resolve” counters from AdminOrdersView
-    @State private var remainingOpenOrders: Int = 0
-    @State private var remainingTeamTables: Int = 0
-
-    // ✅ Tips stage:
-    // system cash already includes tip → you count drawer cash → enter “עדכון מזומן” + “עדכון טיפים”
-    @State private var cashSystemInclTip: Double? = nil
-    @State private var cashCountedText: String = ""
-    @State private var cashAdjText: String = ""
-    @State private var tipsAdjText: String = ""
-
-    @State private var tipsLoading = false
-    @State private var tipsError: String? = nil
-    @State private var didSubmitAdjustment = false
-
-    // ✅ UI: show “פער” + “עדכון פער” only after counted cash was entered
-    @State private var showAfterCounted: Bool = false
-
-    // ✅ Z report flow (Generate -> Print)
-    private enum ZState { case idle, generating, readyToPrint }
-    @State private var zState: ZState = .idle
-    @State private var zResp: ZReportGenerateAPI.Resp? = nil
-    @State private var zError: String? = nil
-
-    private var canGoNext: Bool {
-        switch step {
-        case .openOrders: return remainingOpenOrders == 0
-        case .teamTables: return remainingTeamTables == 0
-        case .tips:       return canProceedFromTips
-        case .preview:    return false
-        }
-    }
+    let onContinueOrder: (AdminOrderItem) -> Void
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 14) {
-                header
-
-                Group {
-                    switch step {
-                    case .openOrders:
-                        AdminOrdersView(
-                            mode: .endOfDay,
-                            eodFilter: .openOrdersOnly,
-                            onSelectUnpaid: nil,
-                            onRemainingChanged: { remainingOpenOrders = $0 },
-                            onAllResolved: { remainingOpenOrders = 0 }
-                        )
-                        .environment(\.layoutDirection, .rightToLeft)
-
-                    case .teamTables:
-                        AdminOrdersView(
-                            mode: .endOfDay,
-                            eodFilter: .teamTablesOnly,
-                            onSelectUnpaid: nil,
-                            onRemainingChanged: { remainingTeamTables = $0 },
-                            onAllResolved: { remainingTeamTables = 0 }
-                        )
-                        .environment(\.layoutDirection, .rightToLeft)
-
-                    case .tips:
-                        tipsScreen
-
-                    case .preview:
-                        previewScreen
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                if step != .preview {
-                    navBar
-                }
-            }
-            .padding(.horizontal, 16)
-            .padding(.bottom, 14)
-            .background(Color(UIColor.systemGroupedBackground))
+            EODStepOpenOrdersView(
+                miniAppId: miniAppId,
+                onContinueOrder: onContinueOrder,
+                dismissWizard: { dismiss() }
+            )
             .navigationBarTitleDisplayMode(.inline)
-            .task { await loadCashExpectedIfNeeded() }
+            // ❌ remove .navigationBarBackButtonHidden(true)
+            // ❌ remove .toolbar custom chevron
         }
         .environment(\.layoutDirection, .rightToLeft)
         .environment(\.locale, Locale(identifier: "he_IL"))
     }
+}
 
-    // MARK: Header
+// MARK: - Shared "dismiss like iOS back" button
 
-    private var header: some View {
-        VStack(spacing: 8) {
-            HStack {
-                Button(action: { dismiss() }) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 14, weight: .bold))
-                        .padding(10)
-                        .background(Color(.systemGray5))
-                        .clipShape(Circle())
+private struct WizardDismissBackButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "chevron.backward")
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundColor(.primary)
+                .padding(10)
+                .background(Color(.systemBackground).opacity(0.95))
+                .clipShape(Circle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private extension View {
+    func wizardBackDismiss(_ dismissWizard: @escaping () -> Void) -> some View {
+        self
+            .navigationBarBackButtonHidden(true) // ✅ hide system pop-back
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    WizardDismissBackButton(action: dismissWizard)
                 }
-                Spacer()
-                Text("סוף יום")
-                    .font(.system(size: 22, weight: .bold))
-                Spacer()
-                Text(step.title)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(.secondary)
             }
+    }
+}
+
+// MARK: - STEP 1/3: Open Orders
+
+private struct EODStepOpenOrdersView: View {
+    let miniAppId: Int
+    let onContinueOrder: (AdminOrderItem) -> Void
+    let dismissWizard: () -> Void
+
+    @State private var remainingOpenOrders: Int = 0
+
+    var body: some View {
+        VStack(spacing: 14) {
 
             HStack(spacing: 8) {
-                stepPill("פתוחות", ok: remainingOpenOrders == 0, value: remainingOpenOrders)
-                stepPill("צוות",   ok: remainingTeamTables == 0, value: remainingTeamTables)
-                stepPill("מזומן/טיפ", ok: canProceedFromTips, value: nil)
+                pill("פתוחות", ok: remainingOpenOrders == 0, value: remainingOpenOrders)
+                pill("מזומן/טיפ", ok: false, value: nil)
             }
+            .padding(.top, 10)
+
+            AdminOrdersView(
+                mode: .endOfDay,
+                eodFilter: .openOrdersOnly,
+                onSelectUnpaid: { order in
+                    onContinueOrder(order)
+                    dismissWizard()
+                },
+                onRemainingChanged: { remainingOpenOrders = $0 },
+                onAllResolved: { remainingOpenOrders = 0 }
+            )
+            .environment(\.layoutDirection, .rightToLeft)
+
+            NavigationLink {
+                EODStepTipsView(
+                    miniAppId: miniAppId,
+                    dismissWizard: dismissWizard
+                )
+            } label: {
+                Text("הבא")
+                    .font(.system(size: 17, weight: .bold))
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 52)
+                    .background(remainingOpenOrders == 0 ? Color.black : Color.gray.opacity(0.35))
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+            .disabled(remainingOpenOrders != 0)
+            .padding(.bottom, 14)
         }
-        .padding(.top, 10)
+        .padding(.horizontal, 16)
+        .background(Color(UIColor.systemGroupedBackground))
+        .navigationTitle("1/3 הזמנות פתוחות")
+        // ✅ IMPORTANT: do NOT add any back button here (prevents double)
     }
 
-    private func stepPill(_ title: String, ok: Bool, value: Int?) -> some View {
+    private func pill(_ title: String, ok: Bool, value: Int?) -> some View {
         HStack(spacing: 6) {
             Image(systemName: ok ? "checkmark.circle.fill" : "circle")
             Text(value == nil ? title : "\(title): \(value!)")
@@ -1913,64 +1894,86 @@ struct EODWizardView: View {
         .padding(.vertical, 7)
         .background(Color(.systemGray6))
         .clipShape(Capsule())
-        .foregroundColor(.primary)
     }
+}
 
-    // MARK: Nav
 
-    private var navBar: some View {
-        HStack(spacing: 12) {
+// MARK: - STEP 2/3: Tips
 
-            Button { goBack() } label: {
-                Text("חזרה")
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundColor(.primary)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 52)
-                    .background(Color(.systemGray5))
-                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+private struct EODStepTipsView: View {
+    let miniAppId: Int
+    let dismissWizard: () -> Void
+
+    @State private var cashSystemInclTip: Double? = nil
+    @State private var cashCountedText: String = ""
+    @State private var cashAdjText: String = ""
+    @State private var tipsAdjText: String = ""
+
+    @State private var tipsLoading = false
+    @State private var tipsError: String? = nil
+    @State private var showAfterCounted: Bool = false
+
+    @State private var didSubmitAdjustment = false
+    @State private var isSubmitting = false
+    @State private var goPreview = false
+
+    var body: some View {
+        VStack(spacing: 14) {
+
+            HStack(spacing: 8) {
+                pill("פתוחות", ok: true, value: nil)
+                pill("מזומן/טיפ", ok: canProceedFromTips, value: nil)
             }
-            .disabled(step == .openOrders)
-            .opacity(step == .openOrders ? 0.4 : 1)
+            .padding(.top, 10)
 
-            Button { goNext() } label: {
-                Text("הבא")
+            tipsScreen
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            NavigationLink(isActive: $goPreview) {
+                EODStepPreviewView(
+                    miniAppId: miniAppId,
+                    dismissWizard: dismissWizard,
+                    cashSystemInclTip: cashSystemInclTip ?? 0,
+                    countedCash: countedCash,
+                    cashUpdate: cashUpdate,
+                    tipsUpdate: tipsUpdate,
+                    gap: gap,
+                    gapIsZero: gapIsZero,
+                    updateMatchesGap: updateMatchesGap
+                )
+            } label: { EmptyView() }
+            .hidden()
+
+            Button {
+                guard canProceedFromTips else { return }
+                guard !isSubmitting else { return }
+                isSubmitting = true
+
+                Task {
+                    await submitEodAdjustmentOrderIfNeeded()
+                    await MainActor.run {
+                        isSubmitting = false
+                        goPreview = true
+                    }
+                }
+            } label: {
+                Text(isSubmitting ? "שולח…" : "הבא")
                     .font(.system(size: 17, weight: .bold))
                     .foregroundColor(.white)
                     .frame(maxWidth: .infinity)
                     .frame(height: 52)
-                    .background(canGoNext ? Color.black : Color.gray.opacity(0.35))
+                    .background(canProceedFromTips && !isSubmitting ? Color.black : Color.gray.opacity(0.35))
                     .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             }
-            .disabled(!canGoNext)
+            .disabled(!canProceedFromTips || isSubmitting)
+            .padding(.bottom, 14)
         }
+        .padding(.horizontal, 16)
+        .background(Color(UIColor.systemGroupedBackground))
+        .navigationTitle("2/3 מזומן + טיפים")
+        .task { await loadCashExpectedIfNeeded() }
+        .wizardBackDismiss(dismissWizard)
     }
-
-    private func goBack() {
-        guard let prev = Step(rawValue: step.rawValue - 1) else { return }
-        step = prev
-    }
-
-    private func goNext() {
-        guard let next = Step(rawValue: step.rawValue + 1) else { return }
-
-        // ✅ When leaving tips -> submit “עדכון” order to DB, then continue
-        if step == .tips {
-            Task {
-                await submitEodAdjustmentOrderIfNeeded()
-                await MainActor.run { step = next }
-            }
-            return
-        }
-
-        step = next
-
-        if next == .tips {
-            Task { await loadCashExpectedIfNeeded() }
-        }
-    }
-
-    // MARK: - Tips logic
 
     private func parseNumber(_ s: String) -> Double {
         let t = s
@@ -1984,36 +1987,26 @@ struct EODWizardView: View {
     private var cashUpdate: Double  { parseNumber(cashAdjText) }
     private var tipsUpdate: Double  { parseNumber(tipsAdjText) }
 
+    private func r0(_ v: Double) -> Double { v.rounded(.toNearestOrAwayFromZero) }
+
     private var gap: Double {
         guard let sys = cashSystemInclTip else { return 0 }
-        return countedCash - sys
+        return r0(countedCash) - r0(sys)
     }
 
     private var totalUpdate: Double { cashUpdate + tipsUpdate }
 
     private var gapIsZero: Bool { abs(gap) < 0.01 }
-    private var updateMatchesGap: Bool { abs(totalUpdate - gap) < 0.01 }
+    private var updateMatchesGap: Bool { abs(r0(totalUpdate) - gap) < 0.01 }
 
     private var hasEnteredCountedCash: Bool {
-        let trimmed = cashCountedText.trimmingCharacters(in: .whitespacesAndNewlines)
-        return !trimmed.isEmpty
+        !cashCountedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var canProceedFromTips: Bool {
         guard cashSystemInclTip != nil else { return false }
         guard hasEnteredCountedCash else { return false }
         return gapIsZero || updateMatchesGap
-    }
-
-    private func resetTipsStage() {
-        cashCountedText = ""
-        cashAdjText = ""
-        tipsAdjText = ""
-        tipsError = nil
-        didSubmitAdjustment = false
-        withAnimation(.spring(response: 0.25, dampingFraction: 0.9)) {
-            showAfterCounted = false
-        }
     }
 
     private var tipsScreen: some View {
@@ -2026,7 +2019,14 @@ struct EODWizardView: View {
                     Spacer()
 
                     Button {
-                        resetTipsStage()
+                        cashCountedText = ""
+                        cashAdjText = ""
+                        tipsAdjText = ""
+                        tipsError = nil
+                        didSubmitAdjustment = false
+                        withAnimation(.spring(response: 0.25, dampingFraction: 0.9)) {
+                            showAfterCounted = false
+                        }
                         Haptics.light()
                     } label: {
                         HStack(spacing: 6) {
@@ -2072,7 +2072,6 @@ struct EODWizardView: View {
                 Spacer()
             } else {
                 VStack(spacing: 12) {
-
                     if let err = tipsError {
                         Text(err)
                             .font(.system(size: 13, weight: .semibold))
@@ -2119,7 +2118,6 @@ struct EODWizardView: View {
 
                         if showAfterCounted {
                             Divider().padding(.vertical, 2)
-
                             HStack {
                                 Spacer()
                                 Text("פער: \(formatILS(gap))")
@@ -2127,7 +2125,6 @@ struct EODWizardView: View {
                                     .monospacedDigit()
                                     .foregroundColor(gapIsZero ? .secondary : .primary)
                             }
-                            .transition(.move(edge: .top).combined(with: .opacity))
                         }
                     }
                     .padding(16)
@@ -2172,7 +2169,6 @@ struct EODWizardView: View {
                         .padding(16)
                         .background(Color(UIColor.secondarySystemGroupedBackground))
                         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                        .transition(.move(edge: .top).combined(with: .opacity))
                     }
                 }
             }
@@ -2200,39 +2196,200 @@ struct EODWizardView: View {
         }
     }
 
-    // MARK: Preview Screen (Generate -> Print + Close)
-    private func previewLine(_ title: String, value: String, isBad: Bool = false) -> some View {
-        HStack {
-            Text(value)
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundColor(isBad ? .red : .primary)
-                .monospacedDigit()
-            Spacer()
-            Text(title)
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundColor(.secondary)
+    private func pill(_ title: String, ok: Bool, value: Int?) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: ok ? "checkmark.circle.fill" : "circle")
+            Text(value == nil ? title : "\(title): \(value!)")
+        }
+        .font(.system(size: 13, weight: .semibold))
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(Color(.systemGray6))
+        .clipShape(Capsule())
+    }
+
+    private func formatILS(_ v: Double) -> String { String(format: "₪%.0f", v) }
+
+    private func loadCashExpectedIfNeeded() async {
+        guard cashSystemInclTip == nil, !tipsLoading else { return }
+        await reloadCashExpectedFromXReport()
+    }
+
+    private func reloadCashExpectedFromXReport() async {
+        tipsLoading = true
+        tipsError = nil
+        defer { tipsLoading = false }
+
+        do {
+            let x = try await XReportAPI.fetch(miniAppId: miniAppId)
+            cashSystemInclTip = (x.agg.cashTotal) + (x.agg.tipsTotal)
+        } catch {
+            let ns = error as NSError
+            let body = ns.userInfo["body"] as? String ?? ""
+            tipsError = body.isEmpty ? "שגיאה בטעינת X" : "שגיאה בטעינת X: \(body)"
+            cashSystemInclTip = nil
         }
     }
-    
-    private var previewScreen: some View {
+
+    private func submitEodAdjustmentOrderIfNeeded() async {
+        print("🧾 EOD submit CALLED didSubmit=\(didSubmitAdjustment)")
+        guard !didSubmitAdjustment else {
+            print("🧾 EOD submit skipped (already submitted)")
+            return
+        }
+
+        // only submit if there is actually something to submit
+        let shouldSubmit = (!gapIsZero) || abs(totalUpdate) > 0.01
+        guard shouldSubmit else {
+            didSubmitAdjustment = true
+            print("🧾 EOD submit skipped (nothing to submit) -> didSubmit=true")
+            return
+        }
+
+        didSubmitAdjustment = true
+
+        // --- tiny cash hack (same as you had) ---
+        let cashUpdateRaw = cashUpdate
+        let tipsUpdateRaw = tipsUpdate
+        let needsTinyCashHack = (cashUpdateRaw <= 0.01 && tipsUpdateRaw > 0.01)
+        let cashUpdateForDb = needsTinyCashHack ? 0.2 : cashUpdateRaw
+        let totalUpdateForDb = cashUpdateForDb + tipsUpdateRaw
+
+        // Build the single "עדכון" entry
+        let item = ShellMenuItem(
+            id: -900_001,
+            name: "עדכון",
+            price: cashUpdateForDb,
+            category: "EOD",
+            modifiers: nil,
+            imageURL: nil,
+            description: nil,
+            status: 1,
+            stockQuantity: nil,
+            printer: nil
+        )
+
+        let entries: [BasketEntry] = [
+            BasketEntry(
+                id: 1,
+                item: item,
+                quantity: 1,
+                subtitle: nil,
+                unitPrice: cashUpdateForDb
+            )
+        ]
+
+        // Totals payload (match your backend keys)
+        let totals: [String: Any] = [
+            "subtotal": cashUpdateForDb,
+            "discount": 0,
+            "excluded": 0,
+            "tip": tipsUpdateRaw,
+            "total": cashUpdateForDb,               // keep aligned with your existing server logic
+            "grandTotal": totalUpdateForDb,
+            "currency": "ILS",
+            "eodTinyCashHack": needsTinyCashHack
+        ]
+
+        print("""
+        🧾 EOD SUBMIT begin
+          cashUpdateRaw=\(cashUpdateRaw)
+          tipsUpdateRaw=\(tipsUpdateRaw)
+          cashUpdateForDb=\(cashUpdateForDb)
+          totalUpdateForDb=\(totalUpdateForDb)
+          gap=\(gap) gapIsZero=\(gapIsZero) matches=\(updateMatchesGap)
+        """)
+
+        // Optional: print a cURL for submitOrder (if you keep that helper around)
+        // printSubmitOrderCurl(miniAppId: miniAppId, customerName: "עדכון סוף יום",
+        //                      entries: entries, totals: totals,
+        //                      paymentMethod: "cash", cashAmount: cashUpdateForDb, cardAmount: 0)
+
+        await withCheckedContinuation { cont in
+            let payment = OrderAPI.PaymentSummary(
+                method: .cash,
+                cashAmount: cashUpdateForDb,
+                cardAmount: 0
+            )
+
+            OrderAPI.submitOrder(
+                entries: entries,
+                total: cashUpdateForDb,              // ✅ critical: server stores this as order.total
+                diningMode: .dineIn,
+                source: "cashpoint",
+                customerName: "עדכון סוף יום",
+                customerPhone: nil,
+                payment: payment,
+                zcreditMeta: nil,
+                ticketNumber: nil,
+                totals: totals
+            ) { result in
+                DispatchQueue.main.async {
+                    switch result {
+                    case .success(let oid):
+                        print("✅ EOD update saved. orderId=\(oid) tinyHack=\(needsTinyCashHack)")
+                        Haptics.success()
+                    case .failure(let err):
+                        print("❌ EOD update submit failed:", err)
+                        Haptics.error()
+                        didSubmitAdjustment = false // allow retry
+                    }
+                    cont.resume()
+                }
+            }
+        }
+    }
+}
+
+// MARK: - STEP 3/3: Preview
+
+private struct EODStepPreviewView: View {
+    let miniAppId: Int
+    let dismissWizard: () -> Void
+
+    let cashSystemInclTip: Double
+    let countedCash: Double
+    let cashUpdate: Double
+    let tipsUpdate: Double
+    let gap: Double
+    let gapIsZero: Bool
+    let updateMatchesGap: Bool
+
+    private enum ZState { case idle, generating, readyToPrint }
+    @State private var zState: ZState = .idle
+    @State private var zResp: ZReportGenerateAPI.Resp? = nil
+    @State private var zError: String? = nil
+
+    @State private var xSnapshot: XReportApiResponse? = nil
+    @State private var xSnapshotError: String? = nil
+    @State private var isLoadingSnapshot = false
+
+    var body: some View {
         VStack(spacing: 12) {
 
             VStack(alignment: .trailing, spacing: 10) {
                 Text("סיכום סוף יום")
                     .font(.system(size: 20, weight: .bold))
 
-                previewLine("הזמנות פתוחות", value: remainingOpenOrders == 0 ? "✅ סגור" : "❌ נשארו \(remainingOpenOrders)")
-                previewLine("שולחנות צוות",  value: remainingTeamTables == 0 ? "✅ סגור" : "❌ נשארו \(remainingTeamTables)")
+                line("מזומן מערכת (כולל טיפ)", v: formatILS(cashSystemInclTip))
+                line("נספר במגירה", v: formatILS(countedCash))
+                line("פער", v: formatILS(gap), bad: !gapIsZero && !updateMatchesGap)
+                line("עדכון מזומן", v: formatILS(cashUpdate))
+                line("עדכון טיפים", v: formatILS(tipsUpdate))
+                line("סה״כ עדכון", v: formatILS(cashUpdate + tipsUpdate), bad: !gapIsZero && !updateMatchesGap)
 
-                if let sys = cashSystemInclTip {
-                    previewLine("מזומן מערכת (כולל טיפ)", value: formatILS(sys))
-                    previewLine("נספר במגירה", value: formatILS(countedCash))
-                    if showAfterCounted {
-                        previewLine("פער", value: formatILS(gap), isBad: !gapIsZero && !updateMatchesGap)
-                    }
-                    previewLine("עדכון מזומן", value: formatILS(cashUpdate))
-                    previewLine("עדכון טיפים", value: formatILS(tipsUpdate))
-                    previewLine("סה״כ עדכון", value: formatILS(totalUpdate), isBad: !gapIsZero && !updateMatchesGap)
+                if isLoadingSnapshot {
+                    Text("טוען X…")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.secondary)
+                } else if let x = xSnapshot {
+                    Text("X snapshot: gross \(formatILS(x.agg.grossTotal)) | cash \(formatILS(x.agg.cashTotal)) | card \(formatILS(x.agg.cardTotal))")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.secondary)
+                } else if let xSnapshotError {
+                    Text("X snapshot error: \(xSnapshotError)")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.red)
                 }
             }
             .padding(16)
@@ -2258,10 +2415,7 @@ struct EODWizardView: View {
 
             if zState == .readyToPrint {
                 HStack(spacing: 12) {
-                    Button {
-                        Haptics.success()
-                        print("🖨️ PRINT Z clicked — zReportId =", zResp?.zReportId ?? -1)
-                    } label: {
+                    Button { printZFromSnapshot() } label: {
                         Text("הדפס")
                             .font(.system(size: 18, weight: .bold))
                             .foregroundColor(.white)
@@ -2271,9 +2425,7 @@ struct EODWizardView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                     }
 
-                    Button {
-                        dismiss()
-                    } label: {
+                    Button { dismissWizard() } label: {
                         Text("סגור")
                             .font(.system(size: 18, weight: .semibold))
                             .foregroundColor(.primary)
@@ -2283,11 +2435,8 @@ struct EODWizardView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                     }
                 }
-                .transition(.move(edge: .bottom).combined(with: .opacity))
             } else {
-                Button {
-                    handleZPrimary()
-                } label: {
+                Button { handleZPrimary() } label: {
                     Text(zPrimaryTitle)
                         .font(.system(size: 18, weight: .bold))
                         .foregroundColor(.white)
@@ -2296,17 +2445,115 @@ struct EODWizardView: View {
                         .background(Color.black)
                         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                 }
-                .disabled(zState == .generating)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .disabled(zState == .generating || isLoadingSnapshot)
             }
         }
-        .animation(.spring(response: 0.28, dampingFraction: 0.88), value: zState)
+        .padding(.horizontal, 16)
+        .padding(.bottom, 14)
+        .background(Color(UIColor.systemGroupedBackground))
+        .navigationTitle("3/3 סיכום")
+        .navigationBarTitleDisplayMode(.inline)
+        .wizardBackDismiss(dismissWizard)
+        .task { await ensureXSnapshot() }
     }
+
+    private func ensureXSnapshot() async {
+        guard xSnapshot == nil else { return }
+        isLoadingSnapshot = true
+        xSnapshotError = nil
+        defer { isLoadingSnapshot = false }
+
+        do {
+            let x = try await XReportAPI.fetch(miniAppId: miniAppId)
+            await MainActor.run {
+                xSnapshot = x
+                xSnapshotError = nil
+            }
+        } catch {
+            let ns = error as NSError
+            let body = ns.userInfo["body"] as? String ?? ""
+            await MainActor.run {
+                xSnapshotError = body.isEmpty ? error.localizedDescription : body
+            }
+        }
+    }
+
+    private func printZFromSnapshot() {
+        guard let x = xSnapshot else {
+            Haptics.error()
+            return
+        }
+        let d = salesDataFromSnapshot(x)
+        PrinterManager.shared.printSalesReport(d, type: .z, reportDate: Date(), isRestore: false, generatedAt: Date())
+        Haptics.success()
+    }
+
+    private func salesDataFromSnapshot(_ x: XReportApiResponse) -> PrinterManager.SalesReportData {
+        let a = x.agg
+        return PrinterManager.SalesReportData(
+            ppaRestaurant: 0,
+            dinersRestaurant: a.restaurantCount,
+            totalRestaurantIncVat: a.restaurantGross,
+            ppaRestaurantValue: 0,
+
+            ppaTA: 0,
+            dinersTA: a.taCount,
+            totalTAIncVat: a.taGross,
+
+            totalSalesIncVat: a.grossTotal,
+            tipsTotal: a.tipsTotal,
+            grandTotal: a.netTotal,
+
+            cashAmount: a.cashTotal,
+            cashCount: a.cashCount,
+            cardAmount: a.cardTotal,
+            cardCount: a.cardCount,
+            collectionsTotalAmount: a.paymentsTotal,
+            collectionsTotalCount: a.ordersCount,
+
+            closedDrawersAmount: 0,
+            openDrawersAmount: 0,
+            depositWithdrawAmount: 0,
+            drawerTotalAmount: 0,
+            mainDrawerAmount: 0,
+            hostStationDrawerAmount: 0,
+
+            tipBaseTotal: a.tipsTotal,
+            tipRestaurant: 0,
+            tipBarTakeaway: 0,
+            extraTipTotal: 0,
+            extraTipRestaurant: 0,
+            extraTipBar: 0,
+
+            ordersOTHAmount: a.ordersOTHAmount,
+            ordersOTHCount: a.ordersOTHCount,
+            itemsOTHAmount: 0,
+            itemsOTHCount: 0,
+            canceledItemsAmount: 0,
+            canceledItemsCount: 0,
+            refundedItemsAmount: 0,
+            refundedItemsCount: 0,
+            discountsAmount: a.discountsTotal,
+            discountsCount: a.discountsCount,
+            discountsRefundAmount: 0,
+            discountsRefundCount: 0
+        )
+    }
+
+    private func line(_ t: String, v: String, bad: Bool = false) -> some View {
+        HStack {
+            Text(v).font(.system(size: 15, weight: .semibold)).foregroundColor(bad ? .red : .primary).monospacedDigit()
+            Spacer()
+            Text(t).font(.system(size: 15, weight: .semibold)).foregroundColor(.secondary)
+        }
+    }
+
+    private func formatILS(_ v: Double) -> String { String(format: "₪%.0f", v) }
 
     private var zPrimaryTitle: String {
         switch zState {
-        case .idle:         return "הפק דוח"
-        case .generating:   return "מפיק…"
+        case .idle: return "הפק דוח"
+        case .generating: return "מפיק…"
         case .readyToPrint: return "הדפס"
         }
     }
@@ -2315,25 +2562,23 @@ struct EODWizardView: View {
         switch zState {
         case .idle:
             Task { await generateZNow() }
-        case .generating:
-            return
-        case .readyToPrint:
+        default:
             return
         }
     }
 
     @MainActor
     private func generateZNow() async {
+        await ensureXSnapshot()
+
         zError = nil
         zResp = nil
         zState = .generating
         Haptics.light()
 
         do {
-            let toEmail = "omer@studionative.io"
-            let resp = try await ZReportGenerateAPI.generate(miniAppId: miniAppId, to: toEmail)
+            let resp = try await ZReportGenerateAPI.generate(miniAppId: miniAppId, to: "omer@studionative.io")
             zResp = resp
-
             if resp.ok {
                 Haptics.success()
                 zState = .readyToPrint
@@ -2350,143 +2595,7 @@ struct EODWizardView: View {
             Haptics.error()
         }
     }
-
-    // MARK: - Fetch system cash+tip from X report
-
-    private func loadCashExpectedIfNeeded() async {
-        guard cashSystemInclTip == nil, !tipsLoading else { return }
-        await reloadCashExpectedFromXReport()
-    }
-
-    private func reloadCashExpectedFromXReport() async {
-        tipsLoading = true
-        tipsError = nil
-        defer { tipsLoading = false }
-
-        do {
-            let x = try await XReportAPI.fetch(miniAppId: miniAppId)
-            let cashWithTip = (x.agg.cashTotal) + (x.agg.tipsTotal)
-            cashSystemInclTip = cashWithTip
-        } catch {
-            let ns = error as NSError
-            let body = ns.userInfo["body"] as? String ?? ""
-            tipsError = body.isEmpty ? "שגיאה בטעינת X" : "שגיאה בטעינת X: \(body)"
-            cashSystemInclTip = nil
-        }
-    }
-
-    // MARK: - Submit “עדכון” as an order in DB on Next (tips step)
-    private var cashUpdateRaw: Double { cashUpdate }     // your parsed field
-    private var tipsUpdateRaw: Double { tipsUpdate }
-
-    private var needsTinyCashHack: Bool {
-        cashUpdateRaw <= 0.01 && tipsUpdateRaw > 0.01
-    }
-
-    // ✅ choose 0.2 (0.1 sometimes gets rounded away / ignored)
-    private var cashUpdateForDb: Double {
-        needsTinyCashHack ? 0.2 : cashUpdateRaw
-    }
-
-    private var totalUpdateForDb: Double {
-        cashUpdateForDb + tipsUpdateRaw
-    }
-    private func makeEodAdjustmentEntries() -> [BasketEntry] {
-        let item = ShellMenuItem(
-            id: -900_001,
-            name: "עדכון",
-            price: cashUpdateForDb,          // ✅
-            category: "EOD",
-            modifiers: nil,
-            imageURL: nil,
-            description: nil,
-            status: 1,
-            stockQuantity: nil,
-            printer: nil
-        )
-
-        return [
-            BasketEntry(
-                id: 1,
-                item: item,
-                quantity: 1,
-                subtitle: nil,
-                unitPrice: cashUpdateForDb     // ✅
-            )
-        ]
-    }
-
-    private func submitEodAdjustmentOrderIfNeeded() async {
-        guard step == .tips else { return }
-        guard !didSubmitAdjustment else { return }
-
-        let shouldSubmit = (!gapIsZero) || abs(totalUpdate) > 0.01
-        guard shouldSubmit else {
-            didSubmitAdjustment = true
-            return
-        }
-
-        didSubmitAdjustment = true
-
-        // ✅ totals we want server to store
-        let totals: [String: Any] = [
-            "subtotal": cashUpdateForDb,               // ✅
-            "discount": 0,
-            "excluded": 0,
-            "tip": tipsUpdateRaw,
-            "total": cashUpdateForDb,                  // ✅
-            "grandTotal": totalUpdateForDb,            // ✅
-            "currency": "ILS",
-
-            // optional debug marker (so you can filter it later)
-            "eodTinyCashHack": needsTinyCashHack
-        ]
-
-        let entries = makeEodAdjustmentEntries()
-
-        await withCheckedContinuation { cont in
-            let payment = OrderAPI.PaymentSummary(
-                method: .cash,
-                cashAmount: cashUpdateForDb,            // ✅
-                cardAmount: 0
-            )
-
-            OrderAPI.submitOrder(
-                entries: entries,
-                total: cashUpdateForDb,                 // ✅ THIS is critical
-                diningMode: .dineIn,
-                source: "cashpoint",
-                customerName: "עדכון סוף יום",
-                customerPhone: nil,
-                payment: payment,
-                zcreditMeta: nil,
-                ticketNumber: nil,
-                totals: totals
-            ) { result in
-                DispatchQueue.main.async {
-                    switch result {
-                    case .success(let oid):
-                        print("✅ EOD update saved. orderId=\(oid) tinyHack=\(self.needsTinyCashHack)")
-                        Haptics.success()
-                    case .failure(let err):
-                        print("❌ EOD update submit failed:", err)
-                        Haptics.error()
-                        didSubmitAdjustment = false
-                    }
-                    cont.resume()
-                }
-            }
-        }
-    }
-
-   
-    // MARK: Formatting
-
-    private func formatILS(_ v: Double) -> String {
-        String(format: "₪%.0f", v)
-    }
 }
-
 // MARK: - Z Report API (debug curl + response)
 
 enum ZReportGenerateAPI {
@@ -2608,4 +2717,5 @@ enum EODFilter {
     case teamTablesOnly
     case openOrdersOnly
 }
+
 
