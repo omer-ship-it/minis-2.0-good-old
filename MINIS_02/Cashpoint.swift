@@ -4365,6 +4365,7 @@ struct CashPointView: View {
                     },
                     startAtCharge: isPayLaterMode
                 )
+                .environment(\.layoutDirection, isRtl ? .rightToLeft : .rightToLeft)
             }
             .fullScreenCover(item: $adminDraft) { draft in
                 AdminProductEditorView(
@@ -6525,12 +6526,12 @@ struct CashPointView: View {
                                 case .options:
                                     if g.items.count > 3 {
                                         let rowStarts = Array(stride(from: 0, to: g.items.count, by: 3))
-
+                                        
                                         VStack(alignment: isRtl ? .leading : .trailing, spacing: 8) {
                                             ForEach(rowStarts, id: \.self) { start in
                                                 let end = min(start + 3, g.items.count)
                                                 let rowItems = Array(g.items[start..<end])
-
+                                                
                                                 HStack(spacing: 8) {
                                                     if !isRtl { Spacer() }
                                                     ForEach(rowItems) { opt in
@@ -6551,79 +6552,89 @@ struct CashPointView: View {
                                         .frame(maxWidth: .infinity,
                                                alignment: isRtl ? .leading : .trailing)
                                     }
-
+                                    
                                 case .additions:
                                     Group {
-                                        if g.items.count > 3 {
-                                            let rowStarts = Array(stride(from: 0, to: g.items.count, by: 3))
-
-                                            VStack(alignment: isRtl ? .leading : .trailing, spacing: 8) {
+                                        let items = g.items
+                                        let first = items.first
+                                        let rest  = Array(items.dropFirst())
+                                        
+                                        VStack(alignment: isRtl ? .leading : .trailing, spacing: 8) {
+                                            
+                                            // ✅ Row 1: FIRST addition only
+                                            if let first {
+                                                HStack(spacing: 8) {
+                                                    if !isRtl { Spacer() }
+                                                    
+                                                    let isSelected =
+                                                    (additionSelections[entry.id] ?? []).contains(first.name)
+                                                    
+                                                    Text(first.extraPrice > 0
+                                                         ? "\(first.name) +\(Int(first.extraPrice))"
+                                                         : first.name)
+                                                    .font(.system(size: 17, weight: .medium))
+                                                    .padding(.horizontal, 16)
+                                                    .padding(.vertical, 8)
+                                                    .background(isSelected ? Color.black : Color(.systemGray5))
+                                                    .foregroundColor(isSelected ? .white : .primary)
+                                                    .clipShape(Capsule())
+                                                    .onTapGesture {
+                                                        // ✅ Default behaves like "None": selects ONLY itself (clears others)
+                                                        additionSelections[entry.id] = [first.name]
+                                                        updateEntryPricingAndSubtitle(lineId: entry.id)
+                                                        Haptics.light()
+                                                    }
+                                                    
+                                                    if isRtl { Spacer() }
+                                                }
+                                            }
+                                            
+                                            // ✅ Row 2+: the rest in rows of 3
+                                            if !rest.isEmpty {
+                                                let rowStarts = Array(stride(from: 0, to: rest.count, by: 3))
+                                                
                                                 ForEach(rowStarts, id: \.self) { start in
-                                                    let end = min(start + 3, g.items.count)
-                                                    let rowItems = Array(g.items[start..<end])
-
+                                                    let end = min(start + 3, rest.count)
+                                                    let rowItems = Array(rest[start..<end])
+                                                    
                                                     HStack(spacing: 8) {
                                                         if !isRtl { Spacer() }
-
+                                                        
                                                         ForEach(rowItems) { opt in
                                                             let isSelected =
-                                                                (additionSelections[entry.id] ?? []).contains(opt.name)
-
+                                                            (additionSelections[entry.id] ?? []).contains(opt.name)
+                                                            
                                                             Text(opt.extraPrice > 0
                                                                  ? "\(opt.name) +\(Int(opt.extraPrice))"
                                                                  : opt.name)
-                                                                .font(.system(size: 17, weight: .medium))
-                                                                .padding(.horizontal, 16)
-                                                                .padding(.vertical, 8)
-                                                                .background(isSelected ? Color.black : Color(.systemGray5))
-                                                                .foregroundColor(isSelected ? .white : .primary)
-                                                                .clipShape(Capsule())
-                                                                .onTapGesture {
-                                                                    var set = additionSelections[entry.id] ?? []
-                                                                    if isSelected { set.remove(opt.name) }
-                                                                    else { set.insert(opt.name) }
-                                                                    additionSelections[entry.id] = set
-                                                                    updateEntryPricingAndSubtitle(lineId: entry.id)
-                                                                    Haptics.light()
-                                                                }
-                                                        }
+                                                            .font(.system(size: 17, weight: .medium))
+                                                            .padding(.horizontal, 16)
+                                                            .padding(.vertical, 8)
+                                                            .background(isSelected ? Color.black : Color(.systemGray5))
+                                                            .foregroundColor(isSelected ? .white : .primary)
+                                                            .clipShape(Capsule())
+                                                            .onTapGesture {
+                                                                var set = additionSelections[entry.id] ?? []
 
+                                                                // ✅ If you pick any non-default, remove the default
+                                                                set.remove(first?.name ?? "")
+
+                                                                if isSelected {
+                                                                    set.remove(opt.name)
+                                                                } else {
+                                                                    set.insert(opt.name)
+                                                                }
+
+                                                                additionSelections[entry.id] = set
+                                                                updateEntryPricingAndSubtitle(lineId: entry.id)
+                                                                Haptics.light()
+                                                            }
+                                                        }
+                                                        
                                                         if isRtl { Spacer() }
                                                     }
                                                 }
                                             }
-
-                                        } else {
-                                            HStack(spacing: 8) {
-                                                if !isRtl { Spacer() }
-
-                                                ForEach(g.items) { opt in
-                                                    let isSelected =
-                                                        (additionSelections[entry.id] ?? []).contains(opt.name)
-
-                                                    Text(opt.extraPrice > 0
-                                                         ? "\(opt.name) +\(Int(opt.extraPrice))"
-                                                         : opt.name)
-                                                        .font(.system(size: 17, weight: .medium))
-                                                        .padding(.horizontal, 16)
-                                                        .padding(.vertical, 8)
-                                                        .background(isSelected ? Color.black : Color(.systemGray5))
-                                                        .foregroundColor(isSelected ? .white : .primary)
-                                                        .clipShape(Capsule())
-                                                        .onTapGesture {
-                                                            var set = additionSelections[entry.id] ?? []
-                                                            if isSelected { set.remove(opt.name) }
-                                                            else { set.insert(opt.name) }
-                                                            additionSelections[entry.id] = set
-                                                            updateEntryPricingAndSubtitle(lineId: entry.id)
-                                                            Haptics.light()
-                                                        }
-                                                }
-
-                                                if isRtl { Spacer() }
-                                            }
-                                            .frame(maxWidth: .infinity,
-                                                   alignment: isRtl ? .leading : .trailing)
                                         }
                                     }
                                 }
@@ -6723,8 +6734,20 @@ struct CashPointView: View {
                 }
             }
 
+            // ✅ ADDITIONS: default-select the first item of EACH additions group
             if additionSelections[entry.id] == nil {
-                additionSelections[entry.id] = []
+                var set: Set<String> = []
+
+                if let groups = entry.item.modifiers {
+                    for g in groups where g.type == .additions {
+                        if let first = g.items.first?.name {
+                            set.insert(first)
+                        }
+                    }
+                }
+
+                additionSelections[entry.id] = set
+                updateEntryPricingAndSubtitle(lineId: entry.id)
             }
         }
         

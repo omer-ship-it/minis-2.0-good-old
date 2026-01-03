@@ -6,7 +6,7 @@ import UIKit
 import StripeCore
 import StripeApplePay
 import StripePayments
-
+import Combine
 
 enum MenuTheme {
 
@@ -20,12 +20,7 @@ enum MenuTheme {
         Color(Color(hex: hex))
     }
     
-     func nextMenuTicketNumber() -> Int {
-        let key = "menu.localTicketNumber"
-        let v = UserDefaults.standard.integer(forKey: key) + 1
-        UserDefaults.standard.set(v, forKey: key)
-        return v
-    }
+    
 
     // MAIN COLORS
     static var accent: Color {
@@ -236,6 +231,65 @@ struct menuView: View {
     @State private var showMembersSheet = false
     @State private var showMemberCard = false
     @State private var showJoinMembers = false
+    @State private var cardContentHeight: CGFloat = 0
+    @State private var basketCardContentHeight: CGFloat = 0
+    @State private var showOrderFlow = false
+    @State private var orderFlowEntries: [BasketEntry] = []
+    @State private var orderFlowTotal: Double = 0
+    @State private var orderFlowDiningMode: DiningMode = .takeAway
+    @State private var orderFlowIsSubmitting = false
+    @State private var orderFlowShowProgress = false
+    @State private var orderFlowSubmitError: String? = nil
+    @AppStorage("cashPointMode") private var cashPointMode: Bool = false
+    @State private var scrollToTopToken: Int = 0
+    @StateObject private var scrollVM = MenuScrollCoordinator()
+    // MARK: - Idle reset (customer mode only)
+    @State private var lastInteractionAt: Date = Date()
+    @State private var showIdleSheet: Bool = false
+    @State private var idleCountdown: Int = 5
+
+    private let idleTimeout: TimeInterval = 30
+    private let idleCountdownStart: Int = 5
+    private let basketBarH: CGFloat = 76
+    @State private var studentClaim: StudentClaim? = nil
+    private let appGroupId = "group.minis"
+    private let kPendingStudentClaim  = "pendingStudentClaim.v1"
+    
+
+    
+    private func loadPendingStudentClaimIfAny() {
+        guard let suite = UserDefaults(suiteName: appGroupId),
+              let data = suite.data(forKey: kPendingStudentClaim),
+              let claim = try? JSONDecoder().decode(StudentClaim.self, from: data)
+        else { return }
+
+        // one-time
+        suite.removeObject(forKey: kPendingStudentClaim)
+        suite.synchronize()
+
+        studentClaim = claim
+    }
+    
+    private func registerInteraction() {
+        lastInteractionAt = Date()
+        if showIdleSheet {
+            showIdleSheet = false
+        }
+    }
+
+    private func startNewOrderFromIdle() {
+        // your "new order" behavior
+        basket.removeAll()
+        selectedBasketLineId = nil
+        nextBasketLineId = 1
+        showBasketSheet = false
+        selectedItem = nil
+        selectedCategory = availableCategories.first ?? ""
+        showWelcome = true
+
+        showIdleSheet = false
+        lastInteractionAt = Date()
+    }
     private var hasMemberProfile: Bool {
         UserDefaults.standard.dictionary(forKey: MembersKeys.profile) != nil
     }
@@ -282,6 +336,22 @@ struct menuView: View {
             }
         }
         return result
+    }
+    
+    private func resetMenuToTop(proxy: ScrollViewProxy) {
+        categorySyncResumeAt = Date().addingTimeInterval(1.2)   // ✅ pause detector
+        selectedCategory = ""                                  // ✅ clear highlight immediately
+
+        withAnimation(.easeInOut(duration: 0.35)) {
+            proxy.scrollTo("TOP", anchor: .top)                // ✅ jump to top anchor you already added
+        }
+
+        // ✅ after scroll settles, choose the first category as the new default
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+            if let first = availableCategories.first {
+                selectedCategory = first
+            }
+        }
     }
     
     struct OrderSnapshot: Identifiable {
@@ -509,6 +579,15 @@ struct menuView: View {
             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
     }
+    
+    
+
+    func nextMenuTicketNumber() -> Int {
+        let key = "menu.localTicketNumber"
+        let v = UserDefaults.standard.integer(forKey: key) + 1
+        UserDefaults.standard.set(v, forKey: key)
+        return v
+    }
 
     private func incrementEntry(_ id: Int) {
         guard let entry = basket[id] else { return }
@@ -523,12 +602,21 @@ struct menuView: View {
     private func decrementEntry(_ id: Int) {
         guard let entry = basket[id] else { return }
         let newQty = entry.quantity - 1
+
         if newQty <= 0 {
             basket[id] = nil
         } else {
             basket[id]?.quantity = newQty
         }
+
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
+
+        // ✅ If basket is now empty → close the basket sheet (works for iPhone sheet + iPad fullScreenCover)
+        if basket.isEmpty {
+            DispatchQueue.main.async {
+                showBasketSheet = false
+            }
+        }
     }
 
     private var availableCategories: [String] {
@@ -550,11 +638,11 @@ struct menuView: View {
             ZStack {
                 Color(.systemBackground).ignoresSafeArea()
                 ScrollViewReader { proxy in
-
+                    
                     if isPad {
                         // ✅ iPad layout: content + right rail
                         HStack(spacing: 0) {
-
+                            
                             CategoryRail(
                                 categories: availableCategories,
                                 selected: selectedCategory,
@@ -569,11 +657,14 @@ struct menuView: View {
                             )
                             // MAIN CONTENT
                             ScrollView {
+                                Color.clear
+                                    .frame(height: 1)
+                                    .id("TOP")
                                 LazyVStack(spacing: 0) {
-
+                                    
                                     // ✅ keep your existing top header stack / service segment / banners / myItems etc.
                                     // (everything you already have above Section)
-
+                                    
                                     ForEach(availableCategories, id: \.self) { category in
                                         GeometryReader { geo in
                                             Color.clear.preference(
@@ -582,10 +673,184 @@ struct menuView: View {
                                             )
                                         }
                                         .frame(height: 0)
-
+                                        
                                         Color.clear
                                             .frame(height: stickyHeaderHeight)
                                             .padding(.bottom, 15)
+                                            .id(anchorId(for: category))
+                                        
+                                        VStack(alignment: .leading, spacing: 12) {
+                                            Text(category)
+                                                .font(.menuRegular(22).weight(.semibold))
+                                                .padding(.horizontal, 16)
+                                            
+                                            LazyVGrid(columns: gridColumns, spacing: 12) {
+                                                ForEach(items.filter { $0.category == category }) { item in
+                                                    let qty = quantityInBasket(for: item)
+                                                    let badgeQty: Int? = qty > 0 ? qty : nil
+                                                    
+                                                    Button {
+                                                        selectedBasketLineId = nil
+                                                        productSheetNonce += 1
+                                                        selectedItem = item
+                                                    } label: {
+                                                        ProductCard(item: item, quantityInBasket: badgeQty)
+                                                    }
+                                                    .buttonStyle(CardPressStyle())
+                                                }
+                                            }
+                                            .padding(.horizontal, 16)
+                                            .padding(.bottom, 18)
+                                        }
+                                        .padding(.top, -stickyHeaderHeight + 50)
+                                    }
+                                }
+                                .padding(.bottom, 60)
+                                
+                            }
+                            .coordinateSpace(name: "menuScroll")
+                            
+                            // ✅ RIGHT CATEGORY RAIL
+                            
+                        }
+                        .onReceive(scrollVM.$scrollToTop) { shouldScroll in
+                            guard shouldScroll else { return }
+                            
+                            categorySyncResumeAt = Date().addingTimeInterval(1.2) // pause detector
+                            selectedCategory = "" // clear highlight so it won’t “snap back”
+                            
+                            withAnimation(.easeInOut(duration: 0.35)) {
+                                proxy.scrollTo("TOP", anchor: .top)
+                            }
+                            
+                            // pick first category after scroll settles
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+                                if let first = availableCategories.first {
+                                    selectedCategory = first
+                                }
+                                scrollVM.scrollToTop = false
+                            }
+                        }
+                        .onPreferenceChange(CategoryPositionKey.self) { positions in
+                            guard Date() >= categorySyncResumeAt, !positions.isEmpty else { return }
+                            
+                            let targetY: CGFloat = stickyHeaderHeight + 8
+                            let sorted = positions.sorted { $0.value < $1.value }
+                            
+                            // the category your current logic thinks is active
+                            guard let picked = (sorted.last(where: { $0.value <= targetY }) ?? sorted.first)?.key else { return }
+                            
+                            // ✅ iPad hack: shift back by 1
+                            let finalKey: String = {
+                                guard isPad else { return picked }
+                                guard let i = availableCategories.firstIndex(of: picked) else { return picked }
+                                let prev = max(i - 1, 0)
+                                return availableCategories[prev]
+                            }()
+                            
+                            if finalKey != selectedCategory {
+                                withAnimation(.easeInOut(duration: 0.15)) {
+                                    selectedCategory = finalKey
+                                }
+                            }
+                        }
+                        
+                    }  else {
+                        ScrollView {
+                            LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
+
+                                // ✅ ORIGINAL HEADER (put it back here)
+                                VStack(spacing: 8) {
+                                    HStack {
+                        #if !APPCLIP
+                                        Button {
+                                            dismiss()
+                                        } label: {
+                                            Image(systemName: isRtl ? "chevron.right" : "chevron.left")
+                                                .font(.system(size: 17, weight: .semibold))
+                                                .foregroundColor(.primary)
+                                                .frame(width: 32, height: 32)
+                                                .background(.ultraThinMaterial)
+                                                .clipShape(Circle())
+                                        }
+                        #endif
+                                        Spacer()
+
+                                        HStack(spacing: 20) {
+                                            Button { showShareSheet = true } label: {
+                                                Image(systemName: "arrowshape.turn.up.forward")
+                                                    .font(.system(size: 22, weight: .semibold))
+                                            }
+                                        }
+                                    }
+                                    .padding(.horizontal, 16)
+                                    .padding(.top, 8)
+
+                                    VStack(spacing: 5) {
+                                        Text(isRtl ? "תפריט בוקר" : "Beigel Bake · Brick Ln")
+                                            .padding(.top, 15)
+                                            .font(.menuRegular(28).weight(.semibold))
+
+                                        Text(isRtl ? "הזמינו מהטלפון ונעדכן כשמוכן" : "Delivered in around 20 minutes")
+                                            .font(.primariesDemi(isRtl ? 15 : 18))
+                                            .foregroundColor(
+                                                Color(UIColor { trait in
+                                                    trait.userInterfaceStyle == .dark
+                                                        ? UIColor(Color.primary)
+                                                        : UIColor.secondaryLabel
+                                                })
+                                            )
+                                    }
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.bottom, 12)
+                                }
+                                .padding(.bottom, 8)
+
+                                ServiceSegment(intent: $serviceIntent)
+                                    .padding(.horizontal, 16)
+                                    .padding(.top, 8)
+                                    .padding(.bottom, 20)
+                                    .onChange(of: serviceIntent) { new in
+                                        checkoutIntentRaw = new.rawValue
+                                        UserDefaults.standard.set(new == .sit ? "לשבת" : "לקחת", forKey: "serviceModeLabel")
+                                    }
+
+                                if let order = lastOrder {
+                                    OrderInProcessBanner(orderNumber: order.orderNumber, phase: order.phase) {
+                                        confirmationOrder = order
+                                        showConfirmation = true
+                                    }
+                                    .padding(.horizontal, 16)
+                                    .padding(.bottom, 12)
+                                }
+
+                                if !myItems.isEmpty {
+                                    MyItemsStrip(items: myItems, isRtl: isRtl) { productId in
+                                        if let item = items.first(where: { $0.id == productId }) {
+                                            selectedBasketLineId = nil
+
+                                            if let saved = myItems.first(where: { $0.id == productId }) {
+                                                let parsed = parseSelectionSubtitle(saved.lastSubtitle)
+                                                let aligned = alignPreset(parsed, to: item)
+                                                myItemsPreset = aligned
+                                            } else {
+                                                myItemsPreset = nil
+                                            }
+
+                                            productSheetNonce += 1
+                                            DispatchQueue.main.async { selectedItem = item }
+                                        }
+                                    }
+                                    .padding(.horizontal, 16)
+                                    .padding(.bottom, 12)
+                                }
+
+                                // ✅ NOW the pinned category bar + products
+                                Section {
+                                    // IMPORTANT: this must contain your per-category content
+                                    ForEach(availableCategories, id: \.self) { category in
+                                        Color.clear
+                                            .frame(height: stickyHeaderHeight)
                                             .id(anchorId(for: category))
 
                                         VStack(alignment: .leading, spacing: 12) {
@@ -613,23 +878,6 @@ struct menuView: View {
                                         }
                                         .padding(.top, -stickyHeaderHeight + 50)
                                     }
-                                }
-                                .padding(.bottom, 60)
-                            }
-                            .coordinateSpace(name: "menuScroll")
-
-                            // ✅ RIGHT CATEGORY RAIL
-                          
-                        }
-
-                    } else {
-                        // ✅ iPhone layout: keep your existing ScrollView + Section header CategoryBar
-                        ScrollView {
-                            LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
-                                // ... keep your existing content as-is ...
-
-                                Section {
-                                    // ... your existing per-category loop ...
                                 } header: {
                                     CategoryBar(
                                         categories: availableCategories,
@@ -648,7 +896,9 @@ struct menuView: View {
                         }
                         .coordinateSpace(name: "menuScroll")
                     }
+            
                 }
+                
                 .onPreferenceChange(CategoryPositionKey.self) { positions in
                     guard Date() >= categorySyncResumeAt, !positions.isEmpty else { return }
                     let sorted = positions.sorted { $0.value < $1.value }
@@ -700,7 +950,38 @@ struct menuView: View {
                 }
             }
         }
+#if APPCLIP
+.fullScreenCover(item: $studentClaim) { claim in
+    StudentDiscountView(
+        miniAppId: claim.miniAppId,
+        campaignId: claim.campaignId,
+        discountPercent: claim.discountPercent,
+        durationMonths: claim.durationMonths
+    )
+    .interactiveDismissDisabled(true)
+}
+#else
+.sheet(item: $studentClaim) { claim in
+    StudentDiscountView(
+        miniAppId: claim.miniAppId,
+        campaignId: claim.campaignId,
+        discountPercent: claim.discountPercent,
+        durationMonths: claim.durationMonths
+    )
+    .presentationDetents([.height(380)])
+    .presentationDragIndicator(.visible)
+}
+#endif
+        .onReceive(
+            NotificationCenter.default.publisher(for: Notification.Name.studentClaimArrived)
+                .receive(on: RunLoop.main)
+        ) { (note: Notification) in
+            print("🎓 studentClaimArrived received in menuView", note.name.rawValue)
+            loadPendingStudentClaimIfAny()
+        }
         .onAppear {
+           // loadPendingStudentClaimIfAny()   // ✅ cold start / app clip handoff
+
 #if !APPCLIP
             if !didPromptMembers && !hasMemberProfile {
                 
@@ -778,6 +1059,203 @@ struct menuView: View {
                 print("⚠️ OrderReadyNotification received without valid orderId:", userInfo)
             }
         }
+        // ✅ any tap/drag anywhere counts as interaction (without breaking scroll)
+        .contentShape(Rectangle())
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in
+                    guard !cashPointMode else { return }
+                    registerInteraction()
+                }
+        )
+        .onChange(of: showWelcome) { isShown in
+           
+                lastInteractionAt = Date()
+            
+        }
+        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
+            guard isPad else { return }
+            guard !cashPointMode else { return }          // only customer mode
+            guard !showWelcome else { return }
+            guard !showOrderFlow else { return }          // don’t interrupt payment flow
+            guard !showBasketSheet else { return }        // optional: don’t interrupt basket
+            guard selectedItem == nil else { return }     // optional: don’t interrupt product sheet
+
+            // if sheet already up, countdown happens inside the sheet (below)
+            guard !showIdleSheet else { return }
+
+            let idle = Date().timeIntervalSince(lastInteractionAt)
+            if idle >= idleTimeout {
+                idleCountdown = idleCountdownStart
+                showIdleSheet = true
+            }
+        }
+        .sheet(isPresented: $showIdleSheet) {
+            IdleResetSheet(
+                countdown: $idleCountdown,
+                onKeep: {
+                    registerInteraction()
+                },
+                onStartNew: {
+                    startNewOrderFromIdle()
+                }
+            )
+            .presentationDetents([.height(260)])
+            .presentationDragIndicator(.hidden)
+        }
+        .fullScreenCover(isPresented: $showOrderFlow) {
+
+            let entriesToSend = orderFlowEntries
+            let totalToSend   = orderFlowTotal
+            let dm            = orderFlowDiningMode
+
+            // ✅ if total is 0, skip payment UI entirely (free order)
+            if totalToSend <= 0.0001 {
+                VStack {
+                    Text("0.00")
+                    Text("Free order – skipping payment")
+                }
+                .onAppear {
+                    // call your submit-free-order path here if you want
+                    showOrderFlow = false
+                }
+            } else {
+
+                OrderFlowView(
+                    onSendToKitchen: {
+                        let ticket = nextMenuTicketNumber()
+                        PrinterManager.shared.printCashPointSplit(
+                            orderNumber: ticket,
+                            entries: entriesToSend,
+                            total: totalToSend,
+                            diningMode: dm,
+                            customerName: UserDefaults.standard.string(forKey: "userName"),
+                            customerPhone: UserDefaults.standard.string(forKey: "userPhone")
+                        )
+                    },
+                    total: totalToSend,
+                    isRtl: true,
+                    diningMode: .constant(dm),
+                    requiresPhoneStep: (miniAppId == 3),
+                    onCancel: { showOrderFlow = false },
+                    onCompleted: { phone, name, summary, discountOff, tip in
+                        // ✅ 0) Scroll request (fine to do early)
+                        scrollVM.scrollToTop = true
+
+                        // ✅ 1) Persist contact (same as you had)
+                        if let name, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            UserDefaults.standard.set(name, forKey: "userName")
+                        }
+                        if miniAppId == 3,
+                           let phone, !phone.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            UserDefaults.standard.set(phone, forKey: "userPhone")
+                        }
+
+                        // ✅ 2) PRINT FIRST (critical) — use a local ticket so it prints once
+                        let ticket = nextMenuTicketNumber()
+
+                        let safeName: String? = {
+                            let n = (UserDefaults.standard.string(forKey: "userName") ?? "")
+                                .trimmingCharacters(in: .whitespacesAndNewlines)
+                            return n.isEmpty ? nil : n
+                        }()
+
+                        let safePhone: String? = {
+                            guard miniAppId == 3 else { return "+447522552608" }
+                            let p = (UserDefaults.standard.string(forKey: "userPhone") ?? "")
+                                .trimmingCharacters(in: .whitespacesAndNewlines)
+                            return p.isEmpty ? nil : p
+                        }()
+
+                        PrinterManager.shared.printCashPointSplit(
+                            orderNumber: ticket,
+                            entries: entriesToSend,
+                            total: totalToSend,
+                            diningMode: dm,
+                            customerName: safeName,
+                            customerPhone: safePhone
+                        )
+
+                        // ✅ 3) Submit using snapshot (same as you had)
+                        orderFlowIsSubmitting = true
+                        orderFlowShowProgress = true
+                        orderFlowSubmitError = nil
+
+                        var meta: [String: Any] = [:]
+                        meta["paymentMethod"]   = summary.method.rawValue
+                        meta["cashAmount"]      = summary.cashAmount
+                        meta["cardAmount"]      = summary.cardAmount
+                        meta["discountedTotal"] = totalToSend
+                        meta["originalTotal"]   = totalToSend
+                        meta["discountOff"]     = discountOff
+                        meta["tip"]             = tip
+                        meta["printedTicket"]   = ticket   // ✅ useful for debugging
+
+                        OrderAPI.submitOrder(
+                            entries: entriesToSend,
+                            total: totalToSend,
+                            diningMode: dm,
+                            source: "menu-ipad-orderflow",
+                            customerName: safeName,
+                            customerPhone: safePhone,
+                            payment: summary,
+                            zcreditMeta: meta
+                        ) { result in
+                            DispatchQueue.main.async {
+                                orderFlowIsSubmitting = false
+                                orderFlowShowProgress = false
+
+                                switch result {
+                                case .success(let orderId):
+                                    Haptics.success()
+                                    showOrderFlow = false
+                                    scrollToTopToken += 1
+
+                                    let snap = OrderSnapshot(
+                                        orderNumber: orderId,
+                                        entries: entriesToSend,
+                                        totalPrice: totalToSend,
+                                        diningMode: dm,
+                                        phase: .inProgress
+                                    )
+
+                                    basket.removeAll()
+                                    selectedBasketLineId = nil
+                                    nextBasketLineId = 1
+                                    showBasketSheet = false
+
+                                    if cashPointMode {
+                                        confirmationOrder = snap
+                                        showConfirmation = true
+                                    } else {
+                                        showWelcome = true
+                                        UserDefaults.standard.removeObject(forKey: "userName")
+                                        UserDefaults.standard.removeObject(forKey: "userPhone")
+                                    }
+
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                                        lastOrder = snap
+                                        saveLastOrderPersisted(snap)
+                                    }
+
+                                case .failure(let err):
+                                    orderFlowSubmitError = err.localizedDescription
+                                    Haptics.error()
+                                }
+                            }
+                        }
+                    },
+                    onFinish: { showOrderFlow = false },
+                    allowPayLater: true,
+                    skipServiceStep: false,
+                    onServiceChosen: { },
+                    startAtCharge: false
+                )
+                .environment(\.layoutDirection, .rightToLeft)
+                .environment(\.locale, Locale(identifier: "he_IL"))
+                .tint(.primary)
+            }
+        }
         .sheet(isPresented: $showCardSheet) {
             MemberCardSheet()
                 .presentationDetents([.height(200), .large])
@@ -812,7 +1290,11 @@ struct menuView: View {
             .frame(height: 0)
         }
         .safeAreaInset(edge: .bottom) {
-            if !basket.isEmpty {
+            ZStack {
+                // Always reserve space (prevents jump)
+                Color.clear.frame(height: basketBarH)
+
+                // Show/hide the real bar without changing layout
                 BasketBar(
                     totalQuantity: basketTotalQuantity,
                     totalPrice: basketTotalPrice,
@@ -826,38 +1308,90 @@ struct menuView: View {
                         showWelcome = true
                     }
                 )
+                .frame(height: basketBarH)
+                .opacity(basket.isEmpty ? 0 : 1)
+                .allowsHitTesting(!basket.isEmpty)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
         .animation(.spring(response: 0.35, dampingFraction: 0.9), value: basket.isEmpty)
-        // ✅ iPad: full screen overlay with centered card
-        .fullScreenCover(item: $selectedItem) { item in
-            ZStack {
-                // ✅ truly transparent (no blur/material)
-                Color.clear.ignoresSafeArea()
-
-                // ✅ tap outside to dismiss
-                Color.black.opacity(0.001) // only for hit-testing
-                    .ignoresSafeArea()
-                    .onTapGesture { selectedItem = nil }
-
-                // ✅ your centered card
-                ProductSheet(
-                    item: item,
-                    initialQuantityInBasket: selectedBasketLineId.flatMap { basket[$0]?.quantity },
-                    initialSelectedOptions: myItemsPreset?.options ?? [:],
-                    initialSelectedAdditions: myItemsPreset?.additions ?? [],
-                    useInitialQuantity: selectedBasketLineId != nil
-                ) { product, qty, subtitle, unitPrice in
-                    addToBasket(product, quantity: qty, subtitle: subtitle, unitPrice: unitPrice)
-                }
-                .frame(maxWidth: 500)
-                .background(Color(.systemBackground)) // card background (not the fullscreen)
-                .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-                .shadow(color: .black.opacity(0.12), radius: 24, y: 14)
+    
+        .sheet(item: Binding(
+            get: { isPad ? nil : selectedItem },
+            set: { newValue in
+                if !isPad { selectedItem = newValue }
             }
+        )) { item in
+            ProductSheet(
+                item: item,
+                initialQuantityInBasket: selectedBasketLineId.flatMap { basket[$0]?.quantity },
+                initialSelectedOptions: myItemsPreset?.options ?? [:],
+                initialSelectedAdditions: myItemsPreset?.additions ?? [],
+                useInitialQuantity: selectedBasketLineId != nil
+            ) { product, qty, subtitle, unitPrice in
+                addToBasket(product, quantity: qty, subtitle: subtitle, unitPrice: unitPrice)
+
+                // ✅ if it was edit mode (from basket), clear it
+                selectedBasketLineId = nil
+
+                // ✅ close sheet
+                selectedItem = nil
+            }
+            .presentationDetents([.large])
+            .presentationDragIndicator(.visible)
+            .presentationCornerRadius(20)
+            .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
+            .environment(\.locale, Locale(identifier: "he_IL"))
+        }
+
+        // ✅ iPad: keep your centered overlay
+        .fullScreenCover(item: Binding(
+            get: { isPad ? selectedItem : nil },
+            set: { newValue in
+                if isPad { selectedItem = newValue }
+            }
+        )) { item in
+            GeometryReader { geo in
+                let maxCardH = geo.size.height * 1.0
+                let minCardH: CGFloat = 260
+                let targetH = min(max(cardContentHeight, minCardH), maxCardH)
+
+                ZStack {
+                    Rectangle().fill(.ultraThinMaterial).ignoresSafeArea()
+
+                    Color.black.opacity(0.001)
+                        .ignoresSafeArea()
+                        .onTapGesture { selectedItem = nil }
+
+                    ScrollView(showsIndicators: cardContentHeight > maxCardH) {
+                        ProductSheetContent(
+                            item: item,
+                            initialQuantityInBasket: selectedBasketLineId.flatMap { basket[$0]?.quantity },
+                            initialSelectedOptions: myItemsPreset?.options ?? [:],
+                            initialSelectedAdditions: myItemsPreset?.additions ?? [],
+                            useInitialQuantity: selectedBasketLineId != nil
+                        ) { product, qty, subtitle, unitPrice in
+                            addToBasket(product, quantity: qty, subtitle: subtitle, unitPrice: unitPrice)
+                            selectedBasketLineId = nil
+                            selectedItem = nil
+                        }
+                        .padding(.vertical, 18)
+                        .padding(.horizontal, 18)
+                        .readHeight { h in
+                            let rounded = (h * 10).rounded() / 10
+                            if abs(cardContentHeight - rounded) > 1 { cardContentHeight = rounded }
+                        }
+                    }
+                    .scrollDisabled(cardContentHeight <= maxCardH)
+                    .frame(width: min(500, geo.size.width - 40), height: targetH)
+                    .background(Color(.systemBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                    .shadow(color: .black.opacity(0.12), radius: 24, y: 14)
+                }
+            }
+            .presentationBackground(.clear)
             .environment(\.layoutDirection, .rightToLeft)
-            .presentationBackground(.ultraThinMaterial) // iOS 16+
+            .environment(\.locale, Locale(identifier: "he_IL"))
             .tint(.primary)
         }
         .fullScreenCover(isPresented: $showMembers) {
@@ -874,7 +1408,13 @@ struct menuView: View {
                 .environment(\.isRtl, isRtl)
                 .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
         }
-        .sheet(isPresented: $showBasketSheet) {
+        // ✅ iPhone: normal sheet
+        .sheet(isPresented: Binding(
+            get: { showBasketSheet && !isPad },
+            set: { newValue in
+                if !newValue { showBasketSheet = false }
+            }
+        )) {
             BasketSheet(
                 entries: Array(basket.values),
                 totalPrice: basketTotalPrice,
@@ -889,26 +1429,18 @@ struct menuView: View {
                         phase: .inProgress
                     )
 
-                    // clear basket immediately
                     basket.removeAll()
                     showWelcome = true
-                    // ensure Apple Pay + sheet animations finish
+
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                        // 1) close basket sheet
                         showBasketSheet = false
-                        if isPad{
-                            showWelcome = true
-                        }
-                        // 2) go to confirmation
-                        else{
-                            confirmationOrder = snapshot
-                            showConfirmation = true
-                            
-                            // 3) show ongoing banner later
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                                lastOrder = snapshot
-                                saveLastOrderPersisted(snapshot)
-                            }
+
+                        confirmationOrder = snapshot
+                        showConfirmation = true
+
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                            lastOrder = snapshot
+                            saveLastOrderPersisted(snapshot)
                         }
                     }
                 },
@@ -919,8 +1451,536 @@ struct menuView: View {
                     showBasketSheet = false
                 }
             )
+            
             .preferredColorScheme(forceDark ? .dark : nil)
             .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
+        }
+
+        // ✅ iPad: fullscreen overlay with material backdrop + centered card
+        .fullScreenCover(isPresented: Binding(
+            get: { showBasketSheet && isPad },
+            set: { if !$0 { showBasketSheet = false } }
+        )) {
+            GeometryReader { geo in
+                let maxCardH = geo.size.height * 0.88
+                let minCardH: CGFloat = 280
+                let targetH = min(max(basketCardContentHeight, minCardH), maxCardH)
+
+                ZStack {
+                    Rectangle().fill(.ultraThinMaterial).ignoresSafeArea()
+
+                    Color.black.opacity(0.001)
+                        .ignoresSafeArea()
+                        .onTapGesture { showBasketSheet = false }
+
+                    // ✅ If too tall -> scroll the whole content inside the card
+                    Group {
+                        if basketCardContentHeight > maxCardH {
+                            ScrollView {
+                            
+                            }
+                        } else {
+                            let maxCardH = geo.size.height * 0.88
+
+                            BasketSheetCardContent(
+                                entries: Array(basket.values),
+                                payableTotal: basketTotalPrice,
+                                maxCardH: maxCardH,
+                                onIncrement: { incrementEntry($0) },
+                                onDecrement: { decrementEntry($0) },
+                                onContinue: { payable in
+                                    let dm: DiningMode = {
+                                        let intent = ServiceIntent(rawValue: checkoutIntentRaw) ?? .ta
+                                        return (intent == .sit) ? .dineIn : .takeAway
+                                    }()
+
+                                    orderFlowEntries = Array(basket.values)
+                                    orderFlowTotal = payable
+                                    orderFlowDiningMode = dm
+
+                                    showBasketSheet = false
+                                    showWelcome = false
+
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                                        showOrderFlow = true
+                                    }
+                                },
+                                onProductTap: { lineId, item in
+                                    selectedBasketLineId = lineId
+                                    selectedItem = item
+                                    showBasketSheet = false
+                                },
+                                onClose: { showBasketSheet = false }
+                            )
+                            .padding(18)
+                            .readHeight { basketCardContentHeight = $0 }
+                           
+                            .readHeight { h in
+                                let rounded = (h * 10).rounded() / 10
+                                if abs(basketCardContentHeight - rounded) > 1 {
+                                    basketCardContentHeight = rounded
+                                }
+                            }
+                        }
+                    }
+                    
+                    .frame(width: min(520, geo.size.width - 40), height: targetH)
+                    .background(Color(.systemBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                    .shadow(color: .black.opacity(0.12), radius: 24, y: 14)
+                }
+            }
+            .presentationBackground(.clear)
+            .environment(\.layoutDirection, .rightToLeft)
+            .environment(\.locale, Locale(identifier: "he_IL"))
+            .tint(.primary)
+        }
+    }
+    
+    private struct BasketSheetCardContent: View {
+        let entries: [BasketEntry]
+        let payableTotal: Double
+        let maxCardH: CGFloat
+
+        let onIncrement: (Int) -> Void
+        let onDecrement: (Int) -> Void
+        let onContinue: (Double) -> Void
+        let onProductTap: (Int, ShellMenuItem) -> Void
+        let onClose: () -> Void
+
+        @Environment(\.isRtl) private var isRtl
+
+        @State private var rowsHeight: CGFloat = 0
+
+        private let headerTop: CGFloat = 16
+        private let headerBottom: CGFloat = 10
+        private let barH: CGFloat = 110
+        private let sidePad: CGFloat = 18
+
+        private var headerEstimatedH: CGFloat { 44 + headerTop + headerBottom } // close enough
+        private var neededTotalH: CGFloat { headerEstimatedH + rowsHeight + barH }
+
+        private var shouldScroll: Bool { neededTotalH > maxCardH }
+
+        var body: some View {
+            ZStack(alignment: .top) {
+
+                VStack(spacing: 0) {
+
+                    // ✅ HEADER
+                    HStack {
+                        Text(isRtl ? "ההזמנה שלך" : "Your order")
+                            .font(.menuRegular(24).weight(.semibold))
+
+                        Spacer()
+
+                        Button(action: onClose) {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 15, weight: .bold))
+                                .foregroundColor(.primary)
+                                .frame(width: 32, height: 32)
+                                .background(.ultraThinMaterial)
+                                .clipShape(Circle())
+                        }
+                    }
+                    .padding(.horizontal, sidePad)
+                    .padding(.top, headerTop)
+                    .padding(.bottom, headerBottom)
+
+                    // ✅ BODY: measure the STACK (not the scrollview)
+                    Group {
+                        if shouldScroll {
+                            ScrollView {
+                                rowsStack
+                                    .padding(.horizontal, sidePad)
+                                    .padding(.top, 6)
+                                    .padding(.bottom, barH + 20)
+                            }
+                        } else {
+                            rowsStack
+                                .padding(.horizontal, sidePad)
+                                .padding(.top, 6)
+                                .padding(.bottom, barH + 20)
+                        }
+                    }
+                }
+
+                // ✅ BOTTOM BAR (fixed)
+                VStack(spacing: 12) {
+                    HStack {
+                        Text(isRtl ? "סה\"כ" : "Total")
+                            .font(.menuRegular(18).weight(.semibold))
+                        Spacer()
+                        Text(isRtl
+                             ? String(format: "%.2f", payableTotal)
+                             : String(format: "£%.2f", payableTotal))
+                            .font(.menuRegular(18).weight(.semibold))
+                    }
+
+                    Button {
+                        onContinue(payableTotal)
+                    } label: {
+                        Text(isRtl ? "המשך להזמנה" : "Continue")
+                            .font(.menuRegular(17).weight(.semibold))
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 56)
+                            .background(MenuTheme.buttonBackground)
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
+                }
+                .padding(.horizontal, sidePad)
+                .padding(.top, 12)
+                .padding(.bottom, 14)
+                .background(Color(.systemBackground))
+                .frame(maxHeight: .infinity, alignment: .bottom)
+            }
+        }
+
+        private var rowsStack: some View {
+            VStack(spacing: 16) {
+                ForEach(entries) { entry in
+                    BasketRowInline(
+                        entry: entry,
+                        onIncrement: onIncrement,
+                        onDecrement: onDecrement,
+                        onTap: { onProductTap(entry.id, entry.item) }
+                    )
+                }
+            }
+            .readHeight { h in
+                let rounded = (h * 10).rounded() / 10
+                if abs(rowsHeight - rounded) > 1 { rowsHeight = rounded }
+            }
+        }
+    }
+    
+    private struct IdleResetSheet: View {
+        @Binding var countdown: Int
+        let onKeep: () -> Void
+        let onStartNew: () -> Void
+
+        @State private var timer: Timer?
+
+        var body: some View {
+            VStack(spacing: 14) {
+                Text("הקופה לא היתה בשימוש")
+                    .font(.system(size: 20, weight: .bold))
+
+                Text("נפתח הזמנה חדשה בעוד \(countdown) שניות")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(.secondary)
+
+                Spacer().frame(height: 6)
+
+                HStack(spacing: 12) {
+
+                  
+
+                    Button {
+                        onStartNew()
+                    } label: {
+                        Text("הזמנה חדשה")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 52)
+                            .background(MenuTheme.buttonBackground) // ✅ requested
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    
+                    Button {
+                        onKeep()
+                    } label: {
+                        Text("להשאיר את ההזמנה")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 52)
+                            .background(MenuTheme.buttonBackground)
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.top, 8)
+            }
+            .padding(18)
+            .onAppear {
+                timer?.invalidate()
+                timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
+                    DispatchQueue.main.async {
+                        countdown -= 1
+                        if countdown <= 0 {
+                            timer?.invalidate()
+                            timer = nil
+                            onStartNew()
+                        }
+                    }
+                }
+            }
+            .onDisappear {
+                timer?.invalidate()
+                timer = nil
+            }
+        }
+    }
+    
+    
+    private struct BasketRowInline: View {
+        let entry: BasketEntry
+        let onIncrement: (Int) -> Void
+        let onDecrement: (Int) -> Void
+        let onTap: () -> Void
+
+        var body: some View {
+            HStack(spacing: 12) {
+                KFImage(entry.item.img)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 50, height: 50)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(entry.item.name).font(.menuRegular(17).weight(.semibold))
+                    if let subtitle = entry.subtitle, !subtitle.isEmpty {
+                        Text(subtitle).font(.menuRegular(15)).foregroundColor(.secondary)
+                    }
+                }
+
+                Spacer()
+
+                HStack(spacing: 12) {
+                    Button { onDecrement(entry.id) } label: {
+                        Circle().fill(Color(.systemGray5))
+                            .frame(width: 32, height: 32)
+                            .overlay(Image(systemName: "minus").font(.system(size: 16, weight: .bold)))
+                    }
+
+                    Text("\(entry.quantity)")
+                        .font(.menuRegular(18).weight(.semibold))
+                        .frame(minWidth: 20)
+
+                    Button { onIncrement(entry.id) } label: {
+                        Circle().fill(Color(.systemGray5))
+                            .frame(width: 32, height: 32)
+                            .overlay(Image(systemName: "plus").font(.system(size: 16, weight: .bold)))
+                    }
+                }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture { onTap() }
+        }
+    }
+    
+    private struct ProductSheetContent: View {
+        let item: ShellMenuItem
+        let initialQuantityInBasket: Int?
+        let initialSelectedOptions: [String: String]
+        let initialSelectedAdditions: Set<String>
+        let useInitialQuantity: Bool
+        let onAdd: (ShellMenuItem, Int, String?, Double) -> Void
+
+        @Environment(\.isRtl) private var isRtl
+
+        @State private var quantity: Int
+        @State private var heroFrozenImage: KFCrossPlatformImage? = nil
+        @State private var selectedOptions: [String: String]
+        @State private var selectedAdditions: Set<String>
+
+        private let barH: CGFloat = 92   // height incl padding
+
+        private func norm(_ s: String) -> String {
+            s.trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "\u{200F}", with: "")
+                .replacingOccurrences(of: "\u{200E}", with: "")
+                .replacingOccurrences(of: "\u{00A0}", with: " ")
+        }
+        
+        init(
+            item: ShellMenuItem,
+            initialQuantityInBasket: Int?,
+            initialSelectedOptions: [String: String],
+            initialSelectedAdditions: Set<String>,
+            useInitialQuantity: Bool,
+            onAdd: @escaping (ShellMenuItem, Int, String?, Double) -> Void
+        ) {
+            // ✅ local norm() so we don't use self before init completes
+            func norm(_ s: String) -> String {
+                s.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .replacingOccurrences(of: "\u{200F}", with: "")
+                    .replacingOccurrences(of: "\u{200E}", with: "")
+                    .replacingOccurrences(of: "\u{00A0}", with: " ")
+            }
+
+            self.item = item
+            self.initialQuantityInBasket = initialQuantityInBasket
+            self.initialSelectedOptions = initialSelectedOptions
+            self.initialSelectedAdditions = initialSelectedAdditions
+            self.useInitialQuantity = useInitialQuantity
+            self.onAdd = onAdd
+
+            let startQty = initialQuantityInBasket ?? 1
+            _quantity = State(initialValue: startQty)
+
+            // ✅ Build defaults: if an options-group missing -> select its first item
+            var defaults: [String: String] = initialSelectedOptions
+
+            if let groups = item.modifiers {
+                for g in groups where g.type == .options {
+                    let k = norm(g.title)
+                    let existing = defaults.first(where: { norm($0.key) == k })?.value ?? ""
+                    if existing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                       let first = g.items.first {
+                        defaults[g.title] = first.name   // keep original title/name
+                    }
+                }
+            }
+
+            // ✅ Normalize the dictionary keys/values exactly like ModifierListView expects
+            var normalizedDefaults: [String: String] = [:]
+            for (k, v) in defaults {
+                normalizedDefaults[norm(k)] = norm(v)
+            }
+
+            _selectedOptions = State(initialValue: normalizedDefaults)
+
+            // ✅ additions stay as-is (your ModifierListView already normalizes internally)
+            _selectedAdditions = State(initialValue: initialSelectedAdditions)
+        }
+
+        var body: some View {
+            ZStack(alignment: .bottom) {
+
+                // ✅ SCROLLS UNDER
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+
+                        // Image
+                        ZStack {
+                            if let img = heroFrozenImage {
+                                Image(uiImage: img).resizable().scaledToFill()
+                            } else {
+                                KFImage(item.img)
+                                    .onSuccess { heroFrozenImage = $0.image }
+                                    .resizable()
+                                    .scaledToFill()
+                            }
+                        }
+                        .frame(height: 280)
+                        .clipped()
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+                        // Title + price + desc
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(item.name)
+                                .font(.menuRegular(20).weight(.semibold))
+
+                            Text(isRtl ? String(format: "%.0f", item.price)
+                                       : String(format: "£%.2f", item.price))
+                                .font(.menuRegular(18))
+                                .foregroundColor(.secondary)
+
+                            if let desc = item.description,
+                               !desc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                Text(desc)
+                                    .font(.menuRegular(16))
+                                    .foregroundColor(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+
+                        // Modifiers
+                        if let groups = item.modifiers, !groups.isEmpty {
+                            ModifierListView(
+                                groups: groups,
+                                selectedOptions: $selectedOptions,
+                                selectedAdditions: $selectedAdditions
+                            )
+                        }
+                    }
+                   
+                    .padding(.bottom, barH) // ✅ critical so content doesn’t hide behind bar
+                }
+
+                // ✅ FIXED BAR (Z-LAYER)
+                bottomBar
+                    
+                   
+                    .frame(maxWidth: .infinity)
+                    .background(Color(.systemBackground))
+                    
+            }
+        }
+
+        private var isUpdateMode: Bool {
+            (initialQuantityInBasket ?? 0) > 0   // ✅ if it already exists in basket -> allow 0
+        }
+
+        private var isRemoveMode: Bool {
+            isUpdateMode && quantity == 0
+        }
+
+        private var actionTitle: String {
+            if isRemoveMode { return isRtl ? "הסר" : "Remove" }
+            if isUpdateMode { return isRtl ? "עדכן" : "Update" }
+            return isRtl ? "הוסף" : "Add"
+        }
+
+        private var actionBackground: Color {
+            isRemoveMode ? .red : MenuTheme.buttonBackground
+        }
+
+        private var bottomBar: some View {
+            HStack(spacing: 16) {
+
+                // Qty controls
+                HStack(spacing: 18) {
+                    Button {
+                        if isUpdateMode {
+                            if quantity > 0 { quantity -= 1 }     // ✅ allow down to 0
+                        } else {
+                            if quantity > 1 { quantity -= 1 }     // ✅ normal add flow: keep >= 1
+                        }
+                    } label: {
+                        Circle()
+                            .fill(Color(.systemGray5))
+                            .frame(width: 44, height: 44)
+                            .overlay(Image(systemName: "minus").font(.system(size: 18, weight: .bold)))
+                    }
+
+                    Text("\(quantity)")
+                        .font(.menuRegular(20).weight(.semibold))
+
+                    Button { quantity += 1 } label: {
+                        Circle()
+                            .fill(Color(.systemGray5))
+                            .frame(width: 44, height: 44)
+                            .overlay(Image(systemName: "plus").font(.system(size: 18, weight: .bold)))
+                    }
+                }
+
+                // Action button
+                Button {
+                    // ✅ If editing and qty is 0 => remove
+                    if isRemoveMode {
+                        onAdd(item, 0, nil, item.price)
+                        return
+                    }
+
+                    // ✅ Normal add/update
+                    guard quantity > 0 else { return }
+                    onAdd(item, quantity, nil, item.price)
+                } label: {
+                    Text(actionTitle)
+                        .font(.menuRegular(18).weight(.semibold))
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 56)
+                        .background(actionBackground)
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                }
+            }
         }
     }
     
@@ -967,6 +2027,7 @@ struct menuView: View {
                         .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
                 }
                 .onPreferenceChange(SheetContentHeightKey.self) { measuredHeight = $0 }
+                
             }
         }
 
@@ -1148,8 +2209,10 @@ struct CategoryBar: View {
                     .padding(.horizontal, 16)
                     .padding(.top, 10)
                 }
+                
                 .onChange(of: selected) { new in
                     guard !new.isEmpty else { return }
+                    
                     withAnimation(.easeInOut) { proxy.scrollTo(new, anchor: .center) }
                 }
                 .onAppear {
@@ -1375,42 +2438,36 @@ struct ModifierListView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                ForEach(groups) { group in
-                    VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 16) {
+            ForEach(groups) { group in
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(displayTitle(for: group))
+                        .font(.menuRegular(18).weight(.semibold))
+                        .padding(.horizontal, 0)
+                        .padding(.bottom, 5)
 
-                        Text(displayTitle(for: group))
-                            .font(.menuRegular(18).weight(.semibold))
-                            .padding(.horizontal, 18)
-                            .padding(.bottom, 5)
-
-                        if #available(iOS 16.0, *) {
-                            Flow(spacing: 10, rowSpacing: 10) {
-                                ForEach(group.items) { item in
-                                    pill(group: group, item: item)
-                                }
+                    if #available(iOS 16.0, *) {
+                        Flow(spacing: 10, rowSpacing: 10) {
+                            ForEach(group.items) { item in
+                                pill(group: group, item: item)
                             }
-                            .padding(.horizontal, 18)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        } else {
-                            LazyVGrid(
-                                columns: [GridItem(.adaptive(minimum: 76), spacing: 10, alignment: .leading)],
-                                alignment: .leading,
-                                spacing: 10
-                            ) {
-                                ForEach(group.items) { item in
-                                    pill(group: group, item: item)
-                                }
-                            }
-                            .padding(.horizontal, 18)
-                            .frame(maxWidth: .infinity, alignment: .leading)
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        LazyVGrid(
+                            columns: [GridItem(.adaptive(minimum: 76), spacing: 10, alignment: .leading)],
+                            alignment: .leading,
+                            spacing: 10
+                        ) {
+                            ForEach(group.items) { item in
+                                pill(group: group, item: item)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .padding(.bottom, group.type == .additions ? 40 : 0)
                 }
+                .padding(.bottom, group.type == .additions ? 18 : 0)
             }
-            .padding(.vertical, 12)
         }
     }
 
@@ -1512,17 +2569,24 @@ struct ProductSheet: View {
         _quantity = State(initialValue: startQty)
 
         // ✅ OPTIONS: default to first item (then normalize keys/values)
+        // ✅ OPTIONS: ensure first option is selected for EACH options-group
         var defaults: [String: String] = initialSelectedOptions
-        if initialSelectedOptions.isEmpty, let groups = item.modifiers {
+
+        if let groups = item.modifiers {
             for group in groups where group.type == .options {
-                if let first = group.items.first {
-                    defaults[group.title] = first.name
+                let key = norm(group.title)
+
+                // if missing/empty -> select first
+                let existing = defaults[key]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                if existing.isEmpty, let first = group.items.first {
+                    defaults[key] = norm(first.name)
                 }
             }
         }
 
         let normalizedDefaults: [String: String] =
             Dictionary(uniqueKeysWithValues: defaults.map { (norm($0.key), norm($0.value)) })
+
         _selectedOptions = State(initialValue: normalizedDefaults)
 
         // ✅ ADDITIONS: normalize
@@ -1652,7 +2716,7 @@ struct ProductSheet: View {
                     .padding(.horizontal, 18)
                     .padding(.top, 6)
 
-                    if inMyItems {
+                    if inMyItems  && !isPad{
                         Button {
                             MyItemsStore.remove(productId: item.id)
                             inMyItems = false
@@ -1673,6 +2737,7 @@ struct ProductSheet: View {
                             selectedAdditions: $selectedAdditions
                         )
                         .padding(.top, 15)
+                        .padding(.horizontal, 18)
                     }
 
                     Spacer(minLength: 0)
@@ -1898,8 +2963,9 @@ struct BasketSheet: View {
     @State private var applePayHandler: ZCreditApplePayHandler? = nil
     @AppStorage("miniAppId") private var miniAppId: Int = 0
     @State private var stripeController: PKPaymentAuthorizationController? = nil
+   
+  
     
-
     // ✅ Discount from App Group
     @State private var activeDiscount: ActiveDiscount? = nil
 
@@ -1919,7 +2985,7 @@ struct BasketSheet: View {
     }
     
     private var isPad: Bool { UIDevice.current.userInterfaceIdiom == .pad }
-    @State private var showOrderFlow = false
+   
 
     private var discountedTotal: Double {
         let raw = max(0, baseTotalForDiscounts - discountAmount)
@@ -2057,6 +3123,7 @@ struct BasketSheet: View {
             .font(.menuRegular(15))
             .presentationDetents(detents)
             .safeAreaInset(edge: .bottom) { bottomArea }
+           
             .overlay(
                 Group {
                     if showOrderProgress {
@@ -2254,7 +3321,8 @@ struct BasketSheet: View {
                 if isPad {
 
                     Button {
-                        showOrderFlow = true
+                        
+                      
                        
                         Haptics.light()
                     } label: {
@@ -2314,117 +3382,7 @@ struct BasketSheet: View {
             }
         }
         .background(Color(.systemBackground))
-        .fullScreenCover(isPresented: $showOrderFlow) {
-
-            let dm: DiningMode = {
-                let intent = ServiceIntent(rawValue: checkoutIntentRaw) ?? .ta
-                return (intent == .sit) ? .dineIn : .takeAway
-            }()
-            
-            OrderFlowView(
-                // ✅ PRINT (like cashpoint)
-                onSendToKitchen: {
-                    let ticket = nextMenuTicketNumber()
-
-                    let safeName: String? = {
-                        let n = (UserDefaults.standard.string(forKey: "userName") ?? "")
-                            .trimmingCharacters(in: .whitespacesAndNewlines)
-                        return n.isEmpty ? nil : n
-                    }()
-
-                    let phone: String? = {
-                        let p = (UserDefaults.standard.string(forKey: "userPhone") ?? "")
-                            .trimmingCharacters(in: .whitespacesAndNewlines)
-                        return p.isEmpty ? nil : p
-                    }()
-
-                    PrinterManager.shared.printCashPointSplit(
-                        orderNumber: ticket,
-                        entries: entries,
-                        total: discountedTotal,
-                        diningMode: dm,
-                        customerName: safeName,
-                        customerPhone: phone
-                    )
-
-                    Haptics.success()
-                },
-
-                total: discountedTotal,               // ✅ match what user sees
-                isRtl: true,                          // ✅ force rtl inside flow
-                diningMode: .constant(dm),            // we already derived it
-                requiresPhoneStep: (miniAppId == 3),  // up to you
-
-                onCancel: { showOrderFlow = false },
-
-                onCompleted: { phone, name, summary, discountOff, tip in
-                    
-                    // Persist contact like your name sheet does:
-                    if let name, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        UserDefaults.standard.set(name, forKey: "userName")
-                    }
-                    if miniAppId == 3,
-                       let phone,
-                       !phone.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        UserDefaults.standard.set(phone, forKey: "userPhone")
-                    }
-
-                    // Now submit order (unpaid/mixed/cash/card handled by summary inside OrderFlowView)
-                    isSubmitting = true
-                    showOrderProgress = true
-                    submitError = nil
-
-                    var meta: [String: Any] = [:]
-                    meta["paymentMethod"] = summary.method.rawValue
-                    meta["cashAmount"] = summary.cashAmount
-                    meta["cardAmount"] = summary.cardAmount
-                    meta["discountedTotal"] = discountedTotal
-                    meta["originalTotal"] = totalPrice
-                    meta["discountOff"] = discountOff
-                    meta["tip"] = tip
-
-                    OrderAPI.submitOrder(
-                        entries: entries,
-                        total: discountedTotal,
-                        diningMode: dm,
-                        source: "menu-ipad-orderflow",
-                        customerName: UserDefaults.standard.string(forKey: "userName"),
-                        customerPhone: (miniAppId == 3)
-                            ? UserDefaults.standard.string(forKey: "userPhone")
-                            : "+447522552608",
-                        payment: summary,
-                        zcreditMeta: meta
-                    ) { result in
-                        DispatchQueue.main.async {
-                            self.isSubmitting = false
-                            self.showOrderProgress = false
-
-                            switch result {
-                            case .success(let orderId):
-                                Haptics.success()
-                                
-                                self.showOrderFlow = false
-                                self.onConfirm(orderId, dm)
-
-                            case .failure(let err):
-                                self.submitError = err.localizedDescription
-                                Haptics.error()
-                            }
-                        }
-                    }
-                },
-
-                onFinish: { showOrderFlow = false },
-                allowPayLater: true,
-                skipServiceStep: false,
-                onServiceChosen: { },
-                startAtCharge: false
-            )
-            // ✅ lock RTL at the presenter too (helps sheets inside the flow)
-            .environment(\.layoutDirection, .rightToLeft)
-            .environment(\.locale, Locale(identifier: "he_IL"))
-            .tint(.primary)
-        }
+      
     }
 
     // MARK: - Payments (unchanged)
@@ -3392,26 +4350,47 @@ struct KioskWelcomeView: View {
     @State private var page = 0
     @State private var timer: Timer?
 
-    // Same images as kiosk
     private let images: [String] = [
         "https://minis.studio/images/wallpaper_bh3.jpg",
         "https://minis.studio/images/wallpaper_bh2.jpg",
         "https://minis.studio/images/wallpaper_bh1.png"
     ]
 
+    private var isPhone: Bool { UIDevice.current.userInterfaceIdiom == .phone }
+
+    // ✅ Responsive sizing
+    private var titleFont: CGFloat { isPhone ? 44 : 70 }
+    private var subtitleFont: CGFloat { isPhone ? 22 : 32 }
+    private var subtitleTopPad: CGFloat { isPhone ? 18 : 40 }
+
+    private var buttonWidth: CGFloat { isPhone ? 160 : 230 }
+    private var buttonHeight: CGFloat { isPhone ? 72 : 100 }
+    private var buttonCorner: CGFloat { isPhone ? 28 : 40 }
+    private var buttonFont: CGFloat { isPhone ? 22 : 28 }
+
+    private var sidePadding: CGFloat { isPhone ? 18 : 20 }
+    private var bottomSpacer: CGFloat { isPhone ? 26 : 40 }
+
     var body: some View {
         ZStack {
             // Background slider
             TabView(selection: $page) {
                 ForEach(Array(images.enumerated()), id: \.offset) { idx, urlStr in
-                    RemoteFullscreenImage(urlStr: urlStr)
-                        .tag(idx)
+                    GeometryReader { geo in
+                        KFImage(URL(string: urlStr))
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: geo.size.width, height: geo.size.height)
+                            .clipped()
+                            .tag(idx)
+                    }
+                    .ignoresSafeArea()
                 }
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
             .ignoresSafeArea()
 
-            // Dark overlay like kiosk
+            // Dark overlay
             LinearGradient(
                 colors: [
                     Color.black.opacity(0.40),
@@ -3426,21 +4405,22 @@ struct KioskWelcomeView: View {
             VStack(spacing: 0) {
                 Spacer()
 
-                VStack(spacing: 18) {
+                VStack(spacing: isPhone ? 14 : 18) {
                     Text(isRtl ? "ברוכים הבאים" : "Welcome")
-                        .font(.menuRegular(70).weight(.heavy)) // kiosk huge; iPhone-safe
+                        .font(.menuRegular(titleFont).weight(.heavy))
                         .foregroundColor(.white)
                         .shadow(color: .black.opacity(0.25), radius: 10, y: 4)
                         .multilineTextAlignment(.center)
+                        .minimumScaleFactor(0.75)
+                        .lineLimit(2)
 
                     Text(isRtl ? "לחצו להזמנה" : "Tap to order")
-                        .font(.menuRegular(32).weight(.bold))
+                        .font(.menuRegular(subtitleFont).weight(.bold))
                         .foregroundColor(.white.opacity(0.92))
                         .shadow(color: .black.opacity(0.25), radius: 10, y: 4)
                         .multilineTextAlignment(.center)
-                        .padding(.top, 40)
+                        .padding(.top, subtitleTopPad)
 
-                        
                     HStack(spacing: 14) {
                         kioskButton(title: isRtl ? "לשבת" : "Dine-in") {
                             choose(intent: "sit")
@@ -3451,31 +4431,14 @@ struct KioskWelcomeView: View {
                     }
                     .padding(.top, 8)
                 }
-                .padding(.horizontal, 20)
+                .padding(.horizontal, sidePadding)
 
-                Spacer(minLength: 40)
+                Spacer(minLength: bottomSpacer)
             }
 
-            // Close button (like kiosk X)
-            Button {
-                // If user closes without choosing, we still mark "shown" so it won't annoy them.
-                didShowWelcome = true
-                dismiss()
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundColor(.white)
-                    .frame(width: 46, height: 46)
-                    .background(Color.black.opacity(0.28))
-                    .clipShape(Circle())
-            }
-            .buttonStyle(.plain)
-            .padding(.top, 16)
-            .padding(.horizontal, 16)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: isRtl ? .topLeading : .topTrailing)
+           
         }
         .onAppear {
-            // Auto-slide every 3.5s (kiosk feel)
             timer?.invalidate()
             timer = Timer.scheduledTimer(withTimeInterval: 7.5, repeats: true) { _ in
                 withAnimation(.easeInOut(duration: 0.6)) {
@@ -3501,45 +4464,17 @@ struct KioskWelcomeView: View {
     private func kioskButton(title: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title)
-                .font(.menuRegular(28).weight(.bold))
-                .foregroundColor(Color(hex: "#324e57") ?? .black) // kiosk text color
-                .frame(width: 230)
-                .frame(height: 100)
-                .background(Color(hex: "#d2c1a5") ?? Color(.systemGray5)) // kiosk button bg
-                .clipShape(RoundedRectangle(cornerRadius: 40, style: .continuous))
+                .font(.menuRegular(buttonFont).weight(.bold))
+                .foregroundColor(Color(hex: "#324e57") ?? .black)
+                .frame(width: buttonWidth, height: buttonHeight)
+                .background(Color(hex: "#d2c1a5") ?? Color(.systemGray5))
+                .clipShape(RoundedRectangle(cornerRadius: buttonCorner, style: .continuous))
                 .shadow(color: .black.opacity(0.22), radius: 24, y: 10)
         }
         .buttonStyle(.plain)
     }
 }
 
-// MARK: - Remote image helper (no Kingfisher needed here)
-private struct RemoteFullscreenImage: View {
-    let urlStr: String
-
-    var body: some View {
-        AsyncImage(url: URL(string: urlStr)) { phase in
-            switch phase {
-            case .success(let img):
-                img.resizable()
-                    .scaledToFill()
-                    .clipped()
-            case .failure:
-                Color.black.opacity(0.15)
-            case .empty:
-                Color.black.opacity(0.10)
-                    .overlay(ProgressView().tint(.white))
-            @unknown default:
-                Color.black.opacity(0.15)
-            }
-        }
-        .ignoresSafeArea()
-    }
-}
-
-import StoreKit
-import UIKit
-import SwiftUI
 
 // MARK: - App Clip → Full App install overlay (native Apple sheet)
 struct AppInstallOverlay: UIViewControllerRepresentable {
@@ -3702,4 +4637,32 @@ extension View {
     @ViewBuilder func `if`<Content: View>(_ condition: Bool, transform: (Self) -> Content) -> some View {
         if condition { transform(self) } else { self }
     }
+}
+ 
+// MARK: - Height reader helper
+
+private struct HeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+extension View {
+    func readHeight(_ onChange: @escaping (CGFloat) -> Void) -> some View {
+        background(
+            GeometryReader { proxy in
+                Color.clear
+                    .preference(key: HeightKey.self, value: proxy.size.height)
+            }
+        )
+        .onPreferenceChange(HeightKey.self, perform: onChange)
+    }
+}
+
+extension Notification.Name {
+    static let productSheetContentHeight = Notification.Name("productSheetContentHeight")
+}
+extension Notification.Name {
+    static let studentClaimArrived = Notification.Name("studentClaimArrived")
 }

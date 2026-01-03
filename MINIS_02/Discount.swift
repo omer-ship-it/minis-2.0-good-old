@@ -13,44 +13,37 @@ struct StudentDiscountView: View {
     let durationMonths: Int
 
     @Environment(\.isRtl) private var isRtl
-    @State private var showStoreSheet = false   // 🔥 auto-open store
-    @State private var showOverlay = false
-    
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var showStoreSheet = false
+
     private let textColor = Color(hex: "#324E57")
     private let bgColor   = Color(hex: "#D2C1A5")
 
     var body: some View {
-        VStack(spacing: 28) {
+        VStack(spacing: 22) {
 
             Spacer()
 
-            // 🎓 Icon
             Text("🎓")
                 .font(.system(size: 72))
 
-            // Title
             Text("הטבת סטודנטים הופעלה")
                 .font(.primariesDemi(isRtl ? 26 : 28))
                 .foregroundColor(textColor)
                 .multilineTextAlignment(.center)
 
-            // Subtitle
             Text("הנחה של \(discountPercent)% להזמנות באפליקציה")
                 .font(.primariesDemi(isRtl ? 18 : 20))
                 .foregroundColor(textColor)
                 .multilineTextAlignment(.center)
-
-          
-            .font(.primariesDemi(isRtl ? 15 : 16))
-            .foregroundColor(textColor.opacity(0.85))
-            .multilineTextAlignment(.center)
-            .padding(.horizontal, 32)
+                .padding(.horizontal, 28)
 
             Spacer()
 
-            // 🔒 Single CTA — no escape
+            #if APPCLIP
+            // App Clip → keep your download flow
             Button {
-                persistStudentDiscount()
                 showStoreSheet = true
             } label: {
                 Text("להורדת האפליקציה")
@@ -62,44 +55,56 @@ struct StudentDiscountView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             }
             .padding(.horizontal, 24)
-          
             .padding(.bottom, 24)
+            #else
+            // Full App → just continue (discount already active)
+            Button {
+                dismiss()
+            } label: {
+                Text("המשך לתפריט")
+                    .font(.primariesDemi(isRtl ? 17 : 18))
+                    .foregroundColor(bgColor)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 56)
+                    .background(textColor)
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 24)
+            #endif
         }
         .environment(\.layoutDirection, .rightToLeft)
         .background(bgColor.ignoresSafeArea())
-        .interactiveDismissDisabled(true)              // 🔒 no swipe-down
+
+        // ✅ THIS is the important part: make the discount live for Menu/Basket
+        .onAppear {
+            activateDiscountNow()
+        }
+
+        #if APPCLIP
+        .interactiveDismissDisabled(true)
         .fullScreenCover(isPresented: $showStoreSheet) {
             StoreProductPresenter(appId: 6737725110)
                 .ignoresSafeArea()
-                .background(bgColor)
         }
-        
+        #endif
     }
-    private func openAppStore() {
-        // ✅ Replace with your real app id
-        let appId = "6737725110"
 
-        if let url = URL(string: "itms-apps://itunes.apple.com/app/id\(appId)") {
-            UIApplication.shared.open(url, options: [:], completionHandler: nil)
-        }
-    }
-    // MARK: - Persist for Full App (App Group ready)
-    private func persistStudentDiscount() {
-        let expiresAt = Calendar.current.date(
-            byAdding: .month,
-            value: durationMonths,
-            to: Date()
-        )!
+    private func activateDiscountNow() {
+        let expiresAt =
+            Calendar.current.date(byAdding: .month, value: durationMonths, to: Date())
+            ?? Date().addingTimeInterval(60 * 60 * 24 * 30 * Double(durationMonths))
 
-        let payload: [String: Any] = [
-            "miniAppId": miniAppId,
-            "campaignId": campaignId,
-            "discountPercent": discountPercent,
-            "expiresAt": expiresAt.timeIntervalSince1970
-        ]
+        let disc = ActiveDiscount(
+            campaignId: campaignId.isEmpty ? "student" : campaignId,
+            percent: discountPercent,
+            expiresAt: expiresAt
+        )
 
-        // ⚠️ For production: move this to App Group UserDefaults
-        UserDefaults.standard.set(payload, forKey: "pendingStudentDiscount")
+        MinisShared.saveActiveDiscount(disc)
+
+        // optional: force UI refresh in menu (if you want a toast immediately)
+        NotificationCenter.default.post(name: .myItemsChanged, object: nil)
     }
 }
 

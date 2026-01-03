@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		3A589F402F099F460077FC5B /* Mini.app in Embed App Clips */ = {isa = PBXBuildFile; fileRef = 3A5D0EA32EEF2F640020509C /* Mini.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		3A5D0ED42EEF2FE00020509C /* Kingfisher in Frameworks */ = {isa = PBXBuildFile; productRef = 3A5D0ED32EEF2FE00020509C /* Kingfisher */; };
 		3A5D0ED62EEF30040020509C /* Stripe in Frameworks */ = {isa = PBXBuildFile; productRef = 3A5D0ED52EEF30040020509C /* Stripe */; };
 		3A5D0ED82EEF30040020509C /* StripeApplePay in Frameworks */ = {isa = PBXBuildFile; productRef = 3A5D0ED72EEF30040020509C /* StripeApplePay */; };
@@ -34,6 +35,7 @@
 			dstPath = "$(CONTENTS_FOLDER_PATH)/AppClips";
 			dstSubfolderSpec = 16;
 			files = (
+				3A589F402F099F460077FC5B /* Mini.app in Embed App Clips */,
 			);
 			name = "Embed App Clips";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -61,8 +63,8 @@
 				AppDelegate.swift,
 				Bones.swift,
 				Cashpoint.swift,
-				ContentView.swift,
 				Discount.swift,
+				Fastlane.swift,
 				FastlaneModel.swift,
 				Fonts/OrdersAutoPrinter.swift,
 				Fonts/Untitled.swift,
@@ -579,7 +581,7 @@
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 15.5;
 				MARKETING_VERSION = 11.3;
-				PRODUCT_BUNDLE_IDENTIFIER = "-";
+				PRODUCT_BUNDLE_IDENTIFIER = minis.co.uk;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
@@ -619,7 +621,7 @@
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 15.5;
 				MARKETING_VERSION = 11.3;
-				PRODUCT_BUNDLE_IDENTIFIER = "-";
+				PRODUCT_BUNDLE_IDENTIFIER = minis.co.uk;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;

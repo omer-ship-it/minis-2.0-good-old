@@ -3010,3 +3010,7 @@ private func diningModeFromIntent(_ raw: String) -> DiningMode {
         discountsRefundAmount: 0, discountsRefundCount: 0
     )
 }
+
+final class MenuScrollCoordinator: ObservableObject {
+    @Published var scrollToTop = false
+}

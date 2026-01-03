@@ -770,6 +770,8 @@ struct OrderFlowView: View {
                 .environment(\.locale, Locale(identifier: "he_IL"))
             }
             .onAppear {
+                print("cashPointMode stored =", UserDefaults.standard.object(forKey: "cashPointMode") as Any)
+
                 if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     name = posSavedName
                 }
@@ -3685,7 +3687,7 @@ struct OrderFlowView: View {
             : 0
 
         let tipOff = max(0, tipAmount)
-
+        clearContact()
         onCompleted(phoneParam, nameParam, summary, discountOff, tipOff)
 
         // ✅ dismiss the flow
@@ -3723,6 +3725,14 @@ struct OrderFlowView: View {
             push(.confirmation)
         }
     }
+    private func clearContact() {
+        posSavedName = ""
+        posSavedPhone = ""
+        name = ""
+        phoneDigits = ""
+        didConfirmNameThisSession = false
+    }
+    
     // MARK: - Phone & name helpers (keep as in your current file)
 
     // NOTE: keep your existing `phoneStep`, `nameStep`, `phonePad`, `nameKeyboard`,

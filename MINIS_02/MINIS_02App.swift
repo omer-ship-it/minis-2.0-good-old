@@ -1,17 +1,36 @@
 import SwiftUI
-import UserNotifications
 import UIKit
+import UserNotifications
 import StripeApplePay
 
 // MARK: - Reset mini shop defaults
 
+enum AppSettings {
+    enum Key {
+        static let cashPointMode = "cashPointMode"
+    }
+
+    struct Defaults {
+        static let cashPointMode = false
+    }
+
+    static func bootstrapIfNeeded() {
+        let d = UserDefaults.standard
+        d.set(Defaults.cashPointMode, forKey: Key.cashPointMode)
+
+        #if DEBUG
+        print("⚙️ AppSettings bootstrapped | cashPointMode =", d.bool(forKey: Key.cashPointMode))
+        #endif
+    }
+}
 
 @main
 struct MINIS_02App: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @Environment(\.scenePhase) private var scenePhase
 
-    @AppStorage("cashPointMode") private var cashPointMode: Bool = false
+    // MARK: - App State
+    @AppStorage(AppSettings.Key.cashPointMode) private var cashPointMode: Bool = false
     @AppStorage("shopId") private var shopId: String = "12"
     @AppStorage("miniAppId") private var miniAppId: Int = 0
     @AppStorage("launchMenuOnce") private var launchMenuOnce: Bool = false
@@ -20,71 +39,29 @@ struct MINIS_02App: App {
     @AppStorage("deliveryLoc") private var deliveryLoc: String = ""
 
     @State private var studentClaim: StudentClaim? = nil
-    
+
+    // MARK: - App Group + Keys
+    private let appGroupId = "group.minis"
+    private let kPendingUniversalLink = "pendingUniversalLink"
+    private let kPendingStudentClaim  = "pendingStudentClaim.v1"
+
     init() {
-        UserDefaults.standard.set("12", forKey: "miniAppId")
-        STPAPIClient.shared.publishableKey = "pk_live_51H5URzFZIwZSNufssK4R7BjLhpqxHVcfmEZVH8Tg74MAHMA20RfkYhIfbwFjDWJ55KzHWkOhEcqVWhIO2VShjOcU00Tslmi1XT"
-      //  PrinterManager.shared.setPrinterSet(.ron)
-        let demoData = PrinterManager.SalesReportData(
-            ppaRestaurant: 52,
-            dinersRestaurant: 269,
-            totalRestaurantIncVat: 14025,
-            ppaRestaurantValue: 0,
+        AppSettings.bootstrapIfNeeded()
 
-            ppaTA: 38,
-            dinersTA: 139,
-            totalTAIncVat: 5362,
+        // default mini for fresh installs
+        if UserDefaults.standard.integer(forKey: "miniAppId") == 0 {
+            UserDefaults.standard.set(12, forKey: "miniAppId")
+            UserDefaults.standard.set("12", forKey: "shopId")
+        }
 
-            // 🔄 REVERSED VALUES
-            totalSalesIncVat: 19487,   // was 692.2
-            tipsTotal: 24,
-            grandTotal: 19511,         // was 699.9
+        STPAPIClient.shared.publishableKey =
+        "pk_live_51H5URzFZIwZSNufssK4R7BjLhpqxHVcfmEZVH8Tg74MAHMA20RfkYhIfbwFjDWJ55KzHWkOhEcqVWhIO2VShjOcU00Tslmi1XT"
 
-            cashAmount: 1912,
-            cashCount: 356,
-            cardAmount: 17595,
-            cardCount: 314,
-            collectionsTotalAmount: 361,
-            collectionsTotalCount: 19487,
-
-            closedDrawersAmount: 0,
-            openDrawersAmount: 0,
-            depositWithdrawAmount: 0,
-            drawerTotalAmount: 0,
-            mainDrawerAmount: 1916,
-            hostStationDrawerAmount: 0,
-
-            tipBaseTotal: 24,
-            tipRestaurant: 0,
-            tipBarTakeaway: 0,
-            extraTipTotal: 0,
-            extraTipRestaurant: 0,
-            extraTipBar: 0,
-
-            ordersOTHAmount: 0, ordersOTHCount: 0,
-            itemsOTHAmount: 0, itemsOTHCount: 0,
-            canceledItemsAmount: 0, canceledItemsCount: 0,
-            refundedItemsAmount: 0, refundedItemsCount: 0,
-            discountsAmount: 0, discountsCount: 0,
-            discountsRefundAmount: 0, discountsRefundCount: 0
-        )
-     //   PrinterManager.shared.printHebrewCodepageProbe(to: "10.100.10.232")
-         //  PrinterManager.shared.printSalesDebugReport(demoData)
-        UIView.appearance().tintColor = nil
-
-        // 🔥 Global RTL for UIKit (menus, alerts, etc.)
-        //UIView.appearance().semanticContentAttribute = .forceRightToLeft
-
+        // segmented control appearance
         let seg = UISegmentedControl.appearance()
-
         seg.setTitleTextAttributes([.foregroundColor: UIColor.label], for: .normal)
         seg.setTitleTextAttributes([.foregroundColor: UIColor.label], for: .selected)
-
-        // Optional: make selected pill follow tint correctly
         seg.selectedSegmentTintColor = UIColor.tertiarySystemFill
-
-     
-        
 
         // Clear saved POS name/phone on fresh launch
         UserDefaults.standard.removeObject(forKey: "posSavedName")
@@ -101,15 +78,16 @@ struct MINIS_02App: App {
                         .environment(\.locale, Locale(identifier: "he_IL"))
                 } else {
                     HomeView()
-                        .environment(\.layoutDirection, .leftToRight)
                         .tint(.primary)
-                    
+                        .environment(\.layoutDirection, .leftToRight)
                 }
             }
             .environment(\.isRtl, direction == "rtl")
             .environment(\.layoutDirection, direction == "rtl" ? .rightToLeft : .leftToRight)
             .environment(\.currency, direction == "rtl" ? "₪" : "£")
             .accentColor(.primary)
+
+            // MARK: - Universal Links / Deep Links
             .onOpenURL { url in
                 handleIncoming(url: url)
             }
@@ -121,34 +99,41 @@ struct MINIS_02App: App {
                     print("🌐 onContinueUserActivity → nil url")
                 }
             }
+
+            // MARK: - Cold launch handling
             .onAppear {
-                if let s = MinisShared.sharedDefaults.string(forKey: "pendingUniversalLink"),
+                // 1) If app group has a pending claim (App Clip → Full App), show it
+                loadPendingClaimFromAppGroupIfAny()
+
+                // 2) If we stored a pending link (cold launch), process it
+                if let s = MinisShared.sharedDefaults.string(forKey: kPendingUniversalLink),
                    let url = URL(string: s) {
                     print("🥶 cold-launch pendingUniversalLink → \(url.absoluteString)")
                     handleIncoming(url: url)
-                    MinisShared.sharedDefaults.removeObject(forKey: "pendingUniversalLink")
+
+                    MinisShared.sharedDefaults.removeObject(forKey: kPendingUniversalLink)
                     MinisShared.sharedDefaults.synchronize()
                 }
             }
-            .sheet(item: $studentClaim) { claim in
-                StudentDiscountView(
-                    miniAppId: claim.miniAppId,
-                    campaignId: claim.campaignId,
-                    discountPercent: claim.discountPercent,
-                    durationMonths: claim.durationMonths
-                )
-            }
+
+            // MARK: - Student (full screen like clip)
+          
+            // MARK: - Scene phase (auto print + installs ping)
             .onChange(of: scenePhase) { phase in
                 switch phase {
                 case .active:
                     pingInstallIfNeeded()
-                    if cashPointMode && autoPrintEnabled {
+
+                    if isIPad && cashPointMode && autoPrintEnabled {
+                        print("🖨️ Auto print activated")
                         OrdersAutoPrinter.shared.startPolling(interval: 10)
                     } else {
                         OrdersAutoPrinter.shared.stopPolling()
                     }
+
                 case .inactive, .background:
                     OrdersAutoPrinter.shared.stopPolling()
+
                 @unknown default:
                     break
                 }
@@ -165,43 +150,36 @@ struct MINIS_02App: App {
         }
     }
 
-    private func handleIncoming(url: URL) {
-        print("🔗 onOpenURL → \(url.absoluteString)")
-        guard url.host == "minis.studio" else { return }
+    // MARK: - Incoming URL Router
 
-        // ✅ 1) STUDENT CLAIM FIRST (so it launches from HomeView / anywhere)
+    private func handleIncoming(url: URL) {
+        print("🔗 handleIncoming → \(url.absoluteString)")
+        guard url.host?.lowercased() == "minis.studio" else { return }
+
+        // ✅ Save for attribution + cold-launch fallback
+        MinisShared.sharedDefaults.set(url.absoluteString, forKey: kPendingUniversalLink)
+        MinisShared.sharedDefaults.synchronize()
+
+        // ✅ 1) STUDENT CLAIM FIRST (menuView will present it)
         if let claim = StudentClaim.from(url: url) {
             print("🎓 Student claim detected → \(claim)")
-            studentClaim = claim
-            if let suite = UserDefaults(suiteName: "group.minis") {
-                let enc = JSONEncoder()
-                if let data = try? enc.encode(claim) {
-                    suite.set(data, forKey: "pendingStudentClaim.v1")
-                    suite.synchronize()
-                    print("✅ SAVED pendingStudentClaim.v1 to App Group. bytes=\(data.count)")
-                } else {
-                    print("❌ FAILED to encode StudentClaim")
-                }
+            saveClaimToAppGroup(claim)
 
-                // quick verify read-back
-                if let check = suite.data(forKey: "pendingStudentClaim.v1") {
-                    print("🔎 READBACK pendingStudentClaim.v1 bytes=\(check.count)")
-                } else {
-                    print("❌ READBACK failed — key not present after save")
-                }
-            } else {
-                print("❌ App Group suite is NIL — App Groups capability not set / wrong group id")
-            }
+            // ✅ tell menuView (if already running) to load + present
+            NotificationCenter.default.post(name: .studentClaimArrived, object: nil)
+
             return
         }
 
-        
         // ✅ 2) Normal deep links (shop/fastlane etc.)
         deliveryLoc = ""
         UserDefaults.standard.removeObject(forKey: "deliveryLoc")
 
         let components = url.pathComponents.filter { $0 != "/" && !$0.isEmpty }
-        guard let last = components.last, let id = Int(last) else { return }
+        guard let last = components.last, let id = Int(last) else {
+            print("⚠️ Deep link ignored: no numeric id in path: \(url.path)")
+            return
+        }
 
         let miniType = components.dropLast().last ?? "unknown"
         print("🎯 Deep link → type=\(miniType), miniAppId=\(id)")
@@ -212,24 +190,64 @@ struct MINIS_02App: App {
         let shopIdString = String(id)
         shopId = shopIdString
         UserDefaults.standard.set(shopIdString, forKey: "shopId")
-        pingInstallIfNeeded(force: true)
 
+        // optional query ?loc=
         if let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
            let loc = comps.queryItems?.first(where: { $0.name == "loc" })?.value,
            !loc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+
             let clean = loc.trimmingCharacters(in: .whitespacesAndNewlines)
             deliveryLoc = clean
             UserDefaults.standard.set(clean, forKey: "deliveryLoc")
             print("📍 Stored deliveryLoc =", clean)
         }
 
+        // reset shop defaults / force menu mode
         resetShopUserDefaultsToDefaults()
         launchMenuOnce = true
         cashPointMode = false
 
+        // ping with attribution
+        pingInstallIfNeeded(force: true)
+
         print("✅ Deep link handled → miniAppId=\(miniAppId), shopId=\(shopId), deliveryLoc=\(deliveryLoc)")
     }
-    private let appGroupId = "group.minis"
+
+    // MARK: - Student Claim in App Group
+
+    private func saveClaimToAppGroup(_ claim: StudentClaim) {
+        guard let suite = UserDefaults(suiteName: appGroupId) else {
+            print("❌ App Group suite is NIL — check App Groups capability / id")
+            return
+        }
+        guard let data = try? JSONEncoder().encode(claim) else {
+            print("❌ FAILED to encode StudentClaim")
+            return
+        }
+        suite.set(data, forKey: kPendingStudentClaim)
+        suite.synchronize()
+        print("✅ Saved \(kPendingStudentClaim) to App Group. bytes=\(data.count)")
+    }
+
+    private func loadPendingClaimFromAppGroupIfAny() {
+        guard let suite = UserDefaults(suiteName: appGroupId) else { return }
+        guard let data = suite.data(forKey: kPendingStudentClaim) else { return }
+
+        guard let claim = try? JSONDecoder().decode(StudentClaim.self, from: data) else {
+            suite.removeObject(forKey: kPendingStudentClaim)
+            suite.synchronize()
+            return
+        }
+
+        studentClaim = claim
+
+        suite.removeObject(forKey: kPendingStudentClaim)
+        suite.synchronize()
+
+        print("✅ Loaded pending student claim from App Group → showing")
+    }
+
+    // MARK: - Install Ping
 
     private struct InstallPingPayload: Codable {
         let anonId: String
@@ -264,33 +282,30 @@ struct MINIS_02App: App {
     }
 
     private func buildAttributionFromPendingLink() -> (source: String?, campaign: String?, referrer: String?) {
-        // You already store this in the app group on cold launch
-        if let s = MinisShared.sharedDefaults.string(forKey: "pendingUniversalLink"),
-           let url = URL(string: s) {
+        guard let s = MinisShared.sharedDefaults.string(forKey: kPendingUniversalLink),
+              let url = URL(string: s)
+        else { return (nil, nil, nil) }
 
-            let comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
-            let q = comps?.queryItems ?? []
+        let comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        let q = comps?.queryItems ?? []
 
-            func qv(_ name: String) -> String? {
-                q.first(where: { $0.name.lowercased() == name.lowercased() })?.value?
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-
-            let utmSource = qv("utm_source")
-            let utmCampaign = qv("utm_campaign")
-            let utmMedium = qv("utm_medium")
-
-            let host = url.host ?? ""
-            let path = url.path
-            let ref = ([host + path, utmMedium.map { "m:\($0)" }].compactMap { $0 }).joined(separator: "|")
-
-            let source = (utmSource?.isEmpty == false) ? utmSource : "universal_link"
-            let campaign = (utmCampaign?.isEmpty == false) ? utmCampaign : nil
-
-            return (source, campaign, ref.isEmpty ? nil : ref)
+        func qv(_ name: String) -> String? {
+            q.first(where: { $0.name.lowercased() == name.lowercased() })?.value?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
-        return (nil, nil, nil)
+        let utmSource = qv("utm_source")
+        let utmCampaign = qv("utm_campaign")
+        let utmMedium = qv("utm_medium")
+
+        let host = url.host ?? ""
+        let path = url.path
+        let ref = ([host + path, utmMedium.map { "m:\($0)" }].compactMap { $0 }).joined(separator: "|")
+
+        let source = (utmSource?.isEmpty == false) ? utmSource : "universal_link"
+        let campaign = (utmCampaign?.isEmpty == false) ? utmCampaign : nil
+
+        return (source, campaign, ref.isEmpty ? nil : ref)
     }
 
     private func shouldPingToday() -> Bool {
@@ -303,7 +318,6 @@ struct MINIS_02App: App {
     }
 
     private func pingInstallIfNeeded(force: Bool = false) {
-        // ✅ avoid spamming (once per day per device)
         if !force && !shouldPingToday() { return }
 
         let anonId = getOrCreateAnonId()
@@ -340,4 +354,6 @@ struct MINIS_02App: App {
     }
 }
 
-
+private var isIPad: Bool {
+    UIDevice.current.userInterfaceIdiom == .pad
+}
