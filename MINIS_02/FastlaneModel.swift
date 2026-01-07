@@ -519,7 +519,9 @@ enum OrderAPI {
         let cashAmount: Double
         let cardAmount: Double
     }
-
+    
+   
+   
     static func submitOrder(
         orderId: Int? = nil,
         entries: [BasketEntry],
@@ -542,11 +544,43 @@ enum OrderAPI {
 
         completion: @escaping (Result<Int, Error>) -> Void
     ) {
+        let isPad = UIDevice.current.userInterfaceIdiom == .pad
+        let cashPointMode = UserDefaults.standard.bool(forKey: "cashPointMode")
         let defaults = UserDefaults.standard
 
         func r2(_ x: Double) -> Double { (x * 100).rounded() / 100 }
         func closeEnough(_ a: Double, _ b: Double, tol: Double = 0.01) -> Bool { abs(a - b) <= tol }
 
+        func normalizeLoc(_ s: String) -> String {
+            s.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        }
+
+        func resolveWaPhone(miniAppId: Int, customerPhone: String?) -> String {
+            // Prefer passed phone
+            let p1 = (customerPhone ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !p1.isEmpty { return p1 }
+
+            // fallback to stored
+            let p2 = (defaults.string(forKey: "userPhone") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !p2.isEmpty { return p2 }
+
+            // last resort (your debug number)
+            if miniAppId == 3 { return "+447522552608" }
+
+            return ""
+        }
+
+        func resolveDeliveryLoc(miniAppId: Int) -> String {
+            if miniAppId != 3 { return "" }
+
+            let saved = normalizeLoc(defaults.string(forKey: "deliveryLoc") ?? "")
+            if !saved.isEmpty { return saved }
+
+            // ✅ HARD FALLBACK like you asked (debug / default bar)
+            return "mikkeller"
+        }
+
+        
         func flexDouble(_ any: Any?) -> Double? {
             if let d = any as? Double { return d }
             if let i = any as? Int { return Double(i) }
@@ -613,8 +647,14 @@ enum OrderAPI {
         // ------------------------------------------------------------
         // ✅ SOURCE: normalize ONCE (used for payload + headers)
         // ------------------------------------------------------------
-        let normalizedSource = source.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        var normalizedSource = source
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
 
+        // ✅ SIMPLE RULE
+        if !cashPointMode && isPad {
+            normalizedSource = "self-cashpoint"
+        }
         // ---------- totals ----------
         var finalTotals: [String: Any] = totals ?? [:]
 
@@ -622,7 +662,12 @@ enum OrderAPI {
         let due = r2(max(dueFromTotals ?? total, 0))
 
         if finalTotals["currency"] == nil {
-            finalTotals["currency"] = defaults.string(forKey: "currency") ?? "ILS"
+            // ✅ match the working curl for mini 3
+            if miniAppId == 3 {
+                finalTotals["currency"] = "GBP"
+            } else {
+                finalTotals["currency"] = defaults.string(forKey: "currency") ?? "ILS"
+            }
         }
         finalTotals["total"] = due
 
@@ -656,6 +701,51 @@ enum OrderAPI {
             "source": normalizedSource,
             "orderSource": normalizedSource
         ]
+        // ------------------------------------------------------------
+        // ✅ DELIVERY (Fastlane / miniAppId == 3 via loc key)
+        // ------------------------------------------------------------
+        // ------------------------------------------------------------
+        // ------------------------------------------------------------
+        // ✅ DELIVERY (Fastlane / miniAppId == 3)
+        // Always send a loc. If none exists -> fallback to "mikkeller".
+        // Backend requires delivery.loc to resolve address.
+        // ------------------------------------------------------------
+        if miniAppId == 3 {
+
+            // ✅ 1) Read from app group first (recommended), then standard defaults
+            let appGroupId = "group.minis"
+            let suite = UserDefaults(suiteName: appGroupId)
+
+            func clean(_ s: String?) -> String {
+                (s ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased()
+            }
+
+            let locFromSuite = clean(suite?.string(forKey: "deliveryLoc"))
+            let locFromStd   = clean(defaults.string(forKey: "deliveryLoc"))
+
+            // ✅ 2) Final loc: suite -> std -> fallback
+            let fallbackLoc = "mikkeller"
+            let loc = !locFromSuite.isEmpty ? locFromSuite
+                    : (!locFromStd.isEmpty ? locFromStd : fallbackLoc)
+
+            // ✅ 3) Persist fallback so future requests are consistent (both stores)
+            if locFromSuite.isEmpty && locFromStd.isEmpty {
+                defaults.set(loc, forKey: "deliveryLoc")
+                suite?.set(loc, forKey: "deliveryLoc")
+                suite?.synchronize()
+            }
+
+            // ✅ 4) Send delivery payload in the exact shape backend expects
+            payload["delivery"] = [
+                "isDelivery": true,
+                "loc": loc
+            ]
+
+            // ✅ 5) Delivery forces takeaway (backend expects this)
+            payload["service"] = "ta"
+        }
 
         if let zcreditMeta, !zcreditMeta.isEmpty {
             payload["zcredit"] = zcreditMeta           // ✅ best: namespaced
@@ -1993,6 +2083,8 @@ final class OrderPricingState: ObservableObject {
     }
 }
 
+
+#if !APPCLIP
 import Foundation
 
 @MainActor
@@ -2203,6 +2295,7 @@ final class ReportPreviewModel: ObservableObject {
     }
 }
 
+#endif
 struct XReportApiResponse: Decodable {
     let ok: Bool
     let miniAppId: Int
@@ -2414,7 +2507,7 @@ struct ZReport: Decodable, Identifiable {
             ?? (try? c.decodeIfPresent(String.self, forKey: .createdAtCamel))
     }
 }
-
+#if !APPCLIP
 extension PrinterManager.SalesReportData {
 
     static func applyingXReport(_ res: XReportApiResponse, onto base: Self) -> Self {
@@ -2481,7 +2574,7 @@ extension PrinterManager.SalesReportData {
         return d
     }
 }
-
+#endif
 struct AdminOrderDTO: Decodable {
     let id: Int
     let ticketNumber: Int?
@@ -2971,7 +3064,7 @@ private func diningModeFromIntent(_ raw: String) -> DiningMode {
     }
 }
 
-
+#if !APPCLIP
  func emptySalesReportData() -> PrinterManager.SalesReportData {
     PrinterManager.SalesReportData(
         ppaRestaurant: 0,
@@ -3010,7 +3103,167 @@ private func diningModeFromIntent(_ raw: String) -> DiningMode {
         discountsRefundAmount: 0, discountsRefundCount: 0
     )
 }
-
+#endif
 final class MenuScrollCoordinator: ObservableObject {
     @Published var scrollToTop = false
+}
+
+func nextMenuTicketNumber() -> Int {
+    let key = "menu.localTicketNumber"
+    let v = UserDefaults.standard.integer(forKey: key) + 1
+    UserDefaults.standard.set(v, forKey: key)
+    return v
+}
+
+struct AdminOrderLineItem: Identifiable, Hashable {
+    let id: Int               // SwiftUI identity (can stay itemId)
+    let productId: Int?
+    let basketLineId: Int?    // ✅ THIS is basket.lineId from Metadata
+
+    var name: String
+    var quantity: Int
+    var unitPrice: Double
+    var category: String?
+    var modifiersText: String?
+    var updatedAt: Date?
+    var printer: String?
+
+    var rowTotal: Double { Double(quantity) * unitPrice }
+}
+
+struct AdminOrderItem: Identifiable, Hashable {
+    let id: Int
+    var orderId: String
+    var customerName: String
+    var subtitle: String
+    var source: String
+    var status: AdminOrderStatus
+    var placedAt: Date
+    var items: [AdminOrderLineItem]
+    var total: Double
+    var stations: Set<AdminStation>
+    var isUnpaid: Bool
+    var paymentMethod: String?
+
+    var customerPhone: String?    // ✅ ADD THIS
+}
+
+// MARK: - API DTOs
+
+
+ struct LineDTO: Decodable {
+    let itemId: Int?
+    let basketLineId: Int?   // ✅ ADD THIS (from Orders.Metadata basket[].lineId)
+    let productId: Int?
+    let name: String
+    let qty: Int
+    let category: String?
+    let status: Int
+    let station: String?
+    let modifiers: String?
+    let updatedAt: Date?
+    let unitPrice: Double?
+    let lineTotal: Double?
+}
+
+ struct OrderDTO: Decodable {
+    let id: Int
+    let ticketNumber: Int?        // local slip number from DB (if present)
+    let source: String
+    let bucket: String
+    let stage: String
+    let placedAt: Date
+    let scheduledFor: Date?
+    let customerName: String
+    let customerDisplayName: String?
+    let customerPhone: String?    // ✅ NEW
+    let totalGBP: Double
+    let itemSummary: String
+    let isDelivery: Bool
+    let shortCode: String?
+    let lines: [LineDTO]
+    let status: Int?
+    let paymentMethod: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, source, bucket, stage, placedAt, scheduledFor,
+             customerName, customerDisplayName, customerPhone, // ✅ NEW
+             totalGBP, itemSummary,
+             isDelivery, shortCode, lines, status, paymentMethod, ticketNumber
+        case Status = "Status"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+
+        id           = try c.decode(Int.self, forKey: .id)
+        ticketNumber = try? c.decodeIfPresent(Int.self, forKey: .ticketNumber)
+
+        source       = try c.decode(String.self, forKey: .source)
+        bucket       = try c.decode(String.self, forKey: .bucket)
+        stage        = try c.decode(String.self, forKey: .stage)
+        placedAt     = try c.decode(Date.self, forKey: .placedAt)
+        scheduledFor = try? c.decodeIfPresent(Date.self, forKey: .scheduledFor)
+
+        customerName        = try c.decode(String.self, forKey: .customerName)
+        customerDisplayName = try? c.decodeIfPresent(String.self, forKey: .customerDisplayName)
+        customerPhone       = try? c.decodeIfPresent(String.self, forKey: .customerPhone) // ✅ NEW
+
+        totalGBP     = try c.decode(Double.self, forKey: .totalGBP)
+        itemSummary  = try c.decode(String.self, forKey: .itemSummary)
+        isDelivery   = try c.decode(Bool.self, forKey: .isDelivery)
+        shortCode    = try? c.decodeIfPresent(String.self, forKey: .shortCode)
+        lines        = try c.decode([LineDTO].self, forKey: .lines)
+        paymentMethod = try? c.decodeIfPresent(String.self, forKey: .paymentMethod)
+
+        // robust status decoding as before
+        if let s = try? c.decodeIfPresent(Int.self, forKey: .status) {
+            status = s
+        } else if let sStr = try? c.decodeIfPresent(String.self, forKey: .status),
+                  let sInt = Int(sStr) {
+            status = sInt
+        } else if let sUpper = try? c.decodeIfPresent(Int.self, forKey: .Status) {
+            status = sUpper
+        } else if let sUpperStr = try? c.decodeIfPresent(String.self, forKey: .Status),
+                  let sInt = Int(sUpperStr) {
+            status = sInt
+        } else {
+            status = nil
+        }
+    }
+}
+
+// MARK: - Main View
+struct BasketItem: Identifiable, Hashable {
+    let id: Int
+    let name: String
+    let category: String
+    let price: Double
+}
+
+
+enum AdminStation: Hashable {
+    case bar
+    case kitchen
+    case bakery
+}
+
+enum StationViewMode: String {
+    case bar
+    case kitchen
+
+    var title: String {
+        switch self {
+        case .bar:     return "עמדת בר"
+        case .kitchen: return "עמדת מטבח"
+        }
+    }
+}
+
+// MARK: - Models
+
+enum AdminOrderStatus: String, Codable {
+    case received   // חדש / בתהליך
+    case ready      // מוכן
+    case collected  // נאסף
 }

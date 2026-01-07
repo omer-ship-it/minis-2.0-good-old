@@ -1636,10 +1636,10 @@ struct AdminSplitViewPad: View {
                 if let order = selectedOrder {
                     KDSOrderDetailView(order: order)
                 } else {
-                    ContentUnavailableView("Select an order", systemImage: "list.bullet.rectangle", description: Text("Choose an order to see details."))
+                   // ContentUnavailableView("Select an order", systemImage: "list.bullet.rectangle", description: Text("Choose an order to see details."))
                 }
             } else {
-                ContentUnavailableView("No item selected", systemImage: "shippingbox", description: Text("Pick a product from Stock."))
+             //   ContentUnavailableView("No item selected", systemImage: "shippingbox", description: Text("Pick a product from Stock."))
             }
         }
         .popover(isPresented: $showQuickPopover, arrowEdge: .top) {

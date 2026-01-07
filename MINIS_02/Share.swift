@@ -260,11 +260,35 @@ struct DotQRView: View {
 
                         if let label = overlayLabel, !label.isEmpty {
                             let fontSize = side * 0.10
-                            let t = Text(label)
-                                .font(.system(size: fontSize, weight: .bold))
-                                .foregroundStyle(ink)
+                            let center = CGPoint(x: side / 2, y: side / 2)
 
-                            ctx.draw(t, at: CGPoint(x: side/2, y: side/2), anchor: .center)
+                            // Pick a concrete color (best if `ink` is a Color)
+                            // If `ink` is not a Color (e.g. gradient), choose a fallback Color here.
+                            let uiColor = UIColor(ink as? Color ?? .black)
+
+                            ctx.withCGContext { cg in
+                                UIGraphicsPushContext(cg)
+                                defer { UIGraphicsPopContext() }
+
+                                let font = UIFont.systemFont(ofSize: fontSize, weight: .bold)
+
+                                let attrs: [NSAttributedString.Key: Any] = [
+                                    .font: font,
+                                    .foregroundColor: uiColor
+                                ]
+
+                                let ns = NSString(string: label)
+                                let size = ns.size(withAttributes: attrs)
+
+                                let rect = CGRect(
+                                    x: center.x - size.width / 2,
+                                    y: center.y - size.height / 2,
+                                    width: size.width,
+                                    height: size.height
+                                )
+
+                                ns.draw(in: rect, withAttributes: attrs)
+                            }
                         }
                     }
                 }

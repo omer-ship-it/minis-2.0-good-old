@@ -366,7 +366,7 @@ struct MembersClubView: View {
     let miniAppId: Int
     let campaignId: String
     let stampEarnedNow: Int
-    
+    @State private var marketingOptIn: Bool = false
 
     @State private var showStoreSheet = false
     @State private var isSending = false
@@ -508,6 +508,30 @@ struct MembersClubView: View {
             .padding(.horizontal, 28)
             .environment(\.layoutDirection, .rightToLeft)
             .padding(.top, 8)
+            
+            Button {
+                marketingOptIn.toggle()
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: marketingOptIn ? "checkmark.square.fill" : "square")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundColor(textColor)
+
+                   
+                    Text("מאשר/ת לקבל עדכונים והטבות מבית העם במייל")
+                        .font(.primariesDemi(13))
+                        
+                        .foregroundColor(textColor.opacity(0.85))
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Spacer()
+                }
+            }
+            .padding(20)
+            .buttonStyle(.plain)
+            .contentShape(Rectangle())
+            .padding(.top, 2)
 
             Spacer()
 
@@ -519,18 +543,20 @@ struct MembersClubView: View {
                 // 1) Save locally (always)
                 persistMemberJoin()
 
-                // 2) Fire-and-forget to server, then open store
+                // ✅ 2) Dismiss the members sheet right away
+                dismiss()
+
+                // 3) Fire-and-forget (don’t block UI)
                 identifyMemberByEmail { ok, msg in
                     DispatchQueue.main.async {
-                        self.isSending = false
+                        // no UI now (view is dismissed). Just log if needed.
                         if !ok {
-                            self.sendError = msg ?? "שגיאה בשליחה לשרת"
-                            // still let them continue to store
+                            print("❌ members/join failed:", msg ?? "unknown")
                         }
-                        self.showStoreSheet = true
                     }
                 }
-            } label: {
+
+            }  label: {
                 ZStack {
                     Text("הצטרף לחברים של בית העם")
                         .font(.primariesDemi(18))
@@ -588,29 +614,55 @@ struct MembersClubView: View {
 
     // MARK: - Local persist (App Group ready later)
     private func persistMemberJoin() {
+        // ✅ birthday fields
         let mm = String(format: "%02d", birthMonth)
         let dd = String(format: "%02d", birthDay)
         let birthdayMMDD = "\(mm)-\(dd)"
 
-        // ✅ ensure anon id exists
+        // ✅ stable anon id (best-effort)
         let anon = UserDefaults.standard.string(forKey: "anonUUID") ?? UUID().uuidString
         UserDefaults.standard.set(anon, forKey: "anonUUID")
-
-        let payload: [String: Any] = [
+        UserDefaults.standard.set(nameClean, forKey: "userName")
+        // ✅ build local member profile (what MenuView reads)
+        var profile: [String: Any] = [
             "miniAppId": miniAppId,
             "campaignId": campaignId,
-            "stampEarnedNow": stampEarnedNow,
             "name": nameClean,
             "email": emailClean,
             "birthdayMMDD": birthdayMMDD,
+            "birthMonth": birthMonth,
+            "birthDay": birthDay,
             "anonId": anon,
-            "createdAt": Date().timeIntervalSince1970
+            "createdAt": Date().timeIntervalSince1970,
+
+            // ✅ wallet defaults (min 1 stamp)
+            "wallet": [
+                "stamps": max(1, min(10, stampEarnedNow)),
+                "redeems": 0,
+                "birthdayVoucherRedeemedYear": 0
+            ]
         ]
+        profile["stamps"] = max(1, min(10, stampEarnedNow))
+        // ✅ marketing consent
+        profile["marketingOptIn"] = marketingOptIn
+        if marketingOptIn {
+            profile["marketingConsentAt"] = Int(Date().timeIntervalSince1970)     // unix seconds
+            profile["marketingConsentSource"] = "members_join_ios"
+        } else {
+            // keep it clean / compliant
+            profile.removeValue(forKey: "marketingConsentAt")
+            profile.removeValue(forKey: "marketingConsentSource")
+        }
 
-        UserDefaults.standard.set(payload, forKey: "pendingMemberJoin")
-        UserDefaults.standard.set(payload, forKey: "memberProfileLocal") // ✅ immediate local profile
+        // ✅ Save locally
+        UserDefaults.standard.set(profile, forKey: "memberProfileLocal")
+
+        // ✅ Optional: keep pending join payload for retry/debug
+        UserDefaults.standard.set(profile, forKey: "pendingMemberJoin")
+
+        // ✅ force UI refresh across app
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "members.updatedAt")
     }
-
     // MARK: - Server call
     private func identifyMemberByEmail(completion: @escaping (Bool, String?) -> Void) {
         let mm = String(format: "%02d", birthMonth)
@@ -636,7 +688,7 @@ struct MembersClubView: View {
         let appVariant = "app"
         #endif
 
-        let payload: [String: Any] = [
+        var payload: [String: Any] = [
             "miniAppId": miniAppId,
             "campaign": campaignId,
             "stampEarnedNow": stampEarnedNow,
@@ -645,11 +697,20 @@ struct MembersClubView: View {
             "appVariant": appVariant,
             "email": emailClean,
             "name": nameClean,
-            "birthdayMMDD": birthdayMMDD
+            "birthdayMMDD": birthdayMMDD,
+            "birthMonth": birthMonth,          // ✅ ADD
+            "birthDay": birthDay               // ✅ ADD
         ]
 
-        req.httpBody = (try? JSONSerialization.data(withJSONObject: payload))
+        // ✅ ADD: marketing consent
+        payload["marketingOptIn"] = marketingOptIn
+        if marketingOptIn {
+            payload["marketingConsentAt"] = Int(Date().timeIntervalSince1970)
+            payload["marketingConsentSource"] = "members_join_ios"
+        }
 
+        req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+        
         URLSession.shared.dataTask(with: req) { data, resp, err in
             if let err = err {
                 completion(false, err.localizedDescription)

@@ -174,18 +174,7 @@ struct HomeView: View {
                         }
                     }
                 }
-                else if !launchMenuOnce && miniAppId == 0 && referrals.isEmpty {
-                    // true "nothing exists" fallback
-                    print("🎯 HomeView fallback → no referrals & no miniAppId, opening \(fallbackMiniShopId)")
-                    miniAppId = fallbackMiniShopId
-                    shopId = String(fallbackMiniShopId)
-                    UserDefaults.standard.set(fallbackMiniShopId, forKey: "miniAppId")
-                    UserDefaults.standard.set(String(fallbackMiniShopId), forKey: "shopId")
-                    DispatchQueue.main.async {
-                        showMenu = true
-                    }
-                }
-                else if !launchMenuOnce && miniAppId == 0, let ref = defaultReferral() {
+              if !launchMenuOnce && miniAppId == 0, let ref = defaultReferral() {
                     // referral default
                     let id = ref.miniAppId
                     miniAppId = id
@@ -201,7 +190,15 @@ struct HomeView: View {
             selectedIndex = index(of: selectedFilter)
         }
         .onChange(of: launchStudioOnce) { if $0 { showStudio = true; launchStudioOnce = false } }
-        .onChange(of: launchMenuOnce)  { if $0 { showMenu  = true; launchMenuOnce  = false } }
+        .onChange(of: launchMenuOnce) { newValue in
+            guard newValue else { return }
+
+            // ✅ save referral at HomeView level
+            saveCurrentMiniToHomeReferrals(kind: .fastlane)
+
+            showMenu = true
+            launchMenuOnce = false
+        }
         .onChange(of: referrals.map { "\($0.miniAppId)#\($0.kind.rawValue)#\($0.title)" }) { _ in
             let idx = min(selectedIndex, max(0, tabs.count - 1))
             selectedIndex = idx
@@ -260,6 +257,47 @@ struct HomeView: View {
         }
     }
     
+    private func saveCurrentMiniToHomeReferrals(kind: MiniKind = .fastlane) {
+        guard miniAppId > 0 else { return }
+        guard let suite = UserDefaults(suiteName: "group.minis") else { return }
+
+        let referral = MiniReferral(
+            title: "Mini \(miniAppId)",
+            subtitle: kind.displayTitle,
+            miniAppId: miniAppId,
+            imageURL: nil,
+            sharedAt: Date(),          // ✅ Date, not TimeInterval
+            kind: kind
+        )
+
+        // 1) Save lastMiniReferralJSON
+        if let data = try? JSONEncoder().encode(referral) {
+            suite.set(data, forKey: "lastMiniReferralJSON")
+        }
+
+        // 2) Save into miniReferralsJSON array
+        var arr: [MiniReferral] = []
+        if let data = suite.data(forKey: "miniReferralsJSON"),
+           let decoded = try? JSONDecoder().decode([MiniReferral].self, from: data) {
+            arr = decoded
+        }
+
+        // de-dupe by miniAppId + kind
+        arr.removeAll { $0.miniAppId == referral.miniAppId && $0.kind == referral.kind }
+        arr.insert(referral, at: 0)
+
+        // cap list
+        if arr.count > 30 {
+            arr = Array(arr.prefix(30))
+        }
+
+        if let data = try? JSONEncoder().encode(arr) {
+            suite.set(data, forKey: "miniReferralsJSON")
+        }
+
+        suite.synchronize()
+        print("✅ HomeView saved referral → miniAppId=\(miniAppId), kind=\(kind.rawValue)")
+    }
     private func defaultReferral() -> MiniReferral? {
         // Prefer Fastlane if available
         if let fastlane = referrals.first(where: { $0.kind == .fastlane }) {
@@ -530,4 +568,5 @@ struct ForceRTL<Content: View>: View {
             }
         }
     }
+    
 }

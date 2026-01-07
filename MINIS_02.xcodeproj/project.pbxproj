@@ -7,9 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		3A589F402F099F460077FC5B /* Mini.app in Embed App Clips */ = {isa = PBXBuildFile; fileRef = 3A5D0EA32EEF2F640020509C /* Mini.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		3A58A00C2F0C19F70077FC5B /* Mini.app in Embed App Clips */ = {isa = PBXBuildFile; fileRef = 3A5D0EA32EEF2F640020509C /* Mini.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		3A5D0ED42EEF2FE00020509C /* Kingfisher in Frameworks */ = {isa = PBXBuildFile; productRef = 3A5D0ED32EEF2FE00020509C /* Kingfisher */; };
-		3A5D0ED62EEF30040020509C /* Stripe in Frameworks */ = {isa = PBXBuildFile; productRef = 3A5D0ED52EEF30040020509C /* Stripe */; };
 		3A5D0ED82EEF30040020509C /* StripeApplePay in Frameworks */ = {isa = PBXBuildFile; productRef = 3A5D0ED72EEF30040020509C /* StripeApplePay */; };
 		3A5D0EDA2EEF30040020509C /* StripePaymentsUI in Frameworks */ = {isa = PBXBuildFile; productRef = 3A5D0ED92EEF30040020509C /* StripePaymentsUI */; };
 		3A6F59AB2ECE535800062F59 /* Kingfisher in Frameworks */ = {isa = PBXBuildFile; productRef = 3A6F59AA2ECE535800062F59 /* Kingfisher */; };
@@ -35,7 +34,7 @@
 			dstPath = "$(CONTENTS_FOLDER_PATH)/AppClips";
 			dstSubfolderSpec = 16;
 			files = (
-				3A589F402F099F460077FC5B /* Mini.app in Embed App Clips */,
+				3A58A00C2F0C19F70077FC5B /* Mini.app in Embed App Clips */,
 			);
 			name = "Embed App Clips";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -48,48 +47,42 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-		3A5D0EC62EEF2F660020509C /* Exceptions for "Mini" folder in "Mini" target */ = {
+		3A589FA62F0B9C1E0077FC5B /* Exceptions for "MINIS_02" folder in "MINIS_02" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
-				ContentView.swift,
-				Info.plist,
+				"App clipTests/App_clipTests.swift",
 			);
-			target = 3A5D0EA22EEF2F640020509C /* Mini */;
+			target = 3A6F597C2ECE43AC00062F59 /* MINIS_02 */;
 		};
-		3A5D0ED12EEF2FB70020509C /* Exceptions for "MINIS_02" folder in "Mini" target */ = {
+		3A58A00E2F0C447C0077FC5B /* Exceptions for "MINIS_02" folder in "Mini" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
-				Admin.swift,
 				AppDelegate.swift,
-				Bones.swift,
-				Cashpoint.swift,
 				Discount.swift,
 				Fastlane.swift,
 				FastlaneModel.swift,
-				Fonts/OrdersAutoPrinter.swift,
-				Fonts/Untitled.swift,
 				Home.swift,
-				MiniProductApi.swift,
-				OrderFlowView.swift,
-				Orders.swift,
-				OrdersNEW.swift,
-				Printer.swift,
-				PrinterManager.swift,
 				Share.swift,
-				Stock.swift,
+			);
+			target = 3A5D0EA22EEF2F640020509C /* Mini */;
+		};
+		3A5D0EC62EEF2F660020509C /* Exceptions for "Mini" folder in "Mini" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Assets.xcassets,
+				ContentView.swift,
+				Info.plist,
 			);
 			target = 3A5D0EA22EEF2F640020509C /* Mini */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet section */
-		3A5D0EE82EEFF3230020509C /* Exceptions for "MINIS_02" folder in "Compile Sources" phase from "Mini" target */ = {
+		3A58A0152F0C45090077FC5B /* Exceptions for "Mini" folder in "Compile Sources" phase from "Mini" target */ = {
 			isa = PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet;
 			buildPhase = 3A5D0E9F2EEF2F640020509C /* Sources */;
 			membershipExceptions = (
-				"Fonts/Oswald-VariableFont_wght.ttf",
-				"Fonts/primaries-demibold-aaa.otf",
-				MINIS_02.entitlements,
+				Assets.xcassets,
 			);
 		};
 /* End PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet section */
@@ -99,6 +92,7 @@
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
 				3A5D0EC62EEF2F660020509C /* Exceptions for "Mini" folder in "Mini" target */,
+				3A58A0152F0C45090077FC5B /* Exceptions for "Mini" folder in "Compile Sources" phase from "Mini" target */,
 			);
 			path = Mini;
 			sourceTree = "<group>";
@@ -116,8 +110,8 @@
 		3A6F597F2ECE43AC00062F59 /* MINIS_02 */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
-				3A5D0ED12EEF2FB70020509C /* Exceptions for "MINIS_02" folder in "Mini" target */,
-				3A5D0EE82EEFF3230020509C /* Exceptions for "MINIS_02" folder in "Compile Sources" phase from "Mini" target */,
+				3A589FA62F0B9C1E0077FC5B /* Exceptions for "MINIS_02" folder in "MINIS_02" target */,
+				3A58A00E2F0C447C0077FC5B /* Exceptions for "MINIS_02" folder in "Mini" target */,
 			);
 			path = MINIS_02;
 			sourceTree = "<group>";
@@ -142,11 +136,6 @@
 			path = MiniUITests;
 			sourceTree = "<group>";
 		};
-		3A74EF832ED5806E008A7F67 /* App clipTests */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = "App clipTests";
-			sourceTree = "<group>";
-		};
 		3A74EF8D2ED5806E008A7F67 /* App clipUITests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = "App clipUITests";
@@ -167,7 +156,6 @@
 				3A5D0ED82EEF30040020509C /* StripeApplePay in Frameworks */,
 				3A5D0ED42EEF2FE00020509C /* Kingfisher in Frameworks */,
 				3A5D0EDA2EEF30040020509C /* StripePaymentsUI in Frameworks */,
-				3A5D0ED62EEF30040020509C /* Stripe in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -194,7 +182,6 @@
 				3A6F59982ECE43AE00062F59 /* MINIS_02UITests */,
 				3A74EF4C2ED57F2C008A7F67 /* MiniTests */,
 				3A74EF562ED57F2C008A7F67 /* MiniUITests */,
-				3A74EF832ED5806E008A7F67 /* App clipTests */,
 				3A74EF8D2ED5806E008A7F67 /* App clipUITests */,
 				3A5D0EA42EEF2F640020509C /* Mini */,
 				3A5D0EB42EEF2F660020509C /* MiniTests */,
@@ -369,7 +356,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Mini/Mini.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 3;
 				DEVELOPMENT_TEAM = V22SRJBXN7;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -385,7 +372,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 11.3;
+				MARKETING_VERSION = 11.4;
 				PRODUCT_BUNDLE_IDENTIFIER = minis.co.uk.Clip;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -407,7 +394,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Mini/Mini.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 3;
 				DEVELOPMENT_TEAM = V22SRJBXN7;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -423,7 +410,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 11.3;
+				MARKETING_VERSION = 11.4;
 				PRODUCT_BUNDLE_IDENTIFIER = minis.co.uk.Clip;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -560,7 +547,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = MINIS_02/MINIS_02.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 3;
 				DEVELOPMENT_TEAM = V22SRJBXN7;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -580,7 +567,7 @@
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 15.5;
-				MARKETING_VERSION = 11.3;
+				MARKETING_VERSION = 11.4;
 				PRODUCT_BUNDLE_IDENTIFIER = minis.co.uk;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -600,7 +587,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = MINIS_02/MINIS_02.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 3;
 				DEVELOPMENT_TEAM = V22SRJBXN7;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -620,7 +607,7 @@
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 15.5;
-				MARKETING_VERSION = 11.3;
+				MARKETING_VERSION = 11.4;
 				PRODUCT_BUNDLE_IDENTIFIER = minis.co.uk;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;

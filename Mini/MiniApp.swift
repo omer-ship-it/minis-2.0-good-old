@@ -17,18 +17,28 @@ struct MiniApp: App {
     private let kPendingUniversalLink = "pendingUniversalLink"
     private let kPendingStudentClaim  = "pendingStudentClaim.v1"
 
+    // ✅ canonical keys
+    private let kMiniAppId = "miniAppId"
+    private let kShopId    = "shopId"
+    private let kDirection = "direction"
+    private let kDeliveryLoc = "delivery.loc"   // ✅ use one stable key everywhere
+
     init() {
         STPAPIClient.shared.publishableKey =
         "pk_live_51H5URzFZIwZSNufssK4R7BjLhpqxHVcfmEZVH8Tg74MAHMA20RfkYhIfbwFjDWJ55KzHWkOhEcqVWhIO2VShjOcU00Tslmi1XT"
 
         let std = UserDefaults.standard
-        let miniId = std.integer(forKey: "miniAppId")
-        let shopId = (std.string(forKey: "shopId") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let miniId = std.integer(forKey: kMiniAppId)
+        let shopId = (std.string(forKey: kShopId) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
 
+        // ✅ default mini for clip
         if miniId == 0 && shopId.isEmpty {
-            std.set(12, forKey: "miniAppId")
-            std.set("12", forKey: "shopId")
-            std.set("rtl", forKey: "direction")
+            std.set(3, forKey: kMiniAppId)
+            std.set("3", forKey: kShopId)
+            std.set("ltr", forKey: kDirection)
+
+            // ✅ default delivery loc for mini 3 if no URL arrives
+            std.set("mikkeller", forKey: kDeliveryLoc)
         }
     }
 
@@ -90,20 +100,171 @@ struct MiniApp: App {
         UserDefaults(suiteName: appGroupId)
     }
 
+    // MARK: - URL parsing helpers
+
+    private func queryValue(_ name: String, in url: URL) -> String? {
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        return items.first(where: { $0.name.lowercased() == name.lowercased() })?.value
+    }
+
+    private func isStudentLink(_ url: URL) -> Bool {
+        // ✅ Accept:
+        // 1) /student
+        // 2) any url with ?student=1 (or true/yes)
+        // 3) keep existing StudentClaim.from(url:) support (advanced format)
+        let path = url.path.lowercased()
+        if path == "/student" || path == "/student/" { return true }
+
+        if let v = queryValue("student", in: url)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() {
+            if v == "1" || v == "true" || v == "yes" { return true }
+        }
+
+        return false
+    }
+
+    private func makeStudentClaimForCurrentMini() -> StudentClaim? {
+        let mini = UserDefaults.standard.integer(forKey: kMiniAppId)
+        guard mini > 0 else { return nil }
+        // match your existing defaults in StudentClaim.from(url:) simple format
+        return StudentClaim(
+            miniAppId: mini,
+            campaignId: "student",
+            discountPercent: 10,
+            durationMonths: 6
+        )
+    }
+
+    // MARK: - Incoming URL Router
+
     private func processIncoming(_ url: URL) {
+        // MARK: - Helpers (local)
+        func suite() -> UserDefaults? { UserDefaults(suiteName: appGroupId) }
+
+        func queryValue(_ key: String, in url: URL) -> String? {
+            let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            return items.first(where: { $0.name.lowercased() == key.lowercased() })?.value
+        }
+
+        func isStudentLink(_ url: URL) -> Bool {
+            let path = url.path.lowercased()
+            if path == "/student" || path == "/student/" { return true }
+
+            let q = (queryValue("student", in: url) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if q == "1" || q.lowercased() == "true" || q.lowercased() == "yes" { return true }
+
+            // also allow shop/12/student=1 (some people accidentally write it like that)
+            if path.contains("student=1") { return true }
+
+            return false
+        }
+
+        func makeStudentClaimForMini(_ miniId: Int) -> StudentClaim? {
+            guard miniId > 0 else { return nil }
+            return StudentClaim(
+                miniAppId: miniId,
+                campaignId: "student",
+                discountPercent: 10,
+                durationMonths: 6
+            )
+        }
+
+        func saveStudentClaim(_ claim: StudentClaim) {
+            // keep your existing helper
+            saveClaimToAppGroup(claim)
+            studentClaim = claim
+
+            suite()?.removeObject(forKey: kPendingUniversalLink)
+            suite()?.synchronize()
+
+            pingInstall()
+        }
+
+        // MARK: - Persist incoming link (for attribution)
         suite()?.set(url.absoluteString, forKey: kPendingUniversalLink)
         suite()?.synchronize()
 
-        guard let claim = StudentClaim.from(url: url) else { return }
+        // ✅ Only handle minis.studio links
+        let host = (url.host ?? "").lowercased()
+        guard host == "minis.studio" || host.hasSuffix(".minis.studio") else { return }
 
-        saveClaimToAppGroup(claim)
-        studentClaim = claim
+        let std = UserDefaults.standard
+        let grp = suite()   // app group defaults
 
-        suite()?.removeObject(forKey: kPendingUniversalLink)
-        suite()?.synchronize()
+        // MARK: - 1) Shop deep link first: /shop/{id}
+        // We do this first so student claim can resolve to the correct miniAppId from URL.
+        let comps = url.pathComponents.filter { $0 != "/" && !$0.isEmpty }
+        var incomingMiniId: Int? = nil
 
-        pingInstall()
+        if comps.count >= 2, comps[0].lowercased() == "shop", let id = Int(comps[1]) {
+            incomingMiniId = id
+
+            // ✅ Write BOTH: standard + app group (prevents "loc missing" bug)
+            std.set(id, forKey: kMiniAppId)
+            std.set(String(id), forKey: kShopId)
+
+            grp?.set(id, forKey: kMiniAppId)
+            grp?.set(String(id), forKey: kShopId)
+            grp?.synchronize()
+
+            // ✅ loc from URL (or fallback for mini 3)
+            let loc = (queryValue("loc", in: url) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if !loc.isEmpty {
+                std.set(loc, forKey: kDeliveryLoc)
+                grp?.set(loc, forKey: kDeliveryLoc)
+                grp?.synchronize()
+                print("📍 \(kDeliveryLoc) from URL =", loc)
+            } else {
+                if id == 3 {
+                    std.set("mikkeller", forKey: kDeliveryLoc)
+                    grp?.set("mikkeller", forKey: kDeliveryLoc)
+                    grp?.synchronize()
+                    print("📍 \(kDeliveryLoc) fallback = mikkeller (miniAppId=3)")
+                } else {
+                    std.removeObject(forKey: kDeliveryLoc)
+                    grp?.removeObject(forKey: kDeliveryLoc)
+                    grp?.synchronize()
+                }
+            }
+
+            // Refresh customization for the new mini
+            parseMiniIfNeeded()
+
+            // ping after setting ids/loc
+            pingInstall()
+        }
+
+        // MARK: - 2) Student triggers (supports /student, ?student=1, and advanced StudentClaim.from(url:))
+        // If /student link has no mini in path, we use current stored miniAppId.
+        if let claim = StudentClaim.from(url: url) {
+            saveStudentClaim(claim)
+            return
+        }
+
+        if isStudentLink(url) {
+            // Prefer mini id from URL (/shop/{id}?student=1), else stored
+            let miniId =
+                incomingMiniId
+                ?? (grp?.integer(forKey: kMiniAppId) ?? 0)
+                ?? std.integer(forKey: kMiniAppId)
+
+            if let claim = makeStudentClaimForMini(miniId) {
+                saveStudentClaim(claim)
+                return
+            }
+        }
+
+        // MARK: - 3) If it wasn't /shop/{id} above, still ping attribution
+        // (optional, but keeps your attribution behavior consistent)
+        if incomingMiniId == nil {
+            pingInstall()
+        }
     }
+
+    // MARK: - Student Claim in App Group
 
     private func saveClaimToAppGroup(_ claim: StudentClaim) {
         guard let s = suite(), let data = try? JSONEncoder().encode(claim) else { return }
@@ -123,9 +284,11 @@ struct MiniApp: App {
         s.synchronize()
     }
 
+    // MARK: - Mini customization fetch
+
     private func parseMiniIfNeeded() {
         let std = UserDefaults.standard
-        let id = String(std.integer(forKey: "miniAppId"))
+        let id = String(std.integer(forKey: kMiniAppId))
         let t = Int(Date().timeIntervalSince1970)
 
         guard let url = URL(string: "https://minis.studio/json/\(id).json?\(t)") else { return }
@@ -135,6 +298,8 @@ struct MiniApp: App {
             applyMiniCustomization(from: data)
         }.resume()
     }
+
+    // MARK: - Install Ping
 
     private struct InstallPingPayload: Codable {
         let anonId: String
@@ -194,7 +359,7 @@ struct MiniApp: App {
 
     private func pingInstall() {
         let anonId = getOrCreateAnonId()
-        let miniId = UserDefaults.standard.integer(forKey: "miniAppId")
+        let miniId = UserDefaults.standard.integer(forKey: kMiniAppId)
         let attrib = buildInstallAttribution()
 
         let payload = InstallPingPayload(
@@ -215,6 +380,8 @@ struct MiniApp: App {
 
         URLSession.shared.dataTask(with: req) { _, _, _ in }.resume()
     }
+
+    // MARK: - WiFi (unchanged)
 
     private func joinBeitHaAmWiFiIfNeeded() {
         let std = UserDefaults.standard

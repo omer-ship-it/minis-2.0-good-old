@@ -45,7 +45,12 @@ struct CashPointView: View {
         UIDevice.current.userInterfaceIdiom == .phone
     }
     
-    
+    private func norm(_ s: String?) -> String {
+        (s ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\u{00A0}", with: " ") // non-breaking space
+            .replacingOccurrences(of: "  ", with: " ")
+    }
     
     @State private var showZReportDialog = false
 
@@ -1956,10 +1961,14 @@ struct CashPointView: View {
                 return total
 
             case .additions:
+                let defaultName = norm(group.items.first?.name)
+
                 let addSum = group.items
                     .filter { additionsSet.contains($0.name) }
+                    .filter { norm($0.name) != defaultName }   // ✅ ignore default robustly
                     .map { $0.extraPrice }
                     .reduce(0.0, +)
+
                 return total + addSum
             }
         }
@@ -1981,7 +1990,12 @@ struct CashPointView: View {
 
         // Additions: list chosen additions
         for group in groups where group.type == .additions {
-            let chosen = group.items.filter { additionsSet.contains($0.name) }
+            let defaultName = norm(group.items.first?.name)
+
+            let chosen = group.items
+                .filter { additionsSet.contains($0.name) }
+                .filter { norm($0.name) != defaultName }   // ✅ ignore default robustly
+
             if !chosen.isEmpty {
                 let joined = chosen.map { $0.name }.joined(separator: ", ")
                 subtitlePieces.append("\(group.title): \(joined)")
@@ -3381,24 +3395,35 @@ struct CashPointView: View {
                                         .frame(maxWidth: 70)
                                 
                                 // Search field roughly aligned with the middle products column
+                                // Search field (iPad) — full hit area + RTL placeholder
                                 HStack(spacing: 8) {
                                     Image(systemName: "magnifyingglass")
                                         .foregroundColor(.secondary)
-                                    
-                                    TextField(isRtl ? "חיפוש מוצר…" : "Search product…", text: $searchText)
-                                        .textInputAutocapitalization(.none)
-                                        .autocorrectionDisabled()
-                                        .multilineTextAlignment(.leading)
-                                        .focused($isSearchFocused)
-                                        .padding(.trailing,
-                                                 searchText.isEmpty
-                                                    ? 120
-                                                    : 0
-                                           )
+
+                                    ZStack(alignment: isRtl ? .trailing : .leading) {
+
+                                        // ✅ placeholder aligned RTL/LTR
+                                        if searchText.isEmpty {
+                                            Text(isRtl ? "חיפוש מוצר…" : "Search product…")
+                                                .foregroundColor(.secondary)
+                                            
+                                                .frame(maxWidth: .infinity,
+                                                       alignment: isRtl ? .leading : .leading)
+                                        }
+
+                                        // ✅ the actual field fills the whole pill (so tap works everywhere)
+                                        TextField("", text: $searchText)
+                                            .textInputAutocapitalization(.none)
+                                            .autocorrectionDisabled()
+                                            .focused($isSearchFocused)
+                                            .multilineTextAlignment(isRtl ? .trailing : .leading)
+                                            .frame(maxWidth: .infinity,
+                                                   alignment: isRtl ? .leading : .leading)
+                                    }
+
+                                        
                                     if !searchText.isEmpty {
-                                        Button {
-                                            searchText = ""
-                                        } label: {
+                                        Button { searchText = "" } label: {
                                             Image(systemName: "xmark.circle.fill")
                                                 .foregroundColor(.secondary)
                                         }
@@ -3410,7 +3435,9 @@ struct CashPointView: View {
                                 .background(Color(.secondarySystemBackground))
                                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                                 .frame(maxWidth: 240)
-                                .environment(\.layoutDirection, .rightToLeft)
+                                .contentShape(Rectangle())            // ✅ whole pill clickable
+                                .onTapGesture { isSearchFocused = true } // ✅ tap anywhere focuses
+                                .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
                                 
                                 Spacer()
                                 
@@ -7312,7 +7339,7 @@ struct QueuedCashpointOrder: Codable {
     let total: Double
     let diningMode: String
     let createdAt: Date
-    let ticketNumber: Int?  
+    let ticketNumber: Int?
 }
 
 enum CashpointOrderQueue {
@@ -7821,5 +7848,4 @@ struct CashPointZCreditManualResult {
 
 
 
-// MARK: - CashPoint WebView (HTML + minis://zcredit intercept)
-
+// MARK: - CashPoint WebView (HTML + minis://zcredit intercept)bcxzfgg

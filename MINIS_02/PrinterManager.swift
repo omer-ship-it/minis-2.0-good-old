@@ -1767,7 +1767,7 @@ final class PrinterManager {
             // 🖤 PHONE — BLACK ROW
             if let p = phoneLine {
                 job += EscPos.feed(1)
-                job += makeBlackTitle(p, totalWidth: 24)
+                job += makePhoneFramedLine(p, totalWidth: 24)
                 job += EscPos.feed(1)
             }
 
@@ -2188,6 +2188,54 @@ extension PrinterManager {
         Swift.print("SENDING", job.count, "bytes to printer")
         OneShotPrinter.send(host: activeBakeryIP, port: port, data: job)
     }
+    
+    // MARK: - Phone: ** (black) + number (white) + ** (black)
+    private func makePhoneFramedLine(_ phoneRaw: String, totalWidth: Int = 24) -> Data {
+        // Keep digits stable (don’t reverse, don’t Hebrew-shape)
+        let phone = phoneRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let leftCap = "**"
+        let rightCap = "**"
+        let innerWidth = max(0, totalWidth - leftCap.count - rightCap.count)
+
+        // If phone too long, keep the last digits (usually what matters)
+        let phoneTrimmed: String = {
+            if phone.count <= innerWidth { return phone }
+            return String(phone.suffix(innerWidth))
+        }()
+
+        // Center phone inside the inner area
+        let pad = max(0, innerWidth - phoneTrimmed.count)
+        let leftPad = pad / 2
+        let rightPad = pad - leftPad
+        let middle = String(repeating: " ", count: leftPad) + phoneTrimmed + String(repeating: " ", count: rightPad)
+
+        var d = Data()
+
+        // (optional) double-size like your black title
+        d.append(contentsOf: [0x1D, 0x21, 0x11]) // GS ! 0x11 (double W + H)
+
+        // Reverse ON → print left **
+        d.append(contentsOf: [0x1D, 0x42, 0x01]) // GS B 1
+        d += Data(leftCap.utf8)
+
+        // Reverse OFF → print the phone on white
+        d.append(contentsOf: [0x1D, 0x42, 0x00]) // GS B 0
+        d += Data(middle.utf8)
+
+        // Reverse ON → print right **
+        d.append(contentsOf: [0x1D, 0x42, 0x01]) // GS B 1
+        d += Data(rightCap.utf8)
+
+        // Reverse OFF + newline
+        d.append(contentsOf: [0x1D, 0x42, 0x00]) // GS B 0
+        d.append(0x0A)
+
+        // Reset size
+        d.append(contentsOf: [0x1D, 0x21, 0x00])
+
+        return d
+    }
     // MARK: - MAIN DEMO
     func printSalesReport(
         _ report: PrinterManager.SalesReportData,
@@ -2203,7 +2251,7 @@ extension PrinterManager {
       
         // ✅ THIS is what you want to print as "cash" (cash + tips)
         let printedTips = max(report.tipBaseTotal - printTipAdjustment, 0)
-        let printedCashWithTip = max(report.cashAmount + report.tipBaseTotal   , 0)
+        let printedCashWithTip = max(report.cashAmount    , 0)
 
         // ✅ Totals for printing (cash already includes tip now)
         let printedCollectionsTotal = printedCashWithTip + report.cardAmount
@@ -2354,7 +2402,7 @@ extension PrinterManager {
         job += EscPos.feed(1)
         job += makeDebugSeparator(colWidths: cashReportWidths)
         job += makeDebugRow(["סכום", "סוג מגירה", "סוג פעולה"], align: ["C","C","C"], colWidths: cashReportWidths)
-        job += makeDebugRow(["סכום", "סוג מגירה", "סוג פעולה"], align: ["C","C","C"], colWidths: cashReportWidths)
+        
         job += makeDebugSeparator(colWidths: cashReportWidths)
 
         job += makeDebugRow([fmt2(printedCashWithTip), "", "הד. סגורות"], align: ["R","C","R"], colWidths: cashReportWidths)

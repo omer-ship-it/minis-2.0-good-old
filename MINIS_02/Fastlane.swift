@@ -7,7 +7,44 @@ import StripeCore
 import StripeApplePay
 import StripePayments
 import Combine
+import UIKit
 
+extension UIColor {
+    convenience init(hex: String) {
+        var hex = hex.trimmingCharacters(in: .whitespacesAndNewlines)
+        hex = hex.replacingOccurrences(of: "#", with: "")
+
+        var int: UInt64 = 0
+        Scanner(string: hex).scanHexInt64(&int)
+
+        let r, g, b, a: UInt64
+        switch hex.count {
+        case 6: // RRGGBB
+            (r, g, b, a) = (
+                (int >> 16) & 0xFF,
+                (int >> 8) & 0xFF,
+                int & 0xFF,
+                0xFF
+            )
+        case 8: // AARRGGBB
+            (a, r, g, b) = (
+                (int >> 24) & 0xFF,
+                (int >> 16) & 0xFF,
+                (int >> 8) & 0xFF,
+                int & 0xFF
+            )
+        default:
+            (r, g, b, a) = (0, 0, 0, 0xFF)
+        }
+
+        self.init(
+            red: CGFloat(r) / 255,
+            green: CGFloat(g) / 255,
+            blue: CGFloat(b) / 255,
+            alpha: CGFloat(a) / 255
+        )
+    }
+}
 enum MenuTheme {
 
     // Helper to read miniAppId
@@ -17,7 +54,7 @@ enum MenuTheme {
 
     // Helper + convenience
     private static func hex(_ hex: String) -> Color {
-        Color(Color(hex: hex))
+        Color(uiColor: UIColor(hex: hex))
     }
     
     
@@ -99,7 +136,7 @@ struct ServiceSegment: View {
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(.ultraThinMaterial) // ✅ auto light/dark
+                .fill(.ultraThinMaterial)
                 .overlay(
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
                         .stroke(
@@ -112,7 +149,6 @@ struct ServiceSegment: View {
                 let w = geo.size.width
                 let h = geo.size.height
 
-                // indicator
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(MenuTheme.buttonBackground)
                     .frame(width: (w / 2) - 6, height: h - 6)
@@ -127,6 +163,14 @@ struct ServiceSegment: View {
             }
         }
         .frame(height: 46)
+        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous)) // important
+        .highPriorityGesture(
+            LongPressGesture(minimumDuration: 1.2)
+                .onEnded { _ in
+                    UserDefaults.standard.set(true, forKey: "cashPointMode")
+                    UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
+                }
+        )
     }
 
     private func segButton(_ value: ServiceIntent) -> some View {
@@ -224,7 +268,7 @@ struct menuView: View {
     @AppStorage("checkout.intent") private var checkoutIntentRaw: String = ""
     @State private var serviceIntent: ServiceIntent = .ta
     @AppStorage(CheckoutKeys.didShowWelcome) private var didShowWelcome: Bool = false
-    @State private var showWelcome: Bool = true
+    @State private var showWelcome: Bool = false
     @State private var showMembers = false
     @State private var showCardSheet = false
     @AppStorage(MembersKeys.didPrompt) private var didPromptMembers: Bool = false
@@ -254,9 +298,57 @@ struct menuView: View {
     @State private var studentClaim: StudentClaim? = nil
     private let appGroupId = "group.minis"
     private let kPendingStudentClaim  = "pendingStudentClaim.v1"
-    
+    @AppStorage("members.updatedAt") private var membersUpdatedAt: Double = 0
 
+    private var birthdayMonth: Int? {
+        let p = UserDefaults.standard.dictionary(forKey: "memberProfileLocal") ?? [:]
+        if let m = p["birthMonth"] as? Int { return m }
+
+        // fallback if only MM-DD exists
+        if let mmdd = p["birthdayMMDD"] as? String {
+            let parts = mmdd.split(separator: "-")
+            if parts.count == 2 { return Int(parts[0]) }
+        }
+        return nil
+    }
+
+    private var currentMonthIL: Int {
+        var cal = Calendar.current
+        cal.timeZone = TimeZone(identifier: "Asia/Jerusalem") ?? .current
+        return cal.component(.month, from: Date())
+    }
+
+    private var currentYearIL: Int {
+        var cal = Calendar.current
+        cal.timeZone = TimeZone(identifier: "Asia/Jerusalem") ?? .current
+        return cal.component(.year, from: Date())
+    }
+
+    private var birthdayVoucherRedeemedThisYear: Bool {
+        let key = "birthdayVoucherRedeemedYear"
+        return UserDefaults.standard.integer(forKey: key) == currentYearIL
+    }
+
+    private var birthdayVoucherAvailableNow: Bool {
+        guard isMember else { return false }
+        guard let bm = birthdayMonth else { return false }
+        guard bm == currentMonthIL else { return false }
+        return !birthdayVoucherRedeemedThisYear
+    }
     
+    private var isMember: Bool {
+        UserDefaults.standard.dictionary(forKey: "memberProfileLocal") != nil
+    }
+    
+    private var isItalyRegion: Bool {
+        // Works well for App Store region/device locale
+        (Locale.current.region?.identifier ?? Locale.current.regionCode ?? "").uppercased() == "IT"
+    }
+    
+    private var shouldAutoShowMembersForMini12: Bool {
+        miniAppId == 12 &&
+        UserDefaults.standard.dictionary(forKey: MembersKeys.profile) == nil
+    }
     private func loadPendingStudentClaimIfAny() {
         guard let suite = UserDefaults(suiteName: appGroupId),
               let data = suite.data(forKey: kPendingStudentClaim),
@@ -278,7 +370,16 @@ struct menuView: View {
     }
 
     private func startNewOrderFromIdle() {
-        // your "new order" behavior
+        // ✅ clear persisted customer details
+        UserDefaults.standard.removeObject(forKey: "userName")
+        UserDefaults.standard.removeObject(forKey: "userPhone")
+        UserDefaults.standard.removeObject(forKey: "userEmail")
+
+        // if you also keep POS drafts
+        UserDefaults.standard.removeObject(forKey: "posSavedName")
+        UserDefaults.standard.removeObject(forKey: "posSavedPhone")
+
+        // reset order state
         basket.removeAll()
         selectedBasketLineId = nil
         nextBasketLineId = 1
@@ -287,6 +388,7 @@ struct menuView: View {
         selectedCategory = availableCategories.first ?? ""
         showWelcome = true
 
+        // reset idle state
         showIdleSheet = false
         lastInteractionAt = Date()
     }
@@ -297,10 +399,7 @@ struct menuView: View {
         myItems = MyItemsStore.load()
     }
     
-    private var isMember: Bool {
-        // You already save this on join
-        UserDefaults.standard.dictionary(forKey: "memberProfileLocal") != nil
-    }
+    
     private var forceDark: Bool {
         !deliveryLoc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -582,17 +681,32 @@ struct menuView: View {
     
     
 
-    func nextMenuTicketNumber() -> Int {
-        let key = "menu.localTicketNumber"
-        let v = UserDefaults.standard.integer(forKey: key) + 1
-        UserDefaults.standard.set(v, forKey: key)
-        return v
+    private func productDetents(for item: ShellMenuItem) -> Set<PresentationDetent> {
+        let hasMods = !(item.modifiers?.isEmpty ?? true)
+
+        // ✅ No modifiers → compact sheet
+        if !hasMods {
+            return [.height(560)]
+        }
+
+        // ✅ Has modifiers → big sheet
+        return [.large]
     }
 
     private func incrementEntry(_ id: Int) {
         guard let entry = basket[id] else { return }
         basket[id]?.quantity = entry.quantity + 1
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+    
+    private var memberStamps: Int {
+        let profile = UserDefaults.standard.dictionary(forKey: "memberProfileLocal") ?? [:]
+        let raw = profile["stamps"] as? Int ?? 1
+        return max(1, min(10, raw))
+    }
+
+    private var hasFreeCoffee: Bool {
+        memberStamps >= 10
     }
 
     private enum MembersKeys {
@@ -628,10 +742,7 @@ struct menuView: View {
         }
         return ordered
     }
-    private var memberStamps: Int {
-        let profile = UserDefaults.standard.dictionary(forKey: "memberProfileLocal") ?? [:]
-        return max(0, min(10, profile["stamps"] as? Int ?? 0))
-    }
+   
     
     var body: some View {
         NavigationStack {
@@ -776,8 +887,33 @@ struct menuView: View {
                         #endif
                                         Spacer()
 
-                                        HStack(spacing: 20) {
-                                            Button { showShareSheet = true } label: {
+                                        HStack(spacing: 18) {
+
+                                            // ☕ MEMBERS CARD BUTTON
+                                            if miniAppId == 12{
+                                                Button {
+                                                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                                    
+                                                    
+                                                    if isMember {
+                                                        showCardSheet = true          // ✅ always open card once joined
+                                                    } else {
+                                                        showMembersSheet = true       // ✅ join flow only if not a member
+                                                    }
+                                                } label: {
+                                                    Image(systemName: hasFreeCoffee ? "cup.and.saucer.fill" : "cup.and.saucer")
+                                                        .font(.system(size: 22, weight: .semibold))
+                                                        .foregroundColor(
+                                                            hasFreeCoffee
+                                                            ? MenuTheme.buttonBackground
+                                                            : .primary
+                                                        )
+                                                }
+                                            }
+                                            // 🔗 SHARE
+                                            Button {
+                                                showShareSheet = true
+                                            } label: {
                                                 Image(systemName: "arrowshape.turn.up.forward")
                                                     .font(.system(size: 22, weight: .semibold))
                                             }
@@ -806,14 +942,16 @@ struct menuView: View {
                                 }
                                 .padding(.bottom, 8)
 
-                                ServiceSegment(intent: $serviceIntent)
-                                    .padding(.horizontal, 16)
-                                    .padding(.top, 8)
-                                    .padding(.bottom, 20)
-                                    .onChange(of: serviceIntent) { new in
-                                        checkoutIntentRaw = new.rawValue
-                                        UserDefaults.standard.set(new == .sit ? "לשבת" : "לקחת", forKey: "serviceModeLabel")
-                                    }
+                                if miniAppId == 12{
+                                    ServiceSegment(intent: $serviceIntent)
+                                        .padding(.horizontal, 16)
+                                        .padding(.top, 8)
+                                        .padding(.bottom, 20)
+                                        .onChange(of: serviceIntent) { new in
+                                            checkoutIntentRaw = new.rawValue
+                                            UserDefaults.standard.set(new == .sit ? "לשבת" : "לקחת", forKey: "serviceModeLabel")
+                                        }
+                                }
 
                                 if let order = lastOrder {
                                     OrderInProcessBanner(orderNumber: order.orderNumber, phase: order.phase) {
@@ -824,6 +962,12 @@ struct menuView: View {
                                     .padding(.bottom, 12)
                                 }
 
+                                if birthdayVoucherAvailableNow {
+                                    BirthdayVoucherBanner(isRtl: isRtl)
+                                        .padding(.horizontal, 16)
+                                        .padding(.bottom, 10)
+                                }
+                                
                                 if !myItems.isEmpty {
                                     MyItemsStrip(items: myItems, isRtl: isRtl) { productId in
                                         if let item = items.first(where: { $0.id == productId }) {
@@ -876,7 +1020,7 @@ struct menuView: View {
                                             .padding(.horizontal, 16)
                                             .padding(.bottom, 18)
                                         }
-                                        .padding(.top, -stickyHeaderHeight + 50)
+                                        .padding(.top, -stickyHeaderHeight + 60)
                                     }
                                 } header: {
                                     CategoryBar(
@@ -935,6 +1079,7 @@ struct menuView: View {
         .onReceive(NotificationCenter.default.publisher(for: .myItemsChanged)) { _ in
             reloadMyItems()
         }
+        
         .onChange(of: checkoutIntentRaw) { newValue in
             serviceIntent = ServiceIntent(rawValue: newValue) ?? .ta
         }
@@ -944,9 +1089,12 @@ struct menuView: View {
             if !didShowWelcome &&
                checkoutIntentRaw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
 
+                
                 // ensure it's not during layout pass
                 DispatchQueue.main.async {
-                    showWelcome = true
+                    if isPad{
+                        showWelcome = true
+                    }
                 }
             }
         }
@@ -980,18 +1128,10 @@ struct menuView: View {
             loadPendingStudentClaimIfAny()
         }
         .onAppear {
+            
            // loadPendingStudentClaimIfAny()   // ✅ cold start / app clip handoff
 
-#if !APPCLIP
-            if !didPromptMembers && !hasMemberProfile {
-                
-                    didPromptMembers = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                        showMembersSheet = true
-                    }
-                }
-#endif
-           
+
            
             serviceIntent = ServiceIntent(rawValue: checkoutIntentRaw) ?? .ta
                if !api.items.isEmpty {
@@ -1073,6 +1213,24 @@ struct menuView: View {
                 lastInteractionAt = Date()
             
         }
+        .onChange(of: showBasketSheet, perform: { open in
+            if open {
+                showIdleSheet = false
+                idleCountdown = idleCountdownStart
+                lastInteractionAt = Date()
+            } else {
+                lastInteractionAt = Date()
+            }
+        })
+        .onChange(of: showOrderFlow, perform: { open in
+            if open {
+                showIdleSheet = false
+                idleCountdown = idleCountdownStart
+                lastInteractionAt = Date()
+            } else {
+                lastInteractionAt = Date()
+            }
+        })
         .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
             guard isPad else { return }
             guard !cashPointMode else { return }          // only customer mode
@@ -1103,6 +1261,9 @@ struct menuView: View {
             .presentationDetents([.height(260)])
             .presentationDragIndicator(.hidden)
         }
+        
+#if !APPCLIP
+        
         .fullScreenCover(isPresented: $showOrderFlow) {
 
             let entriesToSend = orderFlowEntries
@@ -1153,7 +1314,7 @@ struct menuView: View {
 
                         // ✅ 2) PRINT FIRST (critical) — use a local ticket so it prints once
                         let ticket = nextMenuTicketNumber()
-
+                        UserDefaults.standard.set(ticket, forKey: "lastTicketNumber")
                         let safeName: String? = {
                             let n = (UserDefaults.standard.string(forKey: "userName") ?? "")
                                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1161,7 +1322,7 @@ struct menuView: View {
                         }()
 
                         let safePhone: String? = {
-                            guard miniAppId == 3 else { return "+447522552608" }
+                          
                             let p = (UserDefaults.standard.string(forKey: "userPhone") ?? "")
                                 .trimmingCharacters(in: .whitespacesAndNewlines)
                             return p.isEmpty ? nil : p
@@ -1208,7 +1369,7 @@ struct menuView: View {
                                 switch result {
                                 case .success(let orderId):
                                     Haptics.success()
-                                    showOrderFlow = false
+                                   // showOrderFlow = false
                                     scrollToTopToken += 1
 
                                     let snap = OrderSnapshot(
@@ -1228,9 +1389,11 @@ struct menuView: View {
                                         confirmationOrder = snap
                                         showConfirmation = true
                                     } else {
-                                        showWelcome = true
-                                        UserDefaults.standard.removeObject(forKey: "userName")
-                                        UserDefaults.standard.removeObject(forKey: "userPhone")
+                                        if isPad{
+                                            showWelcome = true
+                                            UserDefaults.standard.removeObject(forKey: "userName")
+                                            UserDefaults.standard.removeObject(forKey: "userPhone")
+                                        }
                                     }
 
                                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
@@ -1256,12 +1419,23 @@ struct menuView: View {
                 .tint(.primary)
             }
         }
+        #endif
         .sheet(isPresented: $showCardSheet) {
             MemberCardSheet()
                 .presentationDetents([.height(200), .large])
                 .presentationDragIndicator(.visible)
                 .environment(\.layoutDirection, .rightToLeft)
                 .environment(\.locale, Locale(identifier: "he_IL"))
+        }
+        .onAppear {
+#if !APPCLIP
+guard !UserDefaults.standard.bool(forKey: "didShowMembersOnce") else { return }
+
+DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+    showMembersSheet = true
+    UserDefaults.standard.set(true, forKey: "didShowMembersOnce")   // ✅ move here
+}
+#endif
         }
         .sheet(isPresented: $showMembersSheet) {
             MembersClubView(
@@ -1295,19 +1469,41 @@ struct menuView: View {
                 Color.clear.frame(height: basketBarH)
 
                 // Show/hide the real bar without changing layout
-                BasketBar(
-                    totalQuantity: basketTotalQuantity,
-                    totalPrice: basketTotalPrice,
-                    onTap: { showBasketSheet = true },
-                    isPad: isPad,
-                    onNewOrder: {
-                        basket.removeAll()
-                        selectedBasketLineId = nil
-                        nextBasketLineId = 1
-                        Haptics.light()
-                        showWelcome = true
+                Group {
+                    if isPad {
+                        HStack(spacing: 0) {
+                            // 👈 reserve the rail space so the bar starts under the grid
+                            Color.clear.frame(width: 200)
+
+                            BasketBar(
+                                totalQuantity: basketTotalQuantity,
+                                totalPrice: basketTotalPrice,
+                                onTap: { showBasketSheet = true },
+                                isPad: isPad,
+                                onNewOrder: {
+                                    basket.removeAll()
+                                    selectedBasketLineId = nil
+                                    nextBasketLineId = 1
+                                    Haptics.light()
+                                    showWelcome = true
+                                }
+                            )
+                        }
+                    } else {
+                        BasketBar(
+                            totalQuantity: basketTotalQuantity,
+                            totalPrice: basketTotalPrice,
+                            onTap: { showBasketSheet = true },
+                            isPad: isPad,
+                            onNewOrder: {
+                                basket.removeAll()
+                                selectedBasketLineId = nil
+                                nextBasketLineId = 1
+                                Haptics.light()
+                            }
+                        )
                     }
-                )
+                }
                 .frame(height: basketBarH)
                 .opacity(basket.isEmpty ? 0 : 1)
                 .allowsHitTesting(!basket.isEmpty)
@@ -1337,7 +1533,7 @@ struct menuView: View {
                 // ✅ close sheet
                 selectedItem = nil
             }
-            .presentationDetents([.large])
+            .presentationDetents(productDetents(for: item))
             .presentationDragIndicator(.visible)
             .presentationCornerRadius(20)
             .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
@@ -1430,7 +1626,9 @@ struct menuView: View {
                     )
 
                     basket.removeAll()
-                    showWelcome = true
+                    if isPad{
+                        showWelcome = true
+                    }
 
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                         showBasketSheet = false
@@ -1707,6 +1905,7 @@ struct menuView: View {
             }
             .padding(18)
             .onAppear {
+                
                 timer?.invalidate()
                 timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
                     DispatchQueue.main.async {
@@ -1787,8 +1986,33 @@ struct menuView: View {
         @State private var heroFrozenImage: KFCrossPlatformImage? = nil
         @State private var selectedOptions: [String: String]
         @State private var selectedAdditions: Set<String>
-
+        @State private var note: String
+        @FocusState private var noteFocused: Bool
         private let barH: CGFloat = 92   // height incl padding
+        
+        private func extraPricePerUnit() -> Double {
+            guard let groups = item.modifiers else { return 0 }
+
+            return groups.reduce(0) { total, group in
+                switch group.type {
+
+                case .options:
+                    let gKey = norm(group.title)
+                    if let selectedName = selectedOptions[gKey],
+                       let opt = group.items.first(where: { norm($0.name) == norm(selectedName) }) {
+                        return total + opt.extraPrice
+                    }
+                    return total
+
+                case .additions:
+                    let selectedSet = Set(selectedAdditions.map(norm))
+                    return total + group.items
+                        .filter { selectedSet.contains(norm($0.name)) }
+                        .map { $0.extraPrice }
+                        .reduce(0, +)
+                }
+            }
+        }
 
         private func norm(_ s: String) -> String {
             s.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1847,6 +2071,7 @@ struct menuView: View {
 
             // ✅ additions stay as-is (your ModifierListView already normalizes internally)
             _selectedAdditions = State(initialValue: initialSelectedAdditions)
+            _note = State(initialValue: "")
         }
 
         var body: some View {
@@ -1898,6 +2123,27 @@ struct menuView: View {
                                 selectedAdditions: $selectedAdditions
                             )
                         }
+                        /*
+                        
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(isRtl ? "הערה לפריט" : "Item note")
+                                .font(.menuRegular(16).weight(.semibold))
+                                .foregroundColor(.secondary)
+
+                            TextField(isRtl ? "למשל: בלי בצל / חם במיוחד…" : "E.g. no onion / extra hot…",
+                                      text: $note,
+                                      axis: .vertical)
+                                .font(.menuRegular(16))
+                                .lineLimit(3, reservesSpace: true)
+                                .padding(12)
+                                .background(Color(.secondarySystemBackground))
+                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                .multilineTextAlignment(isRtl ? .leading : .leading)
+                                .focused($noteFocused)
+                        }
+                        .environment(\.layoutDirection, .rightToLeft)
+                        .padding(.top, 10)
+                         */
                     }
                    
                     .padding(.bottom, barH) // ✅ critical so content doesn’t hide behind bar
@@ -1929,6 +2175,41 @@ struct menuView: View {
 
         private var actionBackground: Color {
             isRemoveMode ? .red : MenuTheme.buttonBackground
+        }
+        
+        private func subtitleFromSelection() -> String? {
+            guard let groups = item.modifiers else {
+                let clean = note.trimmingCharacters(in: .whitespacesAndNewlines)
+                return clean.isEmpty ? nil : (isRtl ? "הערה: \(clean)" : "Note: \(clean)")
+            }
+
+            var parts: [String] = []
+
+            for g in groups where g.type == .options {
+                let gKey = norm(g.title)
+                guard let selected = selectedOptions[gKey],
+                      let first = g.items.first else { continue }
+
+                if norm(selected) != norm(first.name) {
+                    parts.append("\(norm(g.title)): \(norm(selected))")
+                }
+            }
+
+            let addNames = selectedAdditions
+                .map(norm)
+                .sorted()
+                .filter { !$0.isEmpty }
+
+            if !addNames.isEmpty {
+                parts.append(addNames.joined(separator: ", "))
+            }
+
+            let clean = note.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !clean.isEmpty {
+                parts.append(isRtl ? "הערה: \(clean)" : "Note: \(clean)")
+            }
+
+            return parts.isEmpty ? nil : parts.joined(separator: ", ")
         }
 
         private var bottomBar: some View {
@@ -1970,7 +2251,8 @@ struct menuView: View {
 
                     // ✅ Normal add/update
                     guard quantity > 0 else { return }
-                    onAdd(item, quantity, nil, item.price)
+                    let unit = item.price + extraPricePerUnit()
+                    onAdd(item, quantity, subtitleFromSelection(), unit)
                 } label: {
                     Text(actionTitle)
                         .font(.menuRegular(18).weight(.semibold))
@@ -2038,6 +2320,35 @@ struct menuView: View {
         }
     }
     
+    private struct BirthdayVoucherBanner: View {
+        let isRtl: Bool
+
+        var body: some View {
+            HStack(spacing: 12) {
+                Image(systemName: "gift.fill")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundColor(.primary)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(isRtl ? "מתנת יום הולדת זמינה 🎉" : "Birthday voucher available 🎉")
+                        .font(.menuRegular(16).weight(.semibold))
+
+                    Text(isRtl ? "50% הנחה עד 200 — לחצו על סל הקניות כדי לממש"
+                               : "50% off up to ₪200 — open your basket to redeem")
+                        .font(.menuRegular(14))
+                        .foregroundColor(.secondary)
+                }
+
+                Spacer()
+            }
+            .padding(14)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Color(.secondarySystemBackground))
+            )
+        }
+    }
+    
     private struct ToastBanner: View {
         let text: String
         var body: some View {
@@ -2074,7 +2385,7 @@ struct menuView: View {
         private var stamps: Int {
             let profile = UserDefaults.standard.dictionary(forKey: "memberProfileLocal") ?? [:]
             let raw = profile["stamps"] as? Int ?? 0
-            return max(0, min(10, raw))
+            return max(1, min(10, raw))
         }
 
         var body: some View {
@@ -2535,7 +2846,8 @@ struct ProductSheet: View {
     @State private var heroFrozenImage: KFCrossPlatformImage? = nil
     @State private var selectedOptions: [String: String] = [:]
     @State private var selectedAdditions: Set<String> = []
-
+    @State private var note: String = ""
+    @FocusState private var noteFocused: Bool
     @Environment(\.dismiss) private var dismiss
     @Environment(\.isRtl) private var isRtl
 
@@ -2584,6 +2896,7 @@ struct ProductSheet: View {
             }
         }
 
+        
         let normalizedDefaults: [String: String] =
             Dictionary(uniqueKeysWithValues: defaults.map { (norm($0.key), norm($0.value)) })
 
@@ -2628,7 +2941,15 @@ struct ProductSheet: View {
 
     private var detents: Set<PresentationDetent> {
         let screenH = UIScreen.main.bounds.height
-        return [.height(min(contentHeight + 40, screenH * 0.88)), .large]
+        let maxH = screenH * 0.88
+        let compactH = min(contentHeight + 40, maxH)
+
+        // ✅ if content is already compact, don't offer .large
+        if compactH < screenH * 0.62 {
+            return [.height(compactH)]
+        }
+
+        return [.height(compactH), .large]
     }
 
     private var unitPriceLabel: String {
@@ -2637,18 +2958,20 @@ struct ProductSheet: View {
     }
 
     private func subtitleFromSelection() -> String? {
-        guard let groups = item.modifiers else { return nil }
+        guard let groups = item.modifiers else {
+            let clean = note.trimmingCharacters(in: .whitespacesAndNewlines)
+            return clean.isEmpty ? nil : (isRtl ? "הערה: \(clean)" : "Note: \(clean)")
+        }
 
         var parts: [String] = []
 
-        for group in groups where group.type == .options {
-            let gKey = norm(group.title)
+        for g in groups where g.type == .options {
+            let gKey = norm(g.title)
             guard let selected = selectedOptions[gKey],
-                  let first = group.items.first
-            else { continue }
+                  let first = g.items.first else { continue }
 
             if norm(selected) != norm(first.name) {
-                parts.append("\(norm(group.title)): \(norm(selected))")
+                parts.append("\(norm(g.title)): \(norm(selected))")
             }
         }
 
@@ -2659,6 +2982,11 @@ struct ProductSheet: View {
 
         if !addNames.isEmpty {
             parts.append(addNames.joined(separator: ", "))
+        }
+
+        let clean = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !clean.isEmpty {
+            parts.append(isRtl ? "הערה: \(clean)" : "Note: \(clean)")
         }
 
         return parts.isEmpty ? nil : parts.joined(separator: ", ")
@@ -2896,7 +3224,7 @@ struct BasketBar: View {
                             .background(Color.white)
                             .clipShape(Circle())
 
-                        Text(isRtl ? "צפה בהזמנה" : "View order")
+                        Text(isRtl ? "המשך להזמנה" : "View order")
                             .font(.primariesDemi(18))
                             .foregroundColor(.white)
                     }
@@ -2915,8 +3243,8 @@ struct BasketBar: View {
             }
             .buttonStyle(.plain)
             .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight) // ✅ KEY LINE
-
-            if isPad {
+            
+            if isPad && 1==2 {
                 Button(action: onNewOrder) {
                     Text("הזמנה חדשה")
                         .font(.menuRegular(17).weight(.semibold))
@@ -2963,8 +3291,9 @@ struct BasketSheet: View {
     @State private var applePayHandler: ZCreditApplePayHandler? = nil
     @AppStorage("miniAppId") private var miniAppId: Int = 0
     @State private var stripeController: PKPaymentAuthorizationController? = nil
-   
+    @State private var birthdayVoucherApplied: Bool = UserDefaults.standard.bool(forKey: "birthdayVoucherApplied")
   
+    
     
     // ✅ Discount from App Group
     @State private var activeDiscount: ActiveDiscount? = nil
@@ -2984,11 +3313,65 @@ struct BasketSheet: View {
         return (baseTotalForDiscounts * Double(discountPercent) / 100.0)
     }
     
+    private func markBirthdayVoucherRedeemedThisYear() {
+        var cal = Calendar.current
+        cal.timeZone = TimeZone(identifier: "Asia/Jerusalem") ?? .current
+        let y = cal.component(.year, from: Date())
+
+        // ✅ global (your current checks)
+        UserDefaults.standard.set(y, forKey: "birthdayVoucherRedeemedYear")
+
+        // ✅ also mirror into memberProfileLocal.wallet
+        var p = UserDefaults.standard.dictionary(forKey: "memberProfileLocal") ?? [:]
+        var wallet = (p["wallet"] as? [String: Any]) ?? [:]
+        wallet["birthdayVoucherRedeemedYear"] = y
+        p["wallet"] = wallet
+        UserDefaults.standard.set(p, forKey: "memberProfileLocal")
+
+        // ✅ clear applied flag
+        UserDefaults.standard.set(false, forKey: "birthdayVoucherApplied")
+    }
+    private var birthdayVoucherAvailableNow: Bool {
+        let p = UserDefaults.standard.dictionary(forKey: "memberProfileLocal") ?? [:]
+        let isMember = !p.isEmpty
+
+        func monthNowIL() -> Int {
+            var cal = Calendar.current
+            cal.timeZone = TimeZone(identifier: "Asia/Jerusalem") ?? .current
+            return cal.component(.month, from: Date())
+        }
+        func yearNowIL() -> Int {
+            var cal = Calendar.current
+            cal.timeZone = TimeZone(identifier: "Asia/Jerusalem") ?? .current
+            return cal.component(.year, from: Date())
+        }
+
+        let redeemedYear = UserDefaults.standard.integer(forKey: "birthdayVoucherRedeemedYear")
+        if redeemedYear == yearNowIL() { return false }
+
+        let birthMonth = (p["birthMonth"] as? Int)
+            ?? ( (p["birthdayMMDD"] as? String).flatMap { Int($0.prefix(2)) } )
+
+        guard isMember, let bm = birthMonth else { return false }
+        return bm == monthNowIL()
+    }
+
+    private var birthdayDiscountCap: Double { 200.0 }     // ₪200
+    private var birthdayDiscountPercent: Double { 0.5 }   // 50%
+
+    private var birthdayDiscountAmount: Double {
+        guard birthdayVoucherApplied else { return 0 }
+        // apply to subtotal AFTER free coffee / happy hour removal base (same base you already use)
+        let base = max(0, baseTotalForDiscounts) // you already compute this
+        return min(birthdayDiscountCap, base * birthdayDiscountPercent)
+    }
+    
+    
     private var isPad: Bool { UIDevice.current.userInterfaceIdiom == .pad }
    
 
     private var discountedTotal: Double {
-        let raw = max(0, baseTotalForDiscounts - discountAmount)
+        let raw = max(0, baseTotalForDiscounts - discountAmount - birthdayDiscountAmount)
         return roundTotal(raw)
     }
 
@@ -3016,10 +3399,20 @@ struct BasketSheet: View {
         let maxCustom = screenH * 0.9
 
         let discountExtra: CGFloat = (discountPercent > 0) ? 60 : 0
-        let redeemExtra: CGFloat = canRedeemCoffeeNow ? 60 : 0
+
+        let coffeeRedeemExtra: CGFloat = canRedeemCoffeeNow ? 60 : 0
+
+        // ✅ birthday button OR birthday discount row
+        let birthdayExtra: CGFloat = (birthdayVoucherAvailableNow && !birthdayVoucherApplied) ? 60 : 0
+        let birthdayLineExtra: CGFloat = birthdayVoucherApplied ? 34 : 0
 
         let fitted = min(
-            contentHeight + 160 + discountExtra + redeemExtra,
+            contentHeight
+            + 160
+            + discountExtra
+            + coffeeRedeemExtra
+            + birthdayExtra
+            + birthdayLineExtra,
             maxCustom
         )
 
@@ -3061,7 +3454,7 @@ struct BasketSheet: View {
                         Spacer(minLength: 0)
                     }
                     .padding(.top, 8)
-                    .padding(.bottom, 100)
+                    .padding(.bottom, isPad ? 100 : 15)
                     .background(
                         GeometryReader { geo in
                             Color.clear.preference(key: BasketContentHeightKey.self, value: geo.size.height)
@@ -3091,6 +3484,7 @@ struct BasketSheet: View {
                     UserDefaults.standard.removeObject(forKey: "member.freeCoffeeLineId")
                 }
                 .onAppear {
+                   
                     UserDefaults.standard.removeObject(forKey: "member.freeCoffeeLineId")
                     activeDiscount = MinisShared.loadActiveDiscount()
 
@@ -3269,6 +3663,18 @@ struct BasketSheet: View {
                     }
                     .foregroundColor(.secondary)
                 }
+                
+                if birthdayVoucherApplied {
+                    HStack {
+                        Text("שובר יום הולדת 50% (עד ₪200)")
+                            .font(.menuRegular(17).weight(.semibold))
+                        Spacer()
+                        Text(isRtl ? "-\(String(format: "%.0f", birthdayDiscountAmount))"
+                                   : "-₪\(String(format: "%.0f", birthdayDiscountAmount))")
+                            .font(.menuRegular(17).weight(.semibold))
+                    }
+                    .foregroundColor(.secondary)
+                }
 
                 HStack {
                     Text(isRtl ? "סה\"כ" : "Total")
@@ -3276,6 +3682,22 @@ struct BasketSheet: View {
                     Spacer()
                     Text(formatBasketTotal(discountedTotal))
                         .font(.menuRegular(18).weight(.semibold))
+                }
+                if birthdayVoucherAvailableNow && !birthdayVoucherApplied {
+                    Button {
+                        birthdayVoucherApplied = true
+                        UserDefaults.standard.set(true, forKey: "birthdayVoucherApplied")
+                        Haptics.success()
+                    } label: {
+                        Text("ממש שובר יום הולדת 🎁")
+                            .font(.menuRegular(17).weight(.semibold))
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 48)
+                            .background(MenuTheme.buttonBackground)
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
+                   
                 }
                 
                 if canRedeemCoffeeNow {
@@ -3597,12 +4019,12 @@ struct BasketSheet: View {
     }
     private func currentStamps() -> Int {
         let p = UserDefaults.standard.dictionary(forKey: "memberProfileLocal") ?? [:]
-        return max(0, min(10, p["stamps"] as? Int ?? 0))
+        return max(1, min(10, p["stamps"] as? Int ?? 1))
     }
 
     private func setStamps(_ v: Int) {
         var p = UserDefaults.standard.dictionary(forKey: "memberProfileLocal") ?? [:]
-        p["stamps"] = max(0, min(10, v))
+        p["stamps"] = max(1, min(10, v))
         UserDefaults.standard.set(p, forKey: "memberProfileLocal")
     }
     private var coffeeEntries: [BasketEntry] {
@@ -3653,7 +4075,7 @@ struct BasketSheet: View {
         guard earned > 0 else { return }
 
         var profile = UserDefaults.standard.dictionary(forKey: "memberProfileLocal") ?? [:]
-        let current = profile["stamps"] as? Int ?? 0
+        let current = profile["stamps"] as? Int ?? 1
 
         // ✅ stop at 10 until redeem
         guard current < 10 else { return }
@@ -3704,6 +4126,10 @@ struct BasketSheet: View {
                     UINotificationFeedbackGenerator().notificationOccurred(.success)
                     Haptics.light()
                     addCoffeeStampsLocally(from: entries)
+                    
+                    if UserDefaults.standard.bool(forKey: "birthdayVoucherApplied") {
+                        markBirthdayVoucherRedeemedThisYear()
+                    }
                     
                     onConfirm(orderId, diningMode)
 
@@ -3922,7 +4348,7 @@ struct NameSheetView: View {
             
             // 👇 PHONE (only when needed)
             if needsPhone {
-                TextField(isRtl ? "טלפון" : "Phone (07xxxxxxxxx)", text: $phone)
+                TextField(isRtl ? "טלפון" : "Phone", text: $phone)
                     .font(.menuRegular(16))
                     .padding(12)
                     .background(Color(.secondarySystemBackground))
@@ -4525,6 +4951,7 @@ private struct MembersUpsellCard: View {
             .frame(maxWidth: .infinity, alignment: .center)
 
             // 🎁 Members card
+            
             VStack(spacing: 18) {
 
                 // Centered title

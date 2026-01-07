@@ -11,10 +11,10 @@ enum AppSettings {
     }
 
     struct Defaults {
-        static let cashPointMode = false
+        static let cashPointMode = true
     }
 
-    static func bootstrapIfNeeded() {
+    static func bootstrapIfNeeded() { 
         let d = UserDefaults.standard
         d.set(Defaults.cashPointMode, forKey: Key.cashPointMode)
 
@@ -49,10 +49,7 @@ struct MINIS_02App: App {
         AppSettings.bootstrapIfNeeded()
 
         // default mini for fresh installs
-        if UserDefaults.standard.integer(forKey: "miniAppId") == 0 {
-            UserDefaults.standard.set(12, forKey: "miniAppId")
-            UserDefaults.standard.set("12", forKey: "shopId")
-        }
+       
 
         STPAPIClient.shared.publishableKey =
         "pk_live_51H5URzFZIwZSNufssK4R7BjLhpqxHVcfmEZVH8Tg74MAHMA20RfkYhIfbwFjDWJ55KzHWkOhEcqVWhIO2VShjOcU00Tslmi1XT"
@@ -124,7 +121,7 @@ struct MINIS_02App: App {
                 case .active:
                     pingInstallIfNeeded()
 
-                    if isIPad && cashPointMode && autoPrintEnabled {
+                    if isIPad && autoPrintEnabled {
                         print("🖨️ Auto print activated")
                         OrdersAutoPrinter.shared.startPolling(interval: 10)
                     } else {

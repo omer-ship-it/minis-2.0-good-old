@@ -16,6 +16,9 @@ struct OrderFlowView: View {
     @State private var lastCashReceivedAtPay: Double = 0
     @AppStorage("cashPointMode") private var cashPointMode: Bool = false
     
+    @State private var showCashierCallSheet = false
+    @State private var cashierUnlocked = false
+    
     func kioskFont(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
         if cashPointMode {
             // ✅ CashPoint (staff / POS) → system font
@@ -55,28 +58,18 @@ struct OrderFlowView: View {
         path = NavigationPath()
     }
     private func goToNextAfterService_push() {
-        if !cashPointMode {
-               push(.phone)
-               return
-           }
-        // skip name if already saved
-        if !hasConfirmedName {
-            push(.name)
-            return
-        }
+        // ✅ never skip name
+        push(.name)
+    }
 
-        // skip phone if not required OR already saved
+    private func goToChargeFromName_push() {
+        // ✅ only skip phone if it's NOT required
         if requiresPhoneStep {
-            push(hasConfirmedPhone ? .charge : .phone)
+            push(.phone)
         } else {
             push(.charge)
         }
     }
-
-    private func goToChargeFromName_push() {
-        push(requiresPhoneStep ? .phone : .charge)
-    }
-
     private func goToChargeFromPhone_push() {
         push(.charge)
     }
@@ -128,15 +121,15 @@ struct OrderFlowView: View {
         let tipOff = max(0, tipAmount)
 
         print("🟡 PAY LATER tapped → submitting unpaid order")
-        onCompleted(phoneParam, nameParam, summary, discountOff, tipOff)
 
-        didSubmitThisFlow = true
-
-        // ✅ dismiss the flow immediately after submitting
-        DispatchQueue.main.async {
-            self.onFinish()
-            self.isSubmittingNow = false
-        }
+        finishOrderFlow(
+            phone: phoneParam,
+            name: nameParam,
+            summary: summary,
+            discountOff: discountOff,
+            tipOff: tipOff,
+            goToConfirmation: false   // pay-later in POS usually closes immediately
+        )
     }
 
     @discardableResult
@@ -238,10 +231,15 @@ struct OrderFlowView: View {
         let fullyPaid = remainingToPay <= 0.001
 
         if fullyPaid {
-            // ✅ FINAL submit
-            onCompleted(phoneParam, nameParam, summary, discountOff, tipOff)
+            finishOrderFlow(
+                phone: phoneParam,
+                name: nameParam,
+                summary: summary,
+                discountOff: discountOff,
+                tipOff: tipOff,
+                goToConfirmation: cashPointMode ? false : true
+            )
             return true
-
         } else {
             // ✅ PARTIAL submit (no close / no reset)
             onPartialUpdate(phoneParam, nameParam, summary, discountOff, tipOff)
@@ -288,18 +286,28 @@ struct OrderFlowView: View {
         (v * 100).rounded() / 100
     }
     
-    private func persistDraftContactForSession() {
-        let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        if n.count >= 2 {
-            posSavedName = n
-        }
-
-        let digits = phoneDigits.filter(\.isNumber)
-        if digits.count == 10 {
-            posSavedPhone = digits
-        }
+    func normalizeIL(_ raw: String) -> String? {
+        let d = raw.filter(\.isNumber)
+        guard d.count == 10, d.hasPrefix("0") else { return nil }
+        return "+972" + d.dropFirst()
     }
     
+    private func persistDraftContactForSession() {
+        let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if n.count >= 2 { posSavedName = n }
+
+        let digits = phoneDigits.filter(\.isNumber)
+
+        // Save POS draft (10 digits starting with 0)
+        if digits.count == 10, digits.first == "0" {
+            posSavedPhone = digits
+
+            // ✅ ALSO save as E.164 for sending
+            // 0545555555 -> +972545555555
+            let e164 = "+972" + digits.dropFirst(1)
+            UserDefaults.standard.set(e164, forKey: "userPhone")
+        }
+    }
    
     @State private var hasSentToKitchenFromCash: Bool = false
     private func sendOrderToKitchenFromCash() {
@@ -395,7 +403,7 @@ struct OrderFlowView: View {
                     Button {
                         diningMode = .takeAway
                         onServiceChosen()
-                        goToNextStepAfterService()
+                        goToNextAfterService_push()
                     } label: {
                         Text(isRtl ? "לקחת" : "Take away")
                             .font(kioskFont(18, weight: .bold))
@@ -770,6 +778,27 @@ struct OrderFlowView: View {
                 .environment(\.locale, Locale(identifier: "he_IL"))
             }
             .onAppear {
+                let appearance = UINavigationBarAppearance()
+                 appearance.configureWithOpaqueBackground()
+
+                 // ✅ remove shadow + separator line
+                 appearance.shadowColor = .clear
+                 appearance.shadowImage = UIImage()
+
+                 // optional: keep background color explicit
+                 appearance.backgroundColor = UIColor.systemBackground
+
+                 // remove back button text (from previous step)
+                 appearance.backButtonAppearance.normal.titleTextAttributes = [
+                     .foregroundColor: UIColor.clear
+                 ]
+                 appearance.backButtonAppearance.highlighted.titleTextAttributes = [
+                     .foregroundColor: UIColor.clear
+                 ]
+
+                 UINavigationBar.appearance().standardAppearance = appearance
+                 UINavigationBar.appearance().scrollEdgeAppearance = appearance
+                 UINavigationBar.appearance().compactAppearance = appearance
                 print("cashPointMode stored =", UserDefaults.standard.object(forKey: "cashPointMode") as Any)
 
                 if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -780,6 +809,11 @@ struct OrderFlowView: View {
                 if remainingToPay == 0 {
                     remainingToPay = initialPaymentTarget
                 }
+
+                if !cashPointMode {
+                       root = .name
+                       return
+                   }
 
                 if startAtCharge {
                     root = .charge
@@ -1102,6 +1136,45 @@ struct OrderFlowView: View {
         }
     }
     
+    private func finishOrderFlow(
+        phone: String?,
+        name: String?,
+        summary: OrderAPI.PaymentSummary,
+        discountOff: Double,
+        tipOff: Double,
+        goToConfirmation: Bool
+    ) {
+        // ✅ hard-stop double completion from any path
+        guard !didFinishThisFlow else { return }
+        didFinishThisFlow = true
+
+        // stop payment UI
+        isPaying = false
+        paymentStarted = false
+        payingWithCash = false
+        isSubmittingNow = false
+        didSubmitThisFlow = true
+        payError = nil
+
+        if !AppConfig.isDemoMode {
+            ZCreditPaymentHandler.shared.cancelCurrent()
+        }
+
+        // ✅ submit ONCE
+        onCompleted(phone, name, summary, discountOff, tipOff)
+
+        // ✅ always clear draft contact after submit (so next flow can't skip)
+        
+
+        // ✅ route
+        if goToConfirmation {
+            withAnimation(.easeOut(duration: 0.12)) {
+                if path.isEmpty { root = .confirmation } else { push(.confirmation) }
+            }
+        } else {
+            DispatchQueue.main.async { self.onFinish() }
+        }
+    }
     /// Called after the tip sheet closes to restart ZCredit with the new total (including tip)
     private func restartPaymentAfterTipChangeIfNeeded() {
         // Only relevant on the charge step
@@ -1290,7 +1363,10 @@ struct OrderFlowView: View {
         // ✅ Amount logic (single source of truth for display)
         let baseWithTip: Double = totalWithTip
         let alreadyPaid: Double = cardPaidTotal + cashPaidTotal
-        let displayAmount: Double = max(baseWithTip - alreadyPaid, 0)
+        let displayAmount: Double = {
+            let remaining = baseWithTip - alreadyPaid
+            return remaining > 0 ? remaining : baseWithTip
+        }()
 
         let studentDiscountValue: Double = max(total - effectiveTotal, 0)
         let isPhone = UIDevice.current.userInterfaceIdiom == .phone
@@ -1313,6 +1389,15 @@ struct OrderFlowView: View {
                 VStack(spacing: 4) {
                     Text(String(format: "%.2f", displayAmount))
                         .font(kioskFont(50, weight: .heavy))
+                        .contentShape(Rectangle())
+                        .simultaneousGesture(
+                            LongPressGesture(minimumDuration: 1.2)
+                                .onEnded { _ in
+                                    
+                                    cashierUnlocked.toggle()
+                                    Haptics.medium()
+                                }
+                        )
 
 
                     if studentDiscountActive, studentDiscountValue > 0 {
@@ -1336,7 +1421,7 @@ struct OrderFlowView: View {
                         .foregroundColor(.secondary)
                     }
                 }
-                if cashPointMode{
+                if cashPointMode || cashierUnlocked{
                     Group {
                         if isPhone {
                             VStack(spacing: 10) {
@@ -1550,8 +1635,8 @@ struct OrderFlowView: View {
                             // ✅ Only in kiosk/customer mode (!cashPointMode)
                             if !cashPointMode {
                                 Button {
-                                    
-                                    debugShowConfirmation()
+                                    startCardForRemainingNow()
+                                    // debugShowConfirmation()
                                 } label: {
                                     Text(isRtl ? "נסה שוב" : "Try again")
                                         .font(kioskFont(18, weight: .bold))
@@ -1571,8 +1656,24 @@ struct OrderFlowView: View {
                 }
                 .frame(height: cashPointMode ? errorSlotH : 90)   // give room for the button in kiosk mode
                 .frame(maxWidth: .infinity)
-                
-                if cashPointMode{
+                /*
+                if !cashPointMode && !cashierUnlocked {
+                    Button {
+                        showCashierCallSheet = true
+                        Haptics.medium()
+                        // optional: play sound here (see section 5)
+                    } label: {
+                        Text("תשלום במזומן")
+                            .font(kioskFont(18, weight: .semibold))
+                            .foregroundColor(.white)
+                            .frame(width: 240, height: 50)
+                            .background(Color.black)
+                            .clipShape(RoundedRectangle(cornerRadius: 18))
+                    }
+                    .padding(.top, 8)
+                }
+                 */
+                if cashPointMode || cashierUnlocked{
                     // Card / Cash buttons
                     VStack(spacing: 12) {
                         
@@ -1646,6 +1747,13 @@ struct OrderFlowView: View {
             }
             .padding(.horizontal, 28)
             .padding(.top, 80)
+            .sheet(isPresented: $showCashierCallSheet) {
+                CashierCallSheet(isRtl: isRtl) {
+                    showCashierCallSheet = false
+                }
+                .presentationDetents([.height(320)])
+                .presentationDragIndicator(.hidden)
+            }
             .sheet(isPresented: $showManualCardEntry) {
 
                 let baseTotal = initialPaymentTarget
@@ -1684,13 +1792,62 @@ struct OrderFlowView: View {
 
             Spacer()
         }
-        .padding(.top, cashPointMode ? 0 : -150)
+        .padding(.top, cashPointMode ? 0 : -50)
         // ✅ keep transitions smooth but subtle
         .animation(.spring(response: 0.25, dampingFraction: 0.9), value: isPaying)
     }
 
     // MARK: - Split sheet (rows)
+    private struct CashierCallSheet: View {
+        let isRtl: Bool
+        let onClose: () -> Void
 
+        var body: some View {
+            ZStack {
+                Color(.systemBackground).ignoresSafeArea()
+
+                VStack(spacing: 18) {
+                    Spacer()
+
+                    Text("💁‍♂️")
+                        .font(.system(size: 66))
+
+                    Text(isRtl ? "נא לקרוא לקופאי" : "Please call the cashier")
+                        .font(.system(size: 26, weight: .bold))
+                        .multilineTextAlignment(.center)
+
+                    Text(isRtl ? "התשלום במזומן יתבצע עם איש צוות" : "Cash payment is completed by staff")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 22)
+
+                    // optional visual ring
+                    ProgressView()
+                        .scaleEffect(1.3)
+                        .padding(.top, 6)
+
+                    Spacer()
+
+                    Button(action: onClose) {
+                        Text(isRtl ? "סגור" : "Close")
+                            .font(.system(size: 18, weight: .bold))
+                            .foregroundColor(.white)
+                            .frame(width: 220, height: 52)
+                            .background(Color.black)
+                            .clipShape(RoundedRectangle(cornerRadius: 16))
+                    }
+                    .padding(.bottom, 18)
+                }
+            }
+            .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
+            .onAppear {
+                // optional: haptic repeat or sound
+                UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
+            }
+        }
+    }
+    
     private var splitSheetView: some View {
         NavigationStack {
             VStack(spacing: 16) {
@@ -2271,65 +2428,45 @@ struct OrderFlowView: View {
         }
     }
 
+    func normalizeILToE164(_ digits: String) -> String? {
+        let d = digits.filter(\.isNumber)
+        guard d.count == 10, d.first == "0" else { return nil }
+        return "+972" + d.dropFirst(1)
+    }
+
     // MARK: - Success
 
     private func playSuccessAndCompleteOrder() {
-        let phoneParam = phoneDigits.trimmedIsEmpty ? nil : phoneDigits
-        let nameParam  = name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : name
-        let summary    = buildPaymentSummary()
+        let ticket = nextMenuTicketNumber()
+        UserDefaults.standard.set(ticket, forKey: "lastTicketNumber")
 
-        // 🧹 Clear saved name/phone **immediately on success**
-        posSavedName  = ""
-        posSavedPhone = ""
-        name          = ""
-        phoneDigits   = ""
+        let phoneE164 = normalizeILToE164(phoneDigits)
+        let nameParam = name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : name
+        let summary   = buildPaymentSummary()
 
+        if let phoneE164 { UserDefaults.standard.set(phoneE164, forKey: "userPhone") }
+
+        let discountOff: Double = studentDiscountActive ? max(0, total - effectiveTotal) : 0
+        let tipOff: Double = max(0, tipAmount)
+
+        finishOrderFlow(
+            phone: phoneE164,
+            name: nameParam,
+            summary: summary,
+            discountOff: discountOff,
+            tipOff: tipOff,
+            goToConfirmation: true
+        )
+
+        // Optional tiny approved flash (non-blocking)
         showSuccess = true
-        successScale = 0.6
-        successOpacity = 0
-
-        withAnimation(.spring(response: 0.5, dampingFraction: 0.7, blendDuration: 0.1)) {
-            successScale = 1.0
-            successOpacity = 1.0
-        }
-        let discountOff: Double = {
-            // If your 10% toggle is active:
-            guard studentDiscountActive else { return 0 }
-            // total = original amount passed into OrderFlowView
-            // effectiveTotal = discounted rounded amount you charge
-            return max(0, total - effectiveTotal)
-        }()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
-            withAnimation(.easeOut(duration: 0.25)) {
-                successOpacity = 0
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                showSuccess = false
-
-                let discountOff: Double = {
-                    guard studentDiscountActive else { return 0 }
-                    return max(0, total - effectiveTotal)
-                }()
-
-                let tipOff = max(0, tipAmount)
-
-                print("✅ SUCCESS → submitting & closing. method=\(summary.method.rawValue) totalWithTip=\(totalWithTip)")
-
-                // 1) submit to CashPointView
-                onCompleted(phoneParam, nameParam, summary, discountOff, tipOff)
-
-                // 2) auto-close OrderFlow after successful CARD/MIXED
-                // (cash flow uses the dedicated "Finish" button)
-                if summary.method != .cash && !didFinishThisFlow {
-                    didFinishThisFlow = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                        onFinish()
-                    }
-                }
-            }
+        successScale = 1.0
+        successOpacity = 1.0
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+            withAnimation(.easeOut(duration: 0.12)) { successOpacity = 0 }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { showSuccess = false }
         }
     }
-
     // MARK: - Navigation / Cancel
 
     private func backStep() {
@@ -2450,12 +2587,33 @@ struct OrderFlowView: View {
                     remainingToPay = round2(max(baseTotal - amountToCharge, 0))
                 }
 
-                if remainingToPay <= 0.001 {
-                    playSuccessAndCompleteOrder()
-                } else {
-                    // ✅ partial card payment approved → submit snapshot + dismiss
-                    commitPartialSnapshot()
-                }
+                if self.remainingToPay <= 0.001 {
+                        if self.cashPointMode {
+                            let phoneE164 = normalizeILToE164(phoneDigits)
+                            let nameParam = name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : name
+                            let summary   = buildPaymentSummary()
+
+                            if let phoneE164 { UserDefaults.standard.set(phoneE164, forKey: "userPhone") }
+
+                            let discountOff: Double = studentDiscountActive ? max(0, total - effectiveTotal) : 0
+                            let tipOff = max(0, tipAmount)
+
+                            // ✅ submit right away (no waiting)
+                            finishOrderFlow(
+                                phone: phoneE164,
+                                name: nameParam,
+                                summary: summary,
+                                discountOff: discountOff,
+                                tipOff: tipOff,
+                                goToConfirmation: false   // POS closes immediately
+                            )
+
+                        } else {
+                            self.playSuccessAndCompleteOrder()
+                        }
+                    } else {
+                        self.commitPartialSnapshot()
+                    }
 
             case .declined:
                 let fallback = isRtl
@@ -2967,6 +3125,7 @@ struct OrderFlowView: View {
                 }
             }
             .onAppear { input = "" }
+            
             .onChange(of: isPaying) { paying in
                 delayedShowWork?.cancel()
                 delayedShowWork = nil
@@ -3203,8 +3362,7 @@ struct OrderFlowView: View {
                 if !name.isEmpty {
                     Button {
                         print("✅ CLEAR tapped")           // <-- keep for 1 test
-                        name = ""
-                        posSavedName = ""
+                       
                         didConfirmNameThisSession = false
                     } label: {
                         Image(systemName: "xmark.circle.fill")
@@ -3227,7 +3385,7 @@ struct OrderFlowView: View {
                 Button {
                     posSavedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
                     didConfirmNameThisSession = true
-                    push(requiresPhoneStep ? .phone : .charge)
+                    goToChargeFromName_push()
                 } label: {
                     Text(isRtl ? "המשך" : "Continue to payment")
                         .font(kioskFont(18, weight: .bold))
@@ -3317,7 +3475,7 @@ struct OrderFlowView: View {
                           maxWidth: CGFloat,
                           isPhone: Bool) -> CGFloat {
         if key == "Space" || key == "רווח" {
-            return isPhone ? maxWidth * 0.60 : maxWidth * 0.55
+            return isPhone ? maxWidth * 0.60 : maxWidth * 0.51
         }
         if key == "⌫" {
             return isPhone ? maxWidth * 0.15 : maxWidth * 0.18
@@ -3581,6 +3739,13 @@ struct OrderFlowView: View {
                 .padding(.bottom, 20)
                 .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
             }
+            .navigationBarBackButtonHidden(false)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    EmptyView()
+                }
+            }
+            .navigationBarTitleDisplayMode(.inline)
         }
 
         private var keypad: some View {
@@ -3633,20 +3798,22 @@ struct OrderFlowView: View {
             Text(isRtl ? "מספר הזמנה" : "Order number")
                 .font(kioskFont(16, weight: .regular))
                 .foregroundColor(.secondary)
+            let ticket = UserDefaults.standard.integer(forKey: "lastTicketNumber")
+            Text(String(ticket))          // ✅ no commas
+               
 
-            Text("1234")
                 .font(kioskFont(64, weight: .heavy))
                 .monospacedDigit()
                 .padding(.top, 4)
 
             // ✅ Stamp message
             Text("הרווחת חותמת אחת - כל קפה 10 עלינו.\nלשמירת החותמת בכרטיסיה סרוק את הקוד")
-                .font(kioskFont(18, weight: .regular))
+                .font(kioskFont(20, weight: .regular))
                 .multilineTextAlignment(.center)
                 .lineSpacing(8)
                 .foregroundColor(.primary)
                 .padding(.horizontal, 18)
-                .padding(.top, 8)
+                .padding(.top, 25)
 
             // ✅ QR
             DotQRView(
@@ -3654,7 +3821,7 @@ struct OrderFlowView: View {
                 overlayLabel: "MINI",
                 logoKnockoutFraction: 0.28
             )
-            .frame(width: 220, height: 220)
+            .frame(width: 300, height: 300)
             .padding(.top, 6)
 
             Button {
@@ -3676,24 +3843,9 @@ struct OrderFlowView: View {
     }
 
     private func dismissFlowFromConfirmation() {
-        // 🔧 DEBUG: fire onCompleted (fake “order completed”)
-        let phoneParam = phoneDigits.trimmedIsEmpty ? nil : phoneDigits
-        let nameParam  = name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : name
-
-        let summary = buildPaymentSummary()
-
-        let discountOff: Double = studentDiscountActive
-            ? max(0, total - effectiveTotal)
-            : 0
-
-        let tipOff = max(0, tipAmount)
-        clearContact()
-        onCompleted(phoneParam, nameParam, summary, discountOff, tipOff)
-
-        // ✅ dismiss the flow
-        DispatchQueue.main.async {
-            self.onFinish()
-        }
+        UserDefaults.standard.removeObject(forKey: "lastTicketNumber")
+        
+        DispatchQueue.main.async { self.onFinish() }
     }
     
     private func debugShowConfirmation() {
