@@ -9,6 +9,20 @@ import StripePayments
 import Combine
 import UIKit
 
+
+enum PickupLocation: String, CaseIterable, Identifiable {
+    case cafeteria
+    case scienceBuilding
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .cafeteria:       return "מדעי הרוח"
+        case .scienceBuilding: return "מדעי החברה"
+        }
+    }
+}
 extension UIColor {
     convenience init(hex: String) {
         var hex = hex.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -46,9 +60,9 @@ extension UIColor {
     }
 }
 enum MenuTheme {
-
+    
     // Helper to read miniAppId
-    private static var miniId: Int {
+     static var miniId: Int {
         UserDefaults.standard.integer(forKey: "miniAppId")
     }
 
@@ -61,12 +75,15 @@ enum MenuTheme {
 
     // MAIN COLORS
     static var accent: Color {
-        if miniId == 3 {
-            // Beigel Bake red
-            return hex("#d71201")
-        }
+        if miniId == 3 { return hex("#d71201") }
 
-        // Default logic (Fastlane / MiniMe etc.)
+        if miniId == 13 {
+                return Color(UIColor { trait in
+                    trait.userInterfaceStyle == .dark
+                        ? UIColor.white   // 🌙 dark mode
+                        : UIColor.black   // ☀️ light mode
+                })
+            }
         return Color(UIColor { trait in
             trait.userInterfaceStyle == .dark
                 ? UIColor(Color(hex: "#b39d82"))
@@ -77,6 +94,9 @@ enum MenuTheme {
     static var buttonBackground: Color {
         if miniId == 3 {
             return hex("#d71201")   // always red
+        }
+        if miniId == 13 {
+            return hex("#6db95b")   // always red
         }
         return hex("#324E57")
     }
@@ -89,6 +109,26 @@ enum MenuTheme {
         return .primary
     }
 }
+private func normalizePresetForSheet(
+    _ preset: (options: [String:String], additions: Set<String>)
+) -> (options: [String:String], additions: Set<String>) {
+
+    func norm(_ s: String) -> String {
+        s.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\u{200F}", with: "")
+            .replacingOccurrences(of: "\u{200E}", with: "")
+            .replacingOccurrences(of: "\u{00A0}", with: " ")
+    }
+
+    var o: [String:String] = [:]
+    for (k, v) in preset.options {
+        o[norm(k)] = norm(v)
+    }
+
+    let a = Set(preset.additions.map(norm))
+    return (o, a)
+}
+
 private func alignPreset(
     _ preset: (options: [String:String], additions: Set<String>),
     to item: ShellMenuItem
@@ -127,6 +167,52 @@ private func alignPreset(
     }
 
     return (alignedOptions, alignedAdds)
+}
+struct LocationSegment: View {
+    @Environment(\.colorScheme) private var scheme
+    @Binding var location: PickupLocation
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(
+                            Color.primary.opacity(scheme == .dark ? 0.25 : 0.12),
+                            lineWidth: 1
+                        )
+                )
+
+            HStack(spacing: 4) {
+                ForEach(PickupLocation.allCases) { loc in
+                    Button {
+                        location = loc
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    } label: {
+                        Text(loc.title)
+                            .font(.menuRegular(15).weight(.semibold))
+                            .foregroundColor(
+                                location == loc
+                                ? (scheme == .dark ? .black : .white)
+                                : .primary.opacity(0.75)
+                            )
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 40)
+                            .background(
+                                location == loc
+                                ? Color.primary
+                                : Color.clear
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(3)
+        }
+        .frame(height: 46)
+    }
 }
 struct ServiceSegment: View {
     @Environment(\.isRtl) private var isRtl
@@ -193,6 +279,7 @@ struct ServiceSegment: View {
     }
 }
 
+
 private func parseSelectionSubtitle(_ subtitle: String?) -> (options: [String:String], additions: Set<String>) {
     guard let subtitle, !subtitle.isEmpty else { return ([:], []) }
 
@@ -219,13 +306,28 @@ enum OrderPhase: String, Codable {
     case ready
 }
 
-fileprivate func menuFontName() -> String {
-    // 1) JSON customization → "Oswald", "Primaries DemiBold", etc.
+fileprivate func menuFontScale() -> CGFloat {
+    let miniId = UserDefaults.standard.integer(forKey: "miniAppId")
+    return miniId == 13 ? 1.1 : 0.9
+}
+
+func menuFontName() -> String {
+    let miniId = UserDefaults.standard.integer(forKey: "miniAppId")
+
+    // ✅ Vitamin: force Heebo
+    if miniId == 13 {
+        // IMPORTANT: this must be the internal font name (from debugAllFonts())
+        return "Heebo-Regular"
+        // or "Heebo-VariableFont_wght" if that's what your debug prints
+    }
+
+    // 1) JSON customization → "Oswald", etc.
     if let stored = UserDefaults.standard.string(forKey: "fontName"),
        !stored.isEmpty,
        stored != "System" {
         return stored
     }
+
     // 2) Fallback to your original Primaries font
     return primariesFontName
 }
@@ -237,8 +339,9 @@ extension Font {
 
     // Optional helper for regular weight (where you used primariesFontName directly)
     static func menuRegular(_ size: CGFloat) -> Font {
-        .custom(menuFontName(), size: size)
-    }
+           let scaled = size * menuFontScale()
+           return .custom(menuFontName(), size: scaled)
+       }
 }
 private func anchorId(for category: String) -> String { "anchor-\(category)" }
 private let stickyHeaderHeight: CGFloat = 60
@@ -254,6 +357,7 @@ struct menuView: View {
     @State private var nextBasketLineId = 1
     @State private var showBasketSheet = false
     @State private var showConfirmation = false
+    @AppStorage(AppSettings.Key.cashPointMode) private var cashPointMode: Bool = AppSettings.Defaults.cashPointMode
     @AppStorage("miniAppId") private var miniAppId: Int = 0    // 👈 Use this instead of shopId
     @State private var lastOrder: OrderSnapshot?
     @State private var confirmationOrder: OrderSnapshot?
@@ -284,7 +388,9 @@ struct menuView: View {
     @State private var orderFlowIsSubmitting = false
     @State private var orderFlowShowProgress = false
     @State private var orderFlowSubmitError: String? = nil
-    @AppStorage("cashPointMode") private var cashPointMode: Bool = false
+    @State private var isManualCategoryScroll = false
+    @State private var manualScrollToken: UUID = UUID()
+    
     @State private var scrollToTopToken: Int = 0
     @StateObject private var scrollVM = MenuScrollCoordinator()
     // MARK: - Idle reset (customer mode only)
@@ -299,7 +405,35 @@ struct menuView: View {
     private let appGroupId = "group.minis"
     private let kPendingStudentClaim  = "pendingStudentClaim.v1"
     @AppStorage("members.updatedAt") private var membersUpdatedAt: Double = 0
+    @AppStorage("admin") private var isAdmin: Bool = false
+    @State private var now: Date = Date()
+    private let clock = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
+    private let idleClock = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+    @AppStorage("pickup.location")
+    private var pickupLocationRaw: String = PickupLocation.cafeteria.rawValue
+    @State private var menuPollTask: Task<Void, Never>? = nil
+    @State private var lastMenuFetchAt: Date = .distantPast
+    @State private var stampsClaim: StampsClaim? = nil
+    private let kPendingStampsClaim = "pendingStampsClaim.v1"
 
+    private struct StampsClaim: Identifiable, Codable, Equatable {
+        var id: String { "\(miniAppId)-\(stamps)" }
+        let miniAppId: Int
+        let stamps: Int
+    }
+    private var serviceIntentBinding: Binding<ServiceIntent> {
+        Binding(
+            get: { ServiceIntent(rawValue: checkoutIntentRaw) ?? .sit },
+            set: { newValue in
+                checkoutIntentRaw = newValue.rawValue
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            }
+        )
+    }
+    private var pickupLocation: PickupLocation {
+        get { PickupLocation(rawValue: pickupLocationRaw) ?? .cafeteria }
+        nonmutating set { pickupLocationRaw = newValue.rawValue }
+    }
     private var birthdayMonth: Int? {
         let p = UserDefaults.standard.dictionary(forKey: "memberProfileLocal") ?? [:]
         if let m = p["birthMonth"] as? Int { return m }
@@ -312,6 +446,47 @@ struct menuView: View {
         return nil
     }
 
+    private func shouldPollMenu() -> Bool {
+        // Don’t hammer while sheets / flows are open (optional but recommended)
+        if showOrderFlow { return false }
+        if showBasketSheet { return false }
+        if selectedItem != nil { return false }   // product sheet open
+        if showWelcome { return false }           // kiosk welcome open
+        if showIdleSheet { return false }
+        return true
+    }
+
+    private func startMenuPolling() {
+        menuPollTask?.cancel()
+
+        menuPollTask = Task {
+            while !Task.isCancelled {
+
+                if shouldPollMenu() {
+                    // Optional throttle so we never reload more often than every 30s
+                    let elapsed = Date().timeIntervalSince(lastMenuFetchAt)
+                    if elapsed >= 30 {
+                        await MainActor.run {
+                            // ✅ FORCE network + re-parse
+                            // Use whichever signature you have:
+                            // api.load(skipCache: true)
+                            api.load(skipCache: true)
+
+                            lastMenuFetchAt = Date()
+                        }
+                    }
+                }
+
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
+            }
+        }
+    }
+
+    private func stopMenuPolling() {
+        menuPollTask?.cancel()
+        menuPollTask = nil
+    }
+    
     private var currentMonthIL: Int {
         var cal = Calendar.current
         cal.timeZone = TimeZone(identifier: "Asia/Jerusalem") ?? .current
@@ -349,6 +524,7 @@ struct menuView: View {
         miniAppId == 12 &&
         UserDefaults.standard.dictionary(forKey: MembersKeys.profile) == nil
     }
+   
     private func loadPendingStudentClaimIfAny() {
         guard let suite = UserDefaults(suiteName: appGroupId),
               let data = suite.data(forKey: kPendingStudentClaim),
@@ -564,19 +740,46 @@ struct menuView: View {
         return Array(repeating: GridItem(.flexible(), spacing: 12), count: count)
     }
     private var items: [ShellMenuItem] {
-        api.items.filter { $0.isAvailable }
+        api.items.filter { $0.isAvailable && $0.isWithinActiveHours(now: now) }
     }
     private var basketTotalQuantity: Int { basket.values.reduce(0) { $0 + $1.quantity } }
     private var basketTotalPrice: Double { basket.values.reduce(0) { $0 + Double($1.quantity) * $1.unitPrice } }
 
-    private func addToBasket(_ item: ShellMenuItem, quantity: Int, subtitle: String?, unitPrice: Double) {
+    private func addToBasket(
+        _ item: ShellMenuItem,
+        quantity: Int,
+        subtitle: String?,
+        unitPrice: Double,
+        selectedOptions: [String: String] = [:],
+        selectedAdditions: Set<String> = []
+    ) {
+        if quantity <= 0 {
+            let idsToRemove = basket
+                .filter { $0.value.item.id == item.id }
+                .map(\.key)
+
+            idsToRemove.forEach { basket[$0] = nil }
+
+            selectedBasketLineId = nil
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            return
+        }
+        
         let hasModifiers = !(item.modifiers?.isEmpty ?? true)
 
         if let lineId = selectedBasketLineId {
             if quantity <= 0 {
                 basket[lineId] = nil
             } else if let existing = basket[lineId] {
-                basket[lineId] = BasketEntry(id: lineId, item: existing.item, quantity: quantity, subtitle: subtitle, unitPrice: unitPrice)
+                basket[lineId] = BasketEntry(
+                    id: lineId,
+                    item: existing.item,
+                    quantity: quantity,
+                    subtitle: subtitle,
+                    unitPrice: unitPrice,
+                    selectedOptions: selectedOptions,
+                    selectedAdditions: selectedAdditions
+                )
             }
             selectedBasketLineId = nil
             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
@@ -587,21 +790,49 @@ struct menuView: View {
             guard quantity > 0 else { return }
             let lineId = nextBasketLineId
             nextBasketLineId += 1
-            basket[lineId] = BasketEntry(id: lineId, item: item, quantity: quantity, subtitle: subtitle, unitPrice: unitPrice)
+
+            basket[lineId] = BasketEntry(
+                id: lineId,
+                item: item,
+                quantity: quantity,
+                subtitle: subtitle,
+                unitPrice: unitPrice,
+                selectedOptions: selectedOptions,
+                selectedAdditions: selectedAdditions
+            )
         } else {
+            // no modifiers => keep classic “same product merges”
             if let (lineId, existing) = basket.first(where: { $0.value.item.id == item.id }) {
                 if quantity <= 0 {
                     basket[lineId] = nil
                 } else {
-                    basket[lineId] = BasketEntry(id: lineId, item: existing.item, quantity: quantity, subtitle: subtitle, unitPrice: unitPrice)
+                    basket[lineId] = BasketEntry(
+                        id: lineId,
+                        item: existing.item,
+                        quantity: quantity,
+                        subtitle: subtitle,
+                        unitPrice: unitPrice,
+                        selectedOptions: [:],
+                        selectedAdditions: []
+                    )
                 }
             } else {
                 guard quantity > 0 else { return }
                 let lineId = nextBasketLineId
                 nextBasketLineId += 1
-                basket[lineId] = BasketEntry(id: lineId, item: item, quantity: quantity, subtitle: subtitle, unitPrice: unitPrice)
+
+                basket[lineId] = BasketEntry(
+                    id: lineId,
+                    item: item,
+                    quantity: quantity,
+                    subtitle: subtitle,
+                    unitPrice: unitPrice,
+                    selectedOptions: [:],
+                    selectedAdditions: []
+                )
             }
         }
+
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
     }
     
@@ -666,10 +897,14 @@ struct menuView: View {
                         .lineLimit(1)
 
                     // subtle price (optional)
-                    Text(isRtl ? String(Int(item.lastPrice)) : "£\(String(format: "%.2f", item.lastPrice))")
-                        .font(.menuRegular(13))
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
+                    Text(
+                        isRtl
+                        ? formatPrice(item.lastPrice)
+                        : "£\(formatPrice(item.lastPrice))"
+                    )
+                    .font(.menuRegular(13))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
                 }
             }
             .padding(.horizontal, 12)
@@ -679,19 +914,14 @@ struct menuView: View {
         }
     }
     
-    
-
-    private func productDetents(for item: ShellMenuItem) -> Set<PresentationDetent> {
-        let hasMods = !(item.modifiers?.isEmpty ?? true)
-
-        // ✅ No modifiers → compact sheet
-        if !hasMods {
-            return [.height(560)]
+    private struct SheetHKey: PreferenceKey {
+        static var defaultValue: CGFloat = 0
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+            value = max(value, nextValue())
         }
-
-        // ✅ Has modifiers → big sheet
-        return [.large]
     }
+
+   
 
     private func incrementEntry(_ id: Int) {
         guard let entry = basket[id] else { return }
@@ -701,10 +931,10 @@ struct menuView: View {
     
     private var memberStamps: Int {
         let profile = UserDefaults.standard.dictionary(forKey: "memberProfileLocal") ?? [:]
-        let raw = profile["stamps"] as? Int ?? 1
-        return max(1, min(10, raw))
+        let raw = profile["stamps"] as? Int ?? 0
+        return max(0, min(10, raw))
     }
-
+    
     private var hasFreeCoffee: Bool {
         memberStamps >= 10
     }
@@ -758,13 +988,33 @@ struct menuView: View {
                                 categories: availableCategories,
                                 selected: selectedCategory,
                                 onTap: { cat in
-                                    categorySyncResumeAt = Date().addingTimeInterval(2)
+                                    // ✅ freeze detector for exactly ~1.3s
+                                    isManualCategoryScroll = true
+                                    manualScrollToken = UUID()          // new token for this tap
+                                    let token = manualScrollToken
+
+                                    categorySyncResumeAt = Date().addingTimeInterval(1.3)
                                     selectedCategory = cat
-                                    withAnimation(.easeInOut) {
-                                        proxy.scrollTo(anchorId(for: cat), anchor: .top)
+
+                                    // scroll (next runloop is more reliable)
+                                    DispatchQueue.main.async {
+                                        withAnimation(.easeInOut(duration: 0.55)) {
+                                            proxy.scrollTo(anchorId(for: cat), anchor: .top)
+                                        }
+                                    }
+
+                                    // ✅ unfreeze exactly once (not extended by any other updates)
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.3) {
+                                        guard token == manualScrollToken else { return }
+                                        isManualCategoryScroll = false
                                     }
                                 },
-                                intent: $serviceIntent   // ✅ add
+                                intent: serviceIntentBinding,
+                                onServiceLongPress: {
+                                    guard isAdmin else { return }
+                                    print("✅ LONG PRESS on ServiceSegment → cashPointMode true")
+                                    cashPointMode = true
+                                }
                             )
                             // MAIN CONTENT
                             ScrollView {
@@ -890,26 +1140,24 @@ struct menuView: View {
                                         HStack(spacing: 18) {
 
                                             // ☕ MEMBERS CARD BUTTON
-                                            if miniAppId == 12{
-                                                Button {
-                                                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                                    
-                                                    
-                                                    if isMember {
-                                                        showCardSheet = true          // ✅ always open card once joined
-                                                    } else {
-                                                        showMembersSheet = true       // ✅ join flow only if not a member
-                                                    }
-                                                } label: {
-                                                    Image(systemName: hasFreeCoffee ? "cup.and.saucer.fill" : "cup.and.saucer")
-                                                        .font(.system(size: 22, weight: .semibold))
-                                                        .foregroundColor(
-                                                            hasFreeCoffee
-                                                            ? MenuTheme.buttonBackground
-                                                            : .primary
-                                                        )
-                                                }
-                                            }
+#if !APPCLIP
+if miniAppId == 12  || miniAppId == 13 {
+    Button {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+
+        if isMember {
+            showCardSheet = true          // ✅ always open card once joined
+        } else {
+            showMembersSheet = true       // ✅ join flow only if not a member
+        }
+    } label: {
+        Image(systemName: hasFreeCoffee ? "cup.and.saucer.fill" : "cup.and.saucer")
+            .font(.system(size: 22, weight: .semibold))
+            .foregroundColor(hasFreeCoffee ? MenuTheme.buttonBackground : .primary)
+    }
+    .buttonStyle(.plain)
+}
+#endif
                                             // 🔗 SHARE
                                             Button {
                                                 showShareSheet = true
@@ -922,35 +1170,63 @@ struct menuView: View {
                                     .padding(.horizontal, 16)
                                     .padding(.top, 8)
 
-                                    VStack(spacing: 5) {
-                                        Text(isRtl ? "תפריט בוקר" : "Beigel Bake · Brick Ln")
-                                            .padding(.top, 15)
-                                            .font(.menuRegular(28).weight(.semibold))
+                                    VStack(spacing: 3) {
 
-                                        Text(isRtl ? "הזמינו מהטלפון ונעדכן כשמוכן" : "Delivered in around 20 minutes")
-                                            .font(.primariesDemi(isRtl ? 15 : 18))
-                                            .foregroundColor(
-                                                Color(UIColor { trait in
-                                                    trait.userInterfaceStyle == .dark
-                                                        ? UIColor(Color.primary)
-                                                        : UIColor.secondaryLabel
-                                                })
-                                            )
+                                        // TITLE
+                                        Text(
+                                            miniAppId == 13
+                                            ? "vitamin"
+                                            : (isRtl ? "תפריט בוקר" : "Beigel Bake · Brick Ln")
+                                        )
+                                        .padding(.top, 15)
+                                        .font(
+                                            miniAppId == 13
+                                            ? .system(size: 35, weight: .heavy)
+                                            : .menuRegular(28)
+                                        )
+                                        .contentShape(Rectangle()) // whole area tappable
+                                        .onLongPressGesture(minimumDuration: 1.2) {
+                                            guard isAdmin else { return }
+                                            UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
+                                            cashPointMode = true
+                                        }
+
+                                        // SUBTITLE
+                                        Text(
+                                            miniAppId == 13
+                                            ? "בריא · מהיר · טבעי"
+                                            : (isRtl
+                                                ? "הזמינו מהטלפון ונעדכן כשמוכן"
+                                                : "Delivered in around 20 minutes")
+                                        )
+                                        .font(.menuRegular(isRtl ? 15 : 18))
+                                        .foregroundColor(
+                                            Color(UIColor { trait in
+                                                trait.userInterfaceStyle == .dark
+                                                    ? UIColor(Color.primary)
+                                                    : UIColor.secondaryLabel
+                                            })
+                                        )
                                     }
                                     .frame(maxWidth: .infinity)
                                     .padding(.bottom, 12)
                                 }
                                 .padding(.bottom, 8)
 
-                                if miniAppId == 12{
-                                    ServiceSegment(intent: $serviceIntent)
+                                if miniAppId == 13 {
+                                    LocationSegment(location: Binding(
+                                        get: { pickupLocation },
+                                        set: { pickupLocation = $0 }
+                                    ))
+                                    .padding(.horizontal, 16)
+                                    .padding(.top, 8)
+                                    .padding(.bottom, 20)
+
+                                } else if miniAppId == 12 {
+                                    ServiceSegment(intent: serviceIntentBinding)
                                         .padding(.horizontal, 16)
                                         .padding(.top, 8)
                                         .padding(.bottom, 20)
-                                        .onChange(of: serviceIntent) { new in
-                                            checkoutIntentRaw = new.rawValue
-                                            UserDefaults.standard.set(new == .sit ? "לשבת" : "לקחת", forKey: "serviceModeLabel")
-                                        }
                                 }
 
                                 if let order = lastOrder {
@@ -974,15 +1250,18 @@ struct menuView: View {
                                             selectedBasketLineId = nil
 
                                             if let saved = myItems.first(where: { $0.id == productId }) {
-                                                let parsed = parseSelectionSubtitle(saved.lastSubtitle)
-                                                let aligned = alignPreset(parsed, to: item)
-                                                myItemsPreset = aligned
+                                                let opts = saved.lastSelectedOptions ?? [:]
+                                                let adds = Set(saved.lastSelectedAdditions ?? [])
+                                                myItemsPreset = (options: opts, additions: adds)
                                             } else {
                                                 myItemsPreset = nil
                                             }
 
                                             productSheetNonce += 1
                                             DispatchQueue.main.async { selectedItem = item }
+                                        } else {
+                                            // product exists in history but hidden now (out of hours / out of stock)
+                                            Haptics.error()
                                         }
                                     }
                                     .padding(.horizontal, 16)
@@ -993,44 +1272,77 @@ struct menuView: View {
                                 Section {
                                     // IMPORTANT: this must contain your per-category content
                                     ForEach(availableCategories, id: \.self) { category in
-                                        Color.clear
-                                            .frame(height: stickyHeaderHeight)
-                                            .id(anchorId(for: category))
 
-                                        VStack(alignment: .leading, spacing: 12) {
-                                            Text(category)
-                                                .font(.menuRegular(22).weight(.semibold))
-                                                .padding(.horizontal, 16)
+                                        // ✅ Make the ID live on the *direct child* of the LazyVStack
+                                        VStack(alignment: .leading, spacing: 0) {
 
-                                            LazyVGrid(columns: gridColumns, spacing: 12) {
-                                                ForEach(items.filter { $0.category == category }) { item in
-                                                    let qty = quantityInBasket(for: item)
-                                                    let badgeQty: Int? = qty > 0 ? qty : nil
+                                            // ✅ Scroll target spacer (lands header below pinned CategoryBar)
+                                            Color.clear
+                                                .frame(height: stickyHeaderHeight + 8)
 
-                                                    Button {
-                                                        selectedBasketLineId = nil
-                                                        productSheetNonce += 1
-                                                        selectedItem = item
-                                                    } label: {
-                                                        ProductCard(item: item, quantityInBasket: badgeQty)
+                                            // ✅ Content
+                                            VStack(alignment: .leading, spacing: 12) {
+
+                                                // ✅ REAL header (stable geometry for auto-select while scrolling)
+                                                Text(category)
+                                                    .font(.menuRegular(22).weight(.semibold))
+                                                    .padding(.horizontal, 16)
+                                                    .padding(.top, 6)
+                                                    .background(
+                                                        GeometryReader { geo in
+                                                            Color.clear.preference(
+                                                                key: CategoryPositionKey.self,
+                                                                value: [category: geo.frame(in: .named("menuScroll")).minY]
+                                                            )
+                                                        }
+                                                    )
+
+                                                LazyVGrid(columns: gridColumns, spacing: 12) {
+                                                    ForEach(items.filter { $0.category == category }) { item in
+                                                        let qty = quantityInBasket(for: item)
+                                                        let badgeQty: Int? = qty > 0 ? qty : nil
+
+                                                        Button {
+                                                            selectedBasketLineId = nil
+                                                            productSheetNonce += 1
+                                                            selectedItem = item
+                                                        } label: {
+                                                            ProductCard(item: item, quantityInBasket: badgeQty)
+                                                        }
+                                                        .buttonStyle(CardPressStyle())
                                                     }
-                                                    .buttonStyle(CardPressStyle())
                                                 }
+                                                .padding(.horizontal, 16)
+                                                .padding(.bottom, 18)
                                             }
-                                            .padding(.horizontal, 16)
-                                            .padding(.bottom, 18)
+                                            .padding(.top, 8)
                                         }
-                                        .padding(.top, -stickyHeaderHeight + 60)
+                                        .id(anchorId(for: category)) // ✅ IMPORTANT: ID on the direct child
                                     }
                                 } header: {
                                     CategoryBar(
                                         categories: availableCategories,
                                         selected: selectedCategory,
                                         onTap: { cat in
-                                            categorySyncResumeAt = Date().addingTimeInterval(2)
+                                            // ✅ freeze detector for exactly ~1.3s
+                                            isManualCategoryScroll = true
+                                            manualScrollToken = UUID()          // new token for this tap
+                                            let token = manualScrollToken
+
+                                            categorySyncResumeAt = Date().addingTimeInterval(1.3)
                                             selectedCategory = cat
-                                            withAnimation(.easeInOut) {
-                                                proxy.scrollTo(anchorId(for: cat), anchor: .top)
+
+                                            // scroll (next runloop is more reliable)
+                                            DispatchQueue.main.async {
+                                                withAnimation(.easeInOut(duration: 0.55)) {
+                                                    proxy.scrollTo(anchorId(for: cat), anchor: .top)
+                                                }
+                                            }
+
+                                            // ✅ unfreeze exactly once (not extended by any other updates)
+                                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.3) {
+                                                guard token == manualScrollToken else { return }
+                                                isManualCategoryScroll = false
                                             }
                                         }
                                     )
@@ -1044,14 +1356,31 @@ struct menuView: View {
                 }
                 
                 .onPreferenceChange(CategoryPositionKey.self) { positions in
+                    // ✅ prevent iPad branch from being overridden by the global handler
+                    guard !isPad else { return }
                     guard Date() >= categorySyncResumeAt, !positions.isEmpty else { return }
+                    guard !isManualCategoryScroll else { return }
+                    let targetY: CGFloat = stickyHeaderHeight + 8
                     let sorted = positions.sorted { $0.value < $1.value }
-                    if let visible = sorted.first(where: { $0.value >= 0 }) ?? sorted.first {
-                        if visible.key != selectedCategory {
-                            withAnimation(.easeInOut(duration: 0.15)) {
-                                selectedCategory = visible.key
-                            }
-                        }
+
+                    guard let picked =
+                        (sorted.last(where: { $0.value <= targetY }) ?? sorted.first)?.key
+                    else { return }
+
+                    guard picked != selectedCategory else { return }
+
+                    // ✅ adjacency guard (no jumping across multiple categories)
+                    if let curI = availableCategories.firstIndex(of: selectedCategory),
+                       let newI = availableCategories.firstIndex(of: picked),
+                       abs(newI - curI) > 1 {
+                        return
+                    }
+
+                    // ✅ no animation = less churn/jitter
+                    var t = Transaction()
+                    t.disablesAnimations = true
+                    withTransaction(t) {
+                        selectedCategory = picked
                     }
                 }
                 NavigationLink("", isActive: $showConfirmation) {
@@ -1075,6 +1404,7 @@ struct menuView: View {
                 .navigationBarHidden(true)
             }
         }
+        
         .foregroundColor(MenuTheme.textColor)
         .onReceive(NotificationCenter.default.publisher(for: .myItemsChanged)) { _ in
             reloadMyItems()
@@ -1098,6 +1428,7 @@ struct menuView: View {
                 }
             }
         }
+
 #if APPCLIP
 .fullScreenCover(item: $studentClaim) { claim in
     StudentDiscountView(
@@ -1142,8 +1473,11 @@ struct menuView: View {
                }
 
             saveReferralForCurrentShop(kind: .fastlane)
-            api.load()
+            api.load(skipCache: false)
+            lastMenuFetchAt = Date()
+            now = Date()
             reloadMyItems()
+            startMenuPolling()
             //loadLastOrderPersistedIfValid()
             // ✅ One-time toast when discount becomes active
             if let disc = MinisShared.loadActiveDiscount(),
@@ -1166,7 +1500,12 @@ struct menuView: View {
 
            
         }
-        
+        .onDisappear {
+            stopMenuPolling()            // ✅ stop polling
+        }
+        .onReceive(clock) { _ in
+            now = Date()
+        }
         .onReceive(NotificationCenter.default.publisher(for: .orderReady)) { note in
             guard let userInfo = note.userInfo else { return }
 
@@ -1231,15 +1570,13 @@ struct menuView: View {
                 lastInteractionAt = Date()
             }
         })
-        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
+        .onReceive(idleClock) { _ in
             guard isPad else { return }
             guard !cashPointMode else { return }          // only customer mode
             guard !showWelcome else { return }
             guard !showOrderFlow else { return }          // don’t interrupt payment flow
-            guard !showBasketSheet else { return }        // optional: don’t interrupt basket
-            guard selectedItem == nil else { return }     // optional: don’t interrupt product sheet
-
-            // if sheet already up, countdown happens inside the sheet (below)
+            guard !showBasketSheet else { return }        // gcoptional
+            guard selectedItem == nil else { return }     // optional
             guard !showIdleSheet else { return }
 
             let idle = Date().timeIntervalSince(lastInteractionAt)
@@ -1285,14 +1622,21 @@ struct menuView: View {
                 OrderFlowView(
                     onSendToKitchen: {
                         let ticket = nextMenuTicketNumber()
-                        PrinterManager.shared.printCashPointSplit(
-                            orderNumber: ticket,
-                            entries: entriesToSend,
-                            total: totalToSend,
-                            diningMode: dm,
-                            customerName: UserDefaults.standard.string(forKey: "userName"),
-                            customerPhone: UserDefaults.standard.string(forKey: "userPhone")
-                        )
+
+                        Task {
+                            let ok = await PrinterManager.shared.printCashPointSplit(
+                                orderNumber: ticket,
+                                entries: entriesToSend,
+                                total: totalToSend,
+                                diningMode: dm,
+                                customerName: UserDefaults.standard.string(forKey: "userName"),
+                                customerPhone: UserDefaults.standard.string(forKey: "userPhone")
+                            )
+
+                            if !ok {
+                                print("❌ printCashPointSplit failed for order \(ticket)")
+                            }
+                        }
                     },
                     total: totalToSend,
                     isRtl: true,
@@ -1328,14 +1672,20 @@ struct menuView: View {
                             return p.isEmpty ? nil : p
                         }()
 
-                        PrinterManager.shared.printCashPointSplit(
-                            orderNumber: ticket,
-                            entries: entriesToSend,
-                            total: totalToSend,
-                            diningMode: dm,
-                            customerName: safeName,
-                            customerPhone: safePhone
-                        )
+                        Task {
+                            let ok = await PrinterManager.shared.printCashPointSplit(
+                                orderNumber: ticket,
+                                entries: entriesToSend,
+                                total: totalToSend,
+                                diningMode: dm,
+                                customerName: safeName,
+                                customerPhone: safePhone
+                            )
+
+                            if !ok {
+                                print("❌ printCashPointSplit failed for order \(ticket)")
+                            }
+                        }
 
                         // ✅ 3) Submit using snapshot (same as you had)
                         orderFlowIsSubmitting = true
@@ -1520,21 +1870,23 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
         )) { item in
             ProductSheet(
                 item: item,
-                initialQuantityInBasket: selectedBasketLineId.flatMap { basket[$0]?.quantity },
+                editingLineId: selectedBasketLineId,
+                initialQuantityInBasket: basket.values.first(where: { $0.item.id == item.id })?.quantity,
                 initialSelectedOptions: myItemsPreset?.options ?? [:],
-                initialSelectedAdditions: myItemsPreset?.additions ?? [],
-                useInitialQuantity: selectedBasketLineId != nil
-            ) { product, qty, subtitle, unitPrice in
-                addToBasket(product, quantity: qty, subtitle: subtitle, unitPrice: unitPrice)
-
-                // ✅ if it was edit mode (from basket), clear it
+                initialSelectedAdditions: myItemsPreset?.additions ?? []
+            ) { product, qty, subtitle, unitPrice, opts, adds in
+                addToBasket(
+                    product,
+                    quantity: qty,
+                    subtitle: subtitle,
+                    unitPrice: unitPrice,
+                    selectedOptions: opts,
+                    selectedAdditions: adds
+                )
                 selectedBasketLineId = nil
-
-                // ✅ close sheet
                 selectedItem = nil
             }
-            .presentationDetents(productDetents(for: item))
-            .presentationDragIndicator(.visible)
+           
             .presentationCornerRadius(20)
             .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
             .environment(\.locale, Locale(identifier: "he_IL"))
@@ -1566,8 +1918,15 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
                             initialSelectedOptions: myItemsPreset?.options ?? [:],
                             initialSelectedAdditions: myItemsPreset?.additions ?? [],
                             useInitialQuantity: selectedBasketLineId != nil
-                        ) { product, qty, subtitle, unitPrice in
-                            addToBasket(product, quantity: qty, subtitle: subtitle, unitPrice: unitPrice)
+                        ) { product, qty, subtitle, unitPrice, opts, adds in
+                            addToBasket(
+                                product,
+                                quantity: qty,
+                                subtitle: subtitle,
+                                unitPrice: unitPrice,
+                                selectedOptions: opts,
+                                selectedAdditions: adds
+                            )
                             selectedBasketLineId = nil
                             selectedItem = nil
                         }
@@ -1644,6 +2003,14 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
                 },
                 onProductTap: { lineId, item in
                     selectedBasketLineId = lineId
+
+                    // ✅ restore selection from that basket line
+                    if let entry = basket[lineId] {
+                        myItemsPreset = (options: entry.selectedOptions, additions: entry.selectedAdditions)
+                    } else {
+                        myItemsPreset = nil
+                    }
+
                     productSheetNonce += 1
                     selectedItem = item
                     showBasketSheet = false
@@ -1809,10 +2176,12 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
                         Text(isRtl ? "סה\"כ" : "Total")
                             .font(.menuRegular(18).weight(.semibold))
                         Spacer()
-                        Text(isRtl
-                             ? String(format: "%.2f", payableTotal)
-                             : String(format: "£%.2f", payableTotal))
-                            .font(.menuRegular(18).weight(.semibold))
+                        Text(
+                            isRtl
+                            ? formatPrice(payableTotal)
+                            : "£\(formatPrice(payableTotal))"
+                        )
+                        .font(.menuRegular(18).weight(.semibold))
                     }
 
                     Button {
@@ -1978,7 +2347,9 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
         let initialSelectedOptions: [String: String]
         let initialSelectedAdditions: Set<String>
         let useInitialQuantity: Bool
-        let onAdd: (ShellMenuItem, Int, String?, Double) -> Void
+
+        // ✅ UPDATED: also return modifiers selection so basket can restore it later (without titles)
+        let onAdd: (ShellMenuItem, Int, String?, Double, [String:String], Set<String>) -> Void
 
         @Environment(\.isRtl) private var isRtl
 
@@ -1989,7 +2360,7 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
         @State private var note: String
         @FocusState private var noteFocused: Bool
         private let barH: CGFloat = 92   // height incl padding
-        
+
         private func extraPricePerUnit() -> Double {
             guard let groups = item.modifiers else { return 0 }
 
@@ -2020,14 +2391,14 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
                 .replacingOccurrences(of: "\u{200E}", with: "")
                 .replacingOccurrences(of: "\u{00A0}", with: " ")
         }
-        
+
         init(
             item: ShellMenuItem,
             initialQuantityInBasket: Int?,
             initialSelectedOptions: [String: String],
             initialSelectedAdditions: Set<String>,
             useInitialQuantity: Bool,
-            onAdd: @escaping (ShellMenuItem, Int, String?, Double) -> Void
+            onAdd: @escaping (ShellMenuItem, Int, String?, Double, [String:String], Set<String>) -> Void
         ) {
             // ✅ local norm() so we don't use self before init completes
             func norm(_ s: String) -> String {
@@ -2066,11 +2437,34 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
             for (k, v) in defaults {
                 normalizedDefaults[norm(k)] = norm(v)
             }
-
             _selectedOptions = State(initialValue: normalizedDefaults)
 
-            // ✅ additions stay as-is (your ModifierListView already normalizes internally)
-            _selectedAdditions = State(initialValue: initialSelectedAdditions)
+            // ✅ ADDITIONS: normalized + default-first behavior
+            var additionsSeed = Set(initialSelectedAdditions.map(norm))
+
+            if let groups = item.modifiers {
+                for g in groups where g.type == .additions {
+                    guard let first = g.items.first else { continue }
+
+                    let groupNormNames = Set(g.items.map { norm($0.name) })
+                    let defaultNorm = norm(first.name)
+
+                    let hasAnyInGroup = additionsSeed.contains { groupNormNames.contains($0) }
+
+                    if !hasAnyInGroup {
+                        additionsSeed.insert(defaultNorm)
+                    } else {
+                        let hasNonDefault = additionsSeed.contains {
+                            groupNormNames.contains($0) && $0 != defaultNorm
+                        }
+                        if hasNonDefault {
+                            additionsSeed.remove(defaultNorm)
+                        }
+                    }
+                }
+            }
+
+            _selectedAdditions = State(initialValue: additionsSeed)
             _note = State(initialValue: "")
         }
 
@@ -2123,8 +2517,8 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
                                 selectedAdditions: $selectedAdditions
                             )
                         }
+
                         /*
-                        
                         VStack(alignment: .leading, spacing: 8) {
                             Text(isRtl ? "הערה לפריט" : "Item note")
                                 .font(.menuRegular(16).weight(.semibold))
@@ -2143,19 +2537,15 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
                         }
                         .environment(\.layoutDirection, .rightToLeft)
                         .padding(.top, 10)
-                         */
+                        */
                     }
-                   
                     .padding(.bottom, barH) // ✅ critical so content doesn’t hide behind bar
                 }
 
                 // ✅ FIXED BAR (Z-LAYER)
                 bottomBar
-                    
-                   
                     .frame(maxWidth: .infinity)
                     .background(Color(.systemBackground))
-                    
             }
         }
 
@@ -2176,7 +2566,8 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
         private var actionBackground: Color {
             isRemoveMode ? .red : MenuTheme.buttonBackground
         }
-        
+
+        // ✅ subtitle for display only (no titles, no defaults, deduped)
         private func subtitleFromSelection() -> String? {
             guard let groups = item.modifiers else {
                 let clean = note.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2185,20 +2576,35 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
 
             var parts: [String] = []
 
+            // options: value only (and only if not default)
             for g in groups where g.type == .options {
                 let gKey = norm(g.title)
                 guard let selected = selectedOptions[gKey],
                       let first = g.items.first else { continue }
 
                 if norm(selected) != norm(first.name) {
-                    parts.append("\(norm(g.title)): \(norm(selected))")
+                    parts.append(norm(selected))
                 }
             }
 
-            let addNames = selectedAdditions
-                .map(norm)
-                .sorted()
-                .filter { !$0.isEmpty }
+            // default additions (first item) hidden
+            let defaultAdditionsNorm: Set<String> = Set(
+                groups
+                    .filter { $0.type == .additions }
+                    .compactMap { $0.items.first?.name }
+                    .map(norm)
+            )
+
+            // normalize → exclude default → dedupe → sort
+            let addNames: [String] = Array(
+                Set(
+                    selectedAdditions
+                        .map(norm)
+                        .filter { !$0.isEmpty }
+                        .filter { !defaultAdditionsNorm.contains($0) }
+                )
+            )
+            .sorted()
 
             if !addNames.isEmpty {
                 parts.append(addNames.joined(separator: ", "))
@@ -2243,16 +2649,18 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
 
                 // Action button
                 Button {
-                    // ✅ If editing and qty is 0 => remove
                     if isRemoveMode {
-                        onAdd(item, 0, nil, item.price)
+                        // ✅ remove line (also pass selection so caller can clear if needed)
+                        onAdd(item, 0, nil, item.price, selectedOptions, selectedAdditions)
                         return
                     }
 
-                    // ✅ Normal add/update
                     guard quantity > 0 else { return }
                     let unit = item.price + extraPricePerUnit()
-                    onAdd(item, quantity, subtitleFromSelection(), unit)
+
+                    // ✅ pass selection payload for basket restore
+                    onAdd(item, quantity, subtitleFromSelection(), unit, selectedOptions, selectedAdditions)
+
                 } label: {
                     Text(actionTitle)
                         .font(.menuRegular(18).weight(.semibold))
@@ -2265,7 +2673,6 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
             }
         }
     }
-    
     struct ProductSheetOverlay<Content: View>: View {
         let isRtl: Bool
         let content: Content
@@ -2377,53 +2784,59 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
     }
     struct MemberCardSheet: View {
         @Environment(\.dismiss) private var dismiss
+        @Environment(\.colorScheme) private var scheme   // ✅ ADD
 
         private let textColor = Color(hex: "#324E57") ?? .primary
         private let bgColor   = Color(.systemBackground)
 
-        // 🔧 DEBUG: force stamps to 3
         private var stamps: Int {
             let profile = UserDefaults.standard.dictionary(forKey: "memberProfileLocal") ?? [:]
             let raw = profile["stamps"] as? Int ?? 0
-            return max(1, min(10, raw))
+            return max(0, min(10, raw))
         }
 
         var body: some View {
             ZStack {
                 bgColor.ignoresSafeArea()
 
-                // MAIN CONTENT
                 VStack(spacing: 22) {
+                    Spacer().frame(height: 44)
 
-                    // Controlled top gap (instead of padding top)
-                    Spacer()
-                        .frame(height: 44)
-
-                    // Title (now visually tight)
                     Text("כרטיסייה")
                         .font(.primariesDemi(26))
                         .foregroundColor(.primary)
 
-                    // Stamps section
                     VStack(spacing: 14) {
 
                         LazyVGrid(
-                            columns: Array(
-                                repeating: GridItem(.flexible(), spacing: 12),
-                                count: 5
-                            ),
+                            columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 5),
                             spacing: 14
                         ) {
                             ForEach(0..<10, id: \.self) { i in
-                                Image(systemName: i < stamps
-                                      ? "cup.and.saucer.fill"
-                                      : "cup.and.saucer")
+                                let isEarned = i < stamps
+                                let isRewardSlot = (i == 9)
+
+                                // ✅ empty slots: white tint in dark mode, your old tint in light
+                                let emptyTint: Color = (scheme == .dark)
+                                    ? Color.white.opacity(0.55)
+                                    : textColor.opacity(0.55)
+
+                                ZStack {
+                                    Image(systemName: {
+                                        if isRewardSlot {
+                                            return isEarned ? "gift.fill" : "gift"
+                                        } else {
+                                            return isEarned ? "cup.and.saucer.fill" : "cup.and.saucer"
+                                        }
+                                    }())
                                     .font(.system(size: 22, weight: .semibold))
                                     .foregroundColor(
-                                        i < stamps
-                                        ? textColor
-                                        : textColor.opacity(0.25)
+                                        isEarned
+                                            ? .primary          // ✅ earned = primary (cups + gift)
+                                            : emptyTint
                                     )
+                                    .opacity(isRewardSlot && !isEarned ? 1.0 : 1.0)
+                                }
                             }
                         }
                         .frame(maxWidth: .infinity)
@@ -2437,10 +2850,8 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
                     Spacer()
                 }
 
-                // HEADER (pinned to safe area)
                 VStack {
                     HStack {
-                        Spacer()
                         Button { dismiss() } label: {
                             Image(systemName: "xmark")
                                 .font(.system(size: 14, weight: .bold))
@@ -2449,9 +2860,10 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
                                 .background(.ultraThinMaterial)
                                 .clipShape(Circle())
                         }
+                        Spacer()
                     }
                     .padding(.horizontal, 18)
-                    .padding(.top, 35)
+                    .padding(.top, 45)
 
                     Spacer()
                 }
@@ -2474,7 +2886,7 @@ struct CategoryBar: View {
         VStack(spacing: 0) {
             ScrollViewReader { proxy in
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 12) {
+                    HStack(spacing: 11) {
                         ForEach(categories, id: \.self) { cat in
                             Button { onTap(cat) } label: {
                                 VStack(spacing: 0) {
@@ -2536,8 +2948,21 @@ struct CategoryBar: View {
                 .frame(height: 1)
         }
         .background(
-            Color(.systemBackground)
-                .shadow(color: .black.opacity(0.06), radius: 8, y: 4)
+            VStack(spacing: 0) {
+                Color(.systemBackground)
+
+                // 👇 bottom-only shadow
+                LinearGradient(
+                    colors: [
+                        Color.black.opacity(0.12),
+                        Color.black.opacity(0.06),
+                        Color.clear
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(height: 1)
+            }
         )
     }
 }
@@ -2555,17 +2980,36 @@ struct RoundedCornerShape: Shape {
     }
 }
 
+func formatPrice(_ value: Double) -> String {
+    let rounded = (value * 100).rounded() / 100   // avoid floating-point junk
+    let str = String(format: "%.2f", rounded)
+
+    // remove trailing zeros + optional dot
+    return str
+        .replacingOccurrences(of: #"(\.0+)$"#, with: "", options: .regularExpression)
+        .replacingOccurrences(of: #"(\.\d*[1-9])0+$"#, with: "$1", options: .regularExpression)
+}
 struct ProductCard: View {
     let item: ShellMenuItem
     let quantityInBasket: Int?
     @State private var badgeBounce = false
     @Environment(\.isRtl) private var isRtl
 
+    func formatPrice(_ value: Double) -> String {
+        let rounded = (value * 100).rounded() / 100   // avoid floating-point junk
+        let str = String(format: "%.2f", rounded)
+
+        // remove trailing zeros + optional dot
+        return str
+            .replacingOccurrences(of: #"(\.0+)$"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"(\.\d*[1-9])0+$"#, with: "$1", options: .regularExpression)
+    }
+    
     private var priceLabel: String {
         if isRtl {
-            return String(format: "%.0f", item.price)
+            return formatPrice(item.price)
         } else {
-            return String(format: "£%.2f", item.price)
+            return "£\(formatPrice(item.price))"
         }
     }
 
@@ -2574,7 +3018,7 @@ struct ProductCard: View {
             let cellWidth = geo.size.width
 
             ZStack(alignment: .topTrailing) {
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 6) {
 
                     ZStack {
                         RoundedRectangle(cornerRadius: 18)
@@ -2610,19 +3054,19 @@ struct ProductCard: View {
 
                 if let qty = quantityInBasket, qty > 0 {
                     Text("\(qty)")
-                        .font(.menuRegular(15).weight(.semibold))
+                        .font(.menuRegular(14).weight(.black))     // like CSS font-weight:900, font-size:14px
                         .foregroundColor(.white)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
                         .background(
                             RoundedCornerShape(
-                                radius: 16,
-                                corners: [.topRight, .bottomLeft]
+                                radius: 16,                        // var(--r)
+                                corners: isRtl
+                                    ? [.topLeft, .bottomRight]     // rtl: r 0 r 0
+                                    : [.topRight, .bottomLeft]     // ltr: 0 r 0 r
                             )
                             .fill(MenuTheme.buttonBackground)
                         )
-                        .padding(.top, 0)
-                        .padding(.leading, 8)
                         .zIndex(1)
                 }
             }
@@ -2740,7 +3184,8 @@ struct ModifierListView: View {
     @Environment(\.isRtl) private var isRtl
     @Binding var selectedOptions: [String: String]
     @Binding var selectedAdditions: Set<String>
-
+    @Environment(\.colorScheme) private var colorScheme
+    
     private func norm(_ s: String) -> String {
         s.trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "\u{200F}", with: "")
@@ -2781,7 +3226,10 @@ struct ModifierListView: View {
             }
         }
     }
-
+    private func modifierLabel(_ item: ModifierItem) -> String {
+        guard item.extraPrice > 0 else { return item.name }
+        return "\(item.name) +\(String(format: "%.1f", item.extraPrice))"
+    }
     private func pill(group: ModifierGroup, item: ModifierItem) -> some View {
         let gKey = norm(group.title)
         let iName = norm(item.name)
@@ -2795,32 +3243,65 @@ struct ModifierListView: View {
             }
         }()
 
-        return Text(item.extraPrice > 0 ? "\(item.name) +\(Int(item.extraPrice))" : item.name)
+         return Text(modifierLabel(item))
             .font(.menuRegular(isRtl ? 15 : 17))
             .padding(.horizontal, 14)
             .padding(.vertical, 9)
             .fixedSize(horizontal: true, vertical: false)
             .background(isSelected ? MenuTheme.accent : Color(.systemGray5))
-            .foregroundColor(isSelected ? .white : MenuTheme.textColor)
+            .foregroundColor(
+                isSelected
+                ? (colorScheme == .dark ? .white : .white)
+                : (colorScheme == .dark ? .white : .black)
+            )
             .clipShape(Capsule())
             .onTapGesture {
                 handleTap(group: group, item: item)
                 Haptics.light()
             }
+           
     }
 
     private func handleTap(group: ModifierGroup, item: ModifierItem) {
         let gKey = norm(group.title)
-        let iName = norm(item.name)
+        let tapped = norm(item.name)
 
         switch group.type {
+
         case .options:
-            selectedOptions[gKey] = iName
+            selectedOptions[gKey] = tapped
+
         case .additions:
-            if selectedAdditions.contains(iName) {
-                selectedAdditions.remove(iName)
+            guard let first = group.items.first else { return }
+
+            let defaultNorm = norm(first.name)
+            let groupNames = Set(group.items.map { norm($0.name) })
+
+            func removeAllInGroup() {
+                selectedAdditions = Set(selectedAdditions.filter { !groupNames.contains($0) })
+            }
+
+            if tapped == defaultNorm {
+                // ✅ selecting default wipes other selections in THIS group
+                removeAllInGroup()
+                selectedAdditions.insert(defaultNorm)
+                return
+            }
+
+            // toggle tapped non-default
+            if selectedAdditions.contains(tapped) {
+                selectedAdditions.remove(tapped)
             } else {
-                selectedAdditions.insert(iName)
+                selectedAdditions.insert(tapped)
+            }
+
+            // ✅ any non-default selected => default must be off
+            selectedAdditions.remove(defaultNorm)
+
+            // ✅ if user removed last non-default => fall back to default
+            let hasAnyInGroup = selectedAdditions.contains(where: { groupNames.contains($0) })
+            if !hasAnyInGroup {
+                selectedAdditions.insert(defaultNorm)
             }
         }
     }
@@ -2835,14 +3316,17 @@ struct ModifierListView: View {
 
 struct ProductSheet: View {
     let item: ShellMenuItem
+    let editingLineId: Int?                 // ✅ NEW: source of truth for “editing”
     let initialQuantityInBasket: Int?
     let initialSelectedOptions: [String: String]
     let initialSelectedAdditions: Set<String>
-    let useInitialQuantity: Bool
-    let onAdd: (ShellMenuItem, Int, String?, Double) -> Void
+
+    // ✅ return selection payload so basket can restore modifiers later
+    let onAdd: (ShellMenuItem, Int, String?, Double, [String:String], Set<String>) -> Void
+
     private var isPad: Bool { UIDevice.current.userInterfaceIdiom == .pad }
+
     @State private var quantity: Int
-    @State private var contentHeight: CGFloat = 500
     @State private var heroFrozenImage: KFCrossPlatformImage? = nil
     @State private var selectedOptions: [String: String] = [:]
     @State private var selectedAdditions: Set<String> = []
@@ -2853,6 +3337,21 @@ struct ProductSheet: View {
 
     @State private var inMyItems = false
 
+    // ✅ dynamic detent measurement
+    @State private var measuredContentH: CGFloat = 520
+    @State private var selectedDetent: PresentationDetent = .large
+
+    private let heroH: CGFloat = 300
+    private let bottomBarH: CGFloat = 60
+    private let bottomBarExtraPad: CGFloat = 50
+
+    private struct SheetHKey: PreferenceKey {
+        static var defaultValue: CGFloat = 0
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+            value = max(value, nextValue())
+        }
+    }
+
     private func norm(_ s: String) -> String {
         s.trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "\u{200F}", with: "")
@@ -2862,53 +3361,83 @@ struct ProductSheet: View {
 
     init(
         item: ShellMenuItem,
+        editingLineId: Int?,                  // ✅ NEW
         initialQuantityInBasket: Int?,
         initialSelectedOptions: [String: String],
         initialSelectedAdditions: Set<String> = [],
-        useInitialQuantity: Bool,
-        onAdd: @escaping (ShellMenuItem, Int, String?, Double) -> Void
+        onAdd: @escaping (ShellMenuItem, Int, String?, Double, [String:String], Set<String>) -> Void
     ) {
         self.item = item
+        self.editingLineId = editingLineId
         self.initialQuantityInBasket = initialQuantityInBasket
         self.initialSelectedOptions = initialSelectedOptions
         self.initialSelectedAdditions = initialSelectedAdditions
-        self.useInitialQuantity = useInitialQuantity
         self.onAdd = onAdd
 
-        let hasModifiers = !(item.modifiers?.isEmpty ?? true)
+        // ✅ Quantity init:
+        // - Editing an existing line → use its quantity (even if it’s 1)
+        // - New add flow → default 1
         let baseQty = initialQuantityInBasket ?? 1
-        let startQty = (hasModifiers && !useInitialQuantity) ? 1 : baseQty
-        _quantity = State(initialValue: startQty)
+        _quantity = State(initialValue: baseQty)
 
-        // ✅ OPTIONS: default to first item (then normalize keys/values)
-        // ✅ OPTIONS: ensure first option is selected for EACH options-group
+        // ✅ OPTIONS defaults
         var defaults: [String: String] = initialSelectedOptions
-
         if let groups = item.modifiers {
             for group in groups where group.type == .options {
                 let key = norm(group.title)
 
-                // if missing/empty -> select first
-                let existing = defaults[key]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let existing =
+                    defaults.first(where: { norm($0.key) == key })?.value
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    ?? ""
+
                 if existing.isEmpty, let first = group.items.first {
-                    defaults[key] = norm(first.name)
+                    defaults[group.title] = first.name   // keep ORIGINAL title/name
                 }
             }
         }
 
-        
-        let normalizedDefaults: [String: String] =
-            Dictionary(uniqueKeysWithValues: defaults.map { (norm($0.key), norm($0.value)) })
-
+        // normalize keys/values to match ModifierListView comparisons
+        var normalizedDefaults: [String: String] = [:]
+        for (k, v) in defaults {
+            normalizedDefaults[norm(k)] = norm(v)
+        }
         _selectedOptions = State(initialValue: normalizedDefaults)
 
-        // ✅ ADDITIONS: normalize
-        _selectedAdditions = State(initialValue: Set(initialSelectedAdditions.map(norm)))
+        // ✅ ADDITIONS defaults
+        var adds = Set(initialSelectedAdditions.map(norm))
+        if let groups = item.modifiers {
+            for g in groups where g.type == .additions {
+                guard let first = g.items.first else { continue }
+                let groupNames = Set(g.items.map { norm($0.name) })
+                let defaultNorm = norm(first.name)
+
+                let hasAny = adds.contains(where: { groupNames.contains($0) })
+                if !hasAny {
+                    adds.insert(defaultNorm)
+                } else {
+                    let hasNonDefault = adds.contains(where: { groupNames.contains($0) && $0 != defaultNorm })
+                    if hasNonDefault { adds.remove(defaultNorm) }
+                }
+            }
+        }
+        _selectedAdditions = State(initialValue: adds)
     }
 
-    private var hasModifiers: Bool { !(item.modifiers?.isEmpty ?? true) }
-    private var isUpdateMode: Bool { (initialQuantityInBasket ?? 0) > 0 }
-    private var isRemoveMode: Bool { isUpdateMode && useInitialQuantity && quantity == 0 }
+    // ✅ NEW: edit mode is based on lineId, not quantity
+    private var isUpdateMode: Bool { editingLineId != nil }
+    private var existsInBasket: Bool { initialQuantityInBasket != nil }
+    private var isRemoveMode: Bool { existsInBasket && quantity == 0 }
+
+    private var actionTitle: String {
+        if isRemoveMode { return isRtl ? "הסר" : "Remove" }
+        if isUpdateMode { return isRtl ? "עדכן" : "Update" }
+        return isRtl ? "הוסף" : "Add"
+    }
+
+    private var actionBackground: Color {
+        isRemoveMode ? .red : MenuTheme.buttonBackground
+    }
 
     private func extraPricePerUnit() -> Double {
         guard let groups = item.modifiers else { return 0 }
@@ -2916,10 +3445,9 @@ struct ProductSheet: View {
             switch group.type {
             case .options:
                 let gKey = norm(group.title)
-                if let selectedName = selectedOptions[gKey] {
-                    if let opt = group.items.first(where: { norm($0.name) == norm(selectedName) }) {
-                        return total + opt.extraPrice
-                    }
+                if let selectedName = selectedOptions[gKey],
+                   let opt = group.items.first(where: { norm($0.name) == norm(selectedName) }) {
+                    return total + opt.extraPrice
                 }
                 return total
 
@@ -2934,27 +3462,12 @@ struct ProductSheet: View {
     }
 
     private var totalPriceLabel: String {
-        let extras = extraPricePerUnit()
-        let total = (item.price + extras) * Double(max(quantity, 0))
-        return isRtl ? String(format: "%.2f", total) : String(format: "£%.2f", total)
-    }
-
-    private var detents: Set<PresentationDetent> {
-        let screenH = UIScreen.main.bounds.height
-        let maxH = screenH * 0.88
-        let compactH = min(contentHeight + 40, maxH)
-
-        // ✅ if content is already compact, don't offer .large
-        if compactH < screenH * 0.62 {
-            return [.height(compactH)]
-        }
-
-        return [.height(compactH), .large]
+        let total = (item.price + extraPricePerUnit()) * Double(max(quantity, 0))
+        return isRtl ? formatPrice(total) : "£\(formatPrice(total))"
     }
 
     private var unitPriceLabel: String {
-        if isRtl { return String(format: "%.0f", item.price) }
-        return String(format: "£%.2f", item.price)
+        isRtl ? formatPrice(item.price) : "£\(formatPrice(item.price))"
     }
 
     private func subtitleFromSelection() -> String? {
@@ -2969,82 +3482,113 @@ struct ProductSheet: View {
             let gKey = norm(g.title)
             guard let selected = selectedOptions[gKey],
                   let first = g.items.first else { continue }
-
             if norm(selected) != norm(first.name) {
-                parts.append("\(norm(g.title)): \(norm(selected))")
+                parts.append(norm(selected))
             }
         }
 
-        let addNames = selectedAdditions
-            .map(norm)
-            .sorted()
-            .filter { !$0.isEmpty }
+        let defaultAdditionsNorm: Set<String> = Set(
+            groups.filter { $0.type == .additions }
+                .compactMap { $0.items.first?.name }
+                .map(norm)
+        )
 
-        if !addNames.isEmpty {
-            parts.append(addNames.joined(separator: ", "))
-        }
+        let addNames: [String] = Array(
+            Set(
+                selectedAdditions
+                    .map(norm)
+                    .filter { !$0.isEmpty }
+                    .filter { !defaultAdditionsNorm.contains($0) }
+            )
+        ).sorted()
+
+        if !addNames.isEmpty { parts.append(addNames.joined(separator: ", ")) }
 
         let clean = note.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !clean.isEmpty {
-            parts.append(isRtl ? "הערה: \(clean)" : "Note: \(clean)")
-        }
+        if !clean.isEmpty { parts.append(isRtl ? "הערה: \(clean)" : "Note: \(clean)") }
 
         return parts.isEmpty ? nil : parts.joined(separator: ", ")
     }
 
+    private var computedDetents: Set<PresentationDetent> {
+        let screenH = UIScreen.main.bounds.height
+        let maxH = screenH * 0.88
+        let minH: CGFloat = 420
+        let target = min(max(measuredContentH + bottomBarH + bottomBarExtraPad, minH), maxH)
+        return [.height(target), .large]
+    }
+
     var body: some View {
-        ZStack(alignment: .topTrailing) {
-            Color(.systemBackground).ignoresSafeArea()
+        ZStack(alignment: .bottom) {
+            Color(.systemBackground).ignoresSafeArea(edges: .bottom)
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    ZStack {
-                        if let img = heroFrozenImage {
-                            Image(uiImage: img)
-                                .resizable()
-                                .scaledToFill()
-                        } else {
-                            KFImage(item.img)
-                                .onSuccess { heroFrozenImage = $0.image }
-                                .placeholder {
-                                    Rectangle()
-                                        .fill(Color(.systemGray5))
-                                        .overlay(ProgressView())
-                                }
-                                .resizable()
-                                .scaledToFill()
-                        }
-                    }
-                    .frame(maxWidth: .infinity)
-                    .frame(height: isPad ? 320 : 320)
-                    .clipped()
-                    .if(!isPad) { $0.ignoresSafeArea(edges: .top) }   // ✅ only iPhone goes edge-to-edge
 
-                    VStack(alignment: .leading, spacing: 10) {
+                    // HERO
+                    GeometryReader { geo in
+                        let w = geo.size.width
+
+                        ZStack(alignment: isRtl ? .topLeading : .topTrailing) {
+
+                            Group {
+                                if let img = heroFrozenImage {
+                                    Image(uiImage: img)
+                                        .resizable()
+                                        .scaledToFill()
+                                } else {
+                                    KFImage(item.img)
+                                        .onSuccess { heroFrozenImage = $0.image }
+                                        .resizable()
+                                        .scaledToFill()
+                                }
+                            }
+                            .frame(width: w, height: heroH)
+                            .clipped()
+
+                            Button { dismiss() } label: {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 14, weight: .bold))
+                                    .foregroundColor(.primary)
+                                    .frame(width: 34, height: 34)
+                                    .background(.ultraThinMaterial)
+                                    .clipShape(Circle())
+                            }
+                            .padding(12)
+                            .zIndex(10)
+                            .opacity(isPad ? 0 : 1)
+                            .allowsHitTesting(!isPad)
+                        }
+                        .frame(width: w, height: heroH)
+                    }
+                    .frame(height: heroH)
+                    .clipped()
+                    .clipShape(RoundedCorner(radius: 16, corners: [.topLeft, .topRight]))
+                    .padding(.horizontal, 0)
+
+                    // CONTENT
+                    VStack(alignment: .leading, spacing: 8) {
                         Text(item.name)
                             .font(.menuRegular(20).weight(.semibold))
+                            .frame(maxWidth: .infinity, alignment: .leading)
 
                         Text(unitPriceLabel)
-                            .font(.menuRegular(20).weight(.regular))
-                            .foregroundColor(
-                                Color(UIColor { trait in
-                                    trait.userInterfaceStyle == .dark
-                                    ? UIColor(Color.primary)
-                                    : UIColor(MenuTheme.accent)
-                                })
-                            )
+                            .font(.menuRegular(18))
+                            .foregroundColor(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
 
-                        if let desc = item.description, !desc.isEmpty {
+                        if let desc = item.description,
+                           !desc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                             Text(desc)
-                                .font(.menuRegular(16).weight(.regular))
+                                .font(.menuRegular(16))
                                 .foregroundColor(.secondary)
-                                .padding(.top, 6)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
                         }
                     }
-                    .padding(.horizontal, 18)
-                    .padding(.top, 6)
+                    .padding(.horizontal, 16)
 
-                    if inMyItems  && !isPad{
+                    if inMyItems && !isPad {
                         Button {
                             MyItemsStore.remove(productId: item.id)
                             inMyItems = false
@@ -3055,83 +3599,80 @@ struct ProductSheet: View {
                                 .foregroundColor(.secondary)
                                 .padding(.top, 4)
                         }
+                        .buttonStyle(.plain)
                         .padding(.horizontal, 18)
                     }
 
-                    if let groups = item.modifiers {
+                    if let groups = item.modifiers, !groups.isEmpty {
                         ModifierListView(
                             groups: groups,
                             selectedOptions: $selectedOptions,
                             selectedAdditions: $selectedAdditions
                         )
-                        .padding(.top, 15)
-                        .padding(.horizontal, 18)
+                        .padding(.horizontal, 16)
                     }
-
-                    Spacer(minLength: 0)
                 }
-               
-                .padding(.bottom, isPad ? 20 : 0)   // 👈 extra space under buttons (iPad only)
-                   .background(
-                       GeometryReader { proxy in
-                           Color.clear
-                               .preference(key: SheetContentHeightKey.self, value: proxy.size.height)
-                       }
-                   )
+                .background(
+                    GeometryReader { geo in
+                        Color.clear.preference(key: SheetHKey.self, value: geo.size.height)
+                    }
+                )
+                .padding(.bottom, bottomBarH + 50) // ✅ requested extra bottom padding
             }
 
-            Button { dismiss() } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 15, weight: .bold))
-                    .foregroundColor(.primary)
-                    .frame(width: 32, height: 32)
-                    .background(.ultraThinMaterial)
-                    .clipShape(Circle())
-            }
-            .padding(.top, 14)
-            .padding(.trailing, 16)
-        }
-        .navigationBarHidden(true)
-        .onAppear { inMyItems = MyItemsStore.load().contains(where: { $0.id == item.id }) }
-        .onPreferenceChange(SheetContentHeightKey.self) { contentHeight = $0 }
-        .presentationDetents(isPad ? [.large] : detents)
-        .presentationDragIndicator(.visible)
-        .presentationCornerRadius(20)
-        .safeAreaInset(edge: .bottom) {
-            VStack(spacing: 0) { bottomBar.padding(.horizontal, 24) }
+            bottomBar
+                .padding(.horizontal, 16)
+                .frame(maxWidth: .infinity)
                 .background(Color(.systemBackground))
+        }
+        .onAppear {
+            inMyItems = MyItemsStore.load().contains(where: { $0.id == item.id })
+            selectedDetent = .height(min(max(measuredContentH + bottomBarH + bottomBarExtraPad, 420),
+                                         UIScreen.main.bounds.height * 0.88))
+        }
+        .onPreferenceChange(SheetHKey.self) { h in
+            let rounded = (h * 10).rounded() / 10
+            if abs(measuredContentH - rounded) > 1 {
+                measuredContentH = rounded
+            }
+        }
+        .presentationDetents(computedDetents, selection: $selectedDetent)
+        .presentationDragIndicator(.visible)
+    }
+
+    struct RoundedCorner: Shape {
+        var radius: CGFloat
+        var corners: UIRectCorner
+        func path(in rect: CGRect) -> Path {
+            Path(UIBezierPath(
+                roundedRect: rect,
+                byRoundingCorners: corners,
+                cornerRadii: CGSize(width: radius, height: radius)
+            ).cgPath)
         }
     }
 
-   
-    
     private var bottomBar: some View {
         HStack(spacing: 16) {
+
             HStack(spacing: 22) {
                 Button {
-                    if useInitialQuantity {
-                        if quantity > 0 { quantity -= 1 }
-                    } else {
-                        if hasModifiers {
-                            if quantity > 1 { quantity -= 1 }
-                        } else {
-                            if quantity > 0 { quantity -= 1 }
-                        }
-                    }
-                    Haptics.light()
+                    if existsInBasket {
+                           if quantity > 0 { quantity -= 1 }     // ✅ allow 0
+                       } else {
+                           if quantity > 1 { quantity -= 1 }     // ✅ keep >= 1
+                       }
+                       Haptics.light()
                 } label: {
                     Circle()
                         .fill(Color(.systemGray5))
                         .frame(width: 44, height: 44)
-                        .overlay(
-                            Image(systemName: "minus")
-                                .font(.system(size: 18, weight: .bold))
-                        )
+                        .overlay(Image(systemName: "minus").font(.system(size: 18, weight: .bold)))
                         .foregroundColor(.primary)
                 }
 
                 Text("\(quantity)")
-                    .font(.custom(primariesFontName, size: 22))
+                    .font(.menuRegular(20).weight(.semibold))
 
                 Button {
                     quantity += 1
@@ -3140,16 +3681,22 @@ struct ProductSheet: View {
                     Circle()
                         .fill(Color(.systemGray5))
                         .frame(width: 44, height: 44)
-                        .overlay(
-                            Image(systemName: "plus")
-                                .font(.system(size: 18, weight: .bold))
-                        )
+                        .overlay(Image(systemName: "plus").font(.system(size: 18, weight: .bold)))
                         .foregroundColor(.primary)
                 }
             }
-            .frame(height: 60)
+            .frame(height: bottomBarH)
 
             Button {
+                if isRemoveMode {
+                    onAdd(item, 0, nil, item.price, selectedOptions, selectedAdditions)
+                    Haptics.success()
+                    dismiss()
+                    return
+                }
+
+                guard quantity > 0 else { return }
+
                 let subtitle = subtitleFromSelection()
                 let unit = item.price + extraPricePerUnit()
 
@@ -3159,25 +3706,27 @@ struct ProductSheet: View {
                         name: item.name,
                         imageURL: item.imageURL,
                         price: unit,
-                        subtitle: subtitle
+                        subtitle: subtitle,
+                        selectedOptions: selectedOptions,
+                        selectedAdditions: selectedAdditions
                     )
                     inMyItems = true
-                    print("🧪 MyItems DEBUG touch:", item.id, item.name, "subtitle:", subtitle as Any)
                 }
 
-                onAdd(item, quantity, subtitle, unit)
+                onAdd(item, quantity, subtitle, unit, selectedOptions, selectedAdditions)
+
                 Haptics.success()
                 dismiss()
             } label: {
                 HStack {
                     if isRtl {
-                        Text(isRemoveMode ? "הסר" : (isUpdateMode ? "עדכן" : "הוסף"))
+                        Text(actionTitle)
                             .font(.menuRegular(18).weight(.semibold))
                         Spacer()
                         Text(totalPriceLabel)
                             .font(.primariesDemi(18))
                     } else {
-                        Text(isRemoveMode ? "Remove" : (isUpdateMode ? "Update" : "Add"))
+                        Text(actionTitle)
                             .font(.system(size: 18, weight: .bold))
                         Spacer()
                         Text(totalPriceLabel)
@@ -3187,12 +3736,12 @@ struct ProductSheet: View {
                 .padding(.horizontal, 20)
                 .foregroundColor(.white)
                 .frame(maxWidth: .infinity)
-                .frame(height: 60)
-                .background(isRemoveMode ? Color.red : MenuTheme.buttonBackground)
+                .frame(height: bottomBarH)
+                .background(actionBackground)  // ✅ red when remove
                 .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             }
         }
-        .frame(height: 60)
+        .frame(height: bottomBarH)
         .padding(.bottom, isPad ? 10 : 0)
     }
 }
@@ -3206,8 +3755,11 @@ struct BasketBar: View {
     let onNewOrder: () -> Void
 
     private var priceLabel: String {
-        if isRtl { return String(format: "%.2f", totalPrice) }
-        return String(format: "£%.2f", totalPrice)
+        if isRtl {
+            return formatPrice(totalPrice)
+        } else {
+            return "£\(formatPrice(totalPrice))"
+        }
     }
 
     var body: some View {
@@ -3293,7 +3845,8 @@ struct BasketSheet: View {
     @State private var stripeController: PKPaymentAuthorizationController? = nil
     @State private var birthdayVoucherApplied: Bool = UserDefaults.standard.bool(forKey: "birthdayVoucherApplied")
   
-    
+    private let appGroupId = "group.minis"
+    private let membersUpdatedAtKey = "members.updatedAt"
     
     // ✅ Discount from App Group
     @State private var activeDiscount: ActiveDiscount? = nil
@@ -3380,6 +3933,10 @@ struct BasketSheet: View {
     }
 
     private func roundTotal(_ value: Double) -> Double {
+        // ✅ Vitamin: no rounding
+        if miniAppId == 13 { return value }
+
+        // existing behavior for others
         let floorValue = floor(value)
         let fraction = value - floorValue
         return fraction >= 0.5 ? ceil(value) : floorValue
@@ -3468,7 +4025,7 @@ struct BasketSheet: View {
                             .font(.menuRegular(24).weight(.semibold))
                             .foregroundColor(MenuTheme.textColor)
                     }
-                    ToolbarItem(placement: .topBarTrailing) {
+                    ToolbarItem(placement: .topBarLeading) {
                         Button { dismiss() } label: {
                             Image(systemName: "xmark")
                                 .font(.system(size: 15, weight: .bold))
@@ -3501,6 +4058,7 @@ struct BasketSheet: View {
                         MinisShared.saveActiveDiscount(disc)
                         activeDiscount = disc
                     }
+                    @AppStorage("checkout.intent")  var checkoutIntentRaw: String = "ta"
 
                     print("🎟️ BasketSheet discount:", activeDiscount as Any)
 
@@ -3680,7 +4238,7 @@ struct BasketSheet: View {
                     Text(isRtl ? "סה\"כ" : "Total")
                         .font(.menuRegular(18).weight(.semibold))
                     Spacer()
-                    Text(formatBasketTotal(discountedTotal))
+                    Text(formatPrice(discountedTotal))
                         .font(.menuRegular(18).weight(.semibold))
                 }
                 if birthdayVoucherAvailableNow && !birthdayVoucherApplied {
@@ -3702,12 +4260,12 @@ struct BasketSheet: View {
                 
                 if canRedeemCoffeeNow {
                     Button {
+                        let coffeesNow = coffeeUnitsInOrder(coffeeEntries)
                         applyFreeCoffeeToBasket()
-                        // ✅ lock stamps at 0 (or keep 10 until order success if you prefer)
-                        setStamps(0)
+                        redeemFreeCoffeeAndAdjustStamps(coffeesEarned: coffeesNow)
                         Haptics.success()
                     } label: {
-                        Text("ממש קפה חינם  ☕️")
+                        Text("ממש קפה חינם ☕️")
                             .font(.menuRegular(17).weight(.semibold))
                             .foregroundColor(.white)
                             .frame(maxWidth: .infinity)
@@ -3715,7 +4273,6 @@ struct BasketSheet: View {
                             .background(MenuTheme.buttonBackground)
                             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                     }
-                  
                 }
             }
             .foregroundColor(.primary)
@@ -3807,6 +4364,12 @@ struct BasketSheet: View {
       
     }
 
+    
+    private func redeemFreeCoffeeAndAdjustStamps(coffeesEarned: Int) {
+        let before = currentStamps()
+        let after  = before + coffeesEarned - 10
+        setStamps(max(0, after))
+    }
     // MARK: - Payments (unchanged)
 
     private func startStripeApplePay() {
@@ -4019,12 +4582,12 @@ struct BasketSheet: View {
     }
     private func currentStamps() -> Int {
         let p = UserDefaults.standard.dictionary(forKey: "memberProfileLocal") ?? [:]
-        return max(1, min(10, p["stamps"] as? Int ?? 1))
+        return max(0, min(10, p["stamps"] as? Int ?? 0))
     }
 
     private func setStamps(_ v: Int) {
         var p = UserDefaults.standard.dictionary(forKey: "memberProfileLocal") ?? [:]
-        p["stamps"] = max(1, min(10, v))
+        p["stamps"] = max(0, min(10, v))
         UserDefaults.standard.set(p, forKey: "memberProfileLocal")
     }
     private var coffeeEntries: [BasketEntry] {
@@ -4033,7 +4596,14 @@ struct BasketSheet: View {
 
     private var canRedeemCoffeeNow: Bool {
         let freeId = UserDefaults.standard.integer(forKey: "member.freeCoffeeLineId")
-        return currentStamps() >= 10 && !coffeeEntries.isEmpty && freeId == 0
+        guard freeId == 0 else { return false }
+        guard !coffeeEntries.isEmpty else { return false }
+
+        let stampsBefore = currentStamps()
+        let coffeesNow   = coffeeUnitsInOrder(coffeeEntries)
+
+        // ✅ 10th coffee is free
+        return stampsBefore + coffeesNow >= 10
     }
     
     private func applyFreeCoffeeToBasket() {
@@ -4075,16 +4645,28 @@ struct BasketSheet: View {
         guard earned > 0 else { return }
 
         var profile = UserDefaults.standard.dictionary(forKey: "memberProfileLocal") ?? [:]
-        let current = profile["stamps"] as? Int ?? 1
+        let current = profile["stamps"] as? Int ?? 0
 
-        // ✅ stop at 10 until redeem
         guard current < 10 else { return }
 
         let newValue = min(10, current + earned)
         profile["stamps"] = newValue
 
+        // ✅ Save to standard defaults (current behavior)
         UserDefaults.standard.set(profile, forKey: "memberProfileLocal")
-        UserDefaults.standard.set(profile, forKey: "pendingMemberJoin") // optional: keep in sync if you use it
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: membersUpdatedAtKey)
+
+        // ✅ App Clip → also save into App Group so full app can read it
+        #if APPCLIP
+        if let suite = UserDefaults(suiteName: appGroupId) {
+            suite.set(profile, forKey: "memberProfileLocal")
+            suite.set(Date().timeIntervalSince1970, forKey: membersUpdatedAtKey)
+            suite.synchronize()
+        }
+        #endif
+
+        // optional: keep in sync if you use it
+        UserDefaults.standard.set(profile, forKey: "pendingMemberJoin")
     }
     
     private func startSubmitOrder(zcreditMeta: [String: Any]? = nil) {
@@ -4153,8 +4735,11 @@ struct BasketSheet: View {
     }
 
     private func formatLineTotal(_ value: Double) -> String {
-        if isRtl { return String(format: "%.0f", value) }
-        return String(format: "£%.2f", value)
+        if isRtl {
+            return formatPrice(value)
+        } else {
+            return "£\(formatPrice(value))"
+        }
     }
 
     private var freeCoffeeDiscount: Double {
@@ -4468,6 +5053,32 @@ struct OrderConfirmationView: View {
             return String(format: "£%.2f", value)
         }
     }
+    
+    private var stampsEarnedNow: Int {
+        let coffeeNames: Set<String> = [
+            "אספרסו",
+            "הפוך",
+            "אמריקנו",
+            "מקיאטו",
+            "קורטדו",
+            "תה",
+            "תה חורף"
+            
+        ]
+
+        func norm(_ s: String) -> String {
+            s.trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "\u{200F}", with: "")
+                .replacingOccurrences(of: "\u{200E}", with: "")
+                .replacingOccurrences(of: "\u{00A0}", with: " ")
+        }
+
+        return entries.reduce(0) { total, entry in
+            let name = norm(entry.item.name)
+            let isCoffee = coffeeNames.contains { name == $0 || name.hasPrefix($0) }
+            return total + (isCoffee ? entry.quantity : 0)
+        }
+    }
 
     private func formatGrandTotal(_ value: Double) -> String {
         if isRtl {
@@ -4509,10 +5120,15 @@ struct OrderConfirmationView: View {
                         ForEach(entries) { entry in
                             let lineTotal = entry.unitPrice * Double(entry.quantity)
                             HStack {
-                                Text("\(entry.quantity) × \(entry.item.name)")
+                                Text(
+                                    isRtl
+                                    ? "\(entry.item.name) × \(entry.quantity)" :
+                                    "\(entry.quantity) × \(entry.item.name)"
+                                   
+                                )
                                     .font(.menuRegular(16).weight(.regular))
                                     .frame(maxWidth: .infinity, alignment: .leading)
-                                Text(formatLineTotal(lineTotal))
+                                Text(formatPrice(lineTotal))
 
                                     .font(.menuRegular(16).weight(.regular))
                                     //.foregroundColor(MenuTheme.accent)
@@ -4529,7 +5145,7 @@ struct OrderConfirmationView: View {
                         Text(isRtl ? "סה״כ" : "Total")
                             .font(.menuRegular(16).weight(.regular))
                         Spacer()
-                        Text(formatGrandTotal(totalPrice))
+                        Text(formatPrice(totalPrice))
                             .font(.menuRegular(15).weight(.semibold))
                     }
                     .padding(.top, 4)
@@ -4539,15 +5155,21 @@ struct OrderConfirmationView: View {
                 
                 
 #if APPCLIP
-MembersUpsellCard(
-    isRtl: isRtl,
-    stampsEarnedNow: 1,
-    onDownloadTap: {
-        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-        showStoreSheet = true
-    }
-)
-.padding(.horizontal, 20)
+                if MenuTheme.miniId != 3{
+                    MembersUpsellCard(
+                        isRtl: isRtl,
+                        stampsEarnedNow:stampsEarnedNow ,
+                        onDownloadTap: {
+                            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                            
+                            // ✅ Present App Store sheet (no SwiftUI sheet)
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                                StoreProductPresenter.shared.present(appId: 6737725110)
+                            }
+                        }
+                    )
+                    .padding(.horizontal, 20)
+                }
 
 // This attaches the overlay presenter
 
@@ -4595,15 +5217,8 @@ MembersUpsellCard(
                 .padding(.top, 20)
             }
         }
-#if APPCLIP
-.fullScreenCover(isPresented: $showStoreSheet) {
-    StoreProductPresenter(appId: 6737725110)
-        .ignoresSafeArea()
-}
-#endif
-        .onAppear {
-            email = UserDefaults.standard.string(forKey: "lastInvoiceEmail") ?? ""
-        }
+
+
         .navigationTitle(isRtl ? "אישור" : "Confirmation")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -4612,6 +5227,12 @@ MembersUpsellCard(
                     .font(.menuRegular(18))
             }
         }
+#if APPCLIP
+        .sheet(isPresented: $showStoreSheet) {
+            AppStoreSheet(appId: 6737725110, isPresented: $showStoreSheet)
+                .ignoresSafeArea()
+        }
+#endif
     }
 }
 
@@ -4622,6 +5243,8 @@ struct CardPressStyle: ButtonStyle {
             .animation(.spring(response: 0.25, dampingFraction: 0.8), value: configuration.isPressed)
     }
 }
+
+
 
 struct OrderInProcessBanner: View {
     let orderNumber: Int
@@ -4764,14 +5387,22 @@ private enum CheckoutKeys {
     static let didShowWelcome = "didShowWelcome"   // Bool
 }
 
+
 // MARK: - Welcome View (fullscreen, kiosk style)
 struct KioskWelcomeView: View {
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.isRtl) private var isRtl
+    @Environment(\.isRtl) private var isRtl   // app-wide (from root)
 
     @AppStorage(CheckoutKeys.intent) private var checkoutIntentRaw: String = ""
     @AppStorage(CheckoutKeys.serviceLabel) private var serviceModeLabel: String = ""
     @AppStorage(CheckoutKeys.didShowWelcome) private var didShowWelcome: Bool = false
+
+    // ✅ Language + global RTL (single source of truth is app.isRtl)
+    @AppStorage("app.langOverride") private var langOverride: String = "he"
+    @AppStorage("app.isRtl") private var appIsRtl: Bool = true
+
+    // ✅ Optional legacy sync (if you still use "direction" elsewhere)
+    @AppStorage("direction") private var direction: String = "rtl"
 
     @State private var page = 0
     @State private var timer: Timer?
@@ -4797,9 +5428,34 @@ struct KioskWelcomeView: View {
     private var sidePadding: CGFloat { isPhone ? 18 : 20 }
     private var bottomSpacer: CGFloat { isPhone ? 26 : 40 }
 
+    // ✅ Push the dine-in / takeaway buttons down a bit
+    private var buttonsTopPad: CGFloat { isPhone ? 22 : 30 }
+
+    // ✅ Effective language
+    private var effectiveLang: String {
+        if langOverride == "en" || langOverride == "he" { return langOverride }
+        let code = Locale.preferredLanguages.first?.prefix(2).lowercased() ?? "en"
+        return (code == "he") ? "he" : "en"
+    }
+
+    // ✅ The ONLY RTL decision inside this view (drives the whole app)
+    private var effectiveIsRtl: Bool { effectiveLang == "he" }
+
+    // ✅ Locale for this view (root can also set it; doing it here makes welcome perfect)
+    private var effectiveLocale: Locale {
+        Locale(identifier: effectiveIsRtl ? "he_IL" : "en_GB")
+    }
+
+    // ✅ Labels
+    private var welcomeTitle: String { effectiveIsRtl ? "ברוכים הבאים" : "Welcome" }
+    private var welcomeSubtitle: String { effectiveIsRtl ? "לחצו להזמנה" : "Tap to order" }
+    private var dineInLabel: String { effectiveIsRtl ? "לשבת" : "Dine-in" }
+    private var takeawayLabel: String { effectiveIsRtl ? "לקחת" : "Takeaway" }
+
     var body: some View {
         ZStack {
-            // Background slider
+
+            // ✅ Background slider (DO NOT intercept touches)
             TabView(selection: $page) {
                 ForEach(Array(images.enumerated()), id: \.offset) { idx, urlStr in
                     GeometryReader { geo in
@@ -4815,32 +5471,29 @@ struct KioskWelcomeView: View {
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
             .ignoresSafeArea()
+            .allowsHitTesting(false)
 
-            // Dark overlay
+            // ✅ Dark overlay (also DO NOT intercept touches)
             LinearGradient(
-                colors: [
-                    Color.black.opacity(0.40),
-                    Color.black.opacity(0.40)
-                ],
+                colors: [Color.black.opacity(0.40), Color.black.opacity(0.40)],
                 startPoint: .top,
                 endPoint: .bottom
             )
             .ignoresSafeArea()
+            .allowsHitTesting(false)
 
-            // Content
+            // ✅ Content (tap targets)
             VStack(spacing: 0) {
                 Spacer()
 
                 VStack(spacing: isPhone ? 14 : 18) {
-                    Text(isRtl ? "ברוכים הבאים" : "Welcome")
+                    Text(welcomeTitle)
                         .font(.menuRegular(titleFont).weight(.heavy))
                         .foregroundColor(.white)
                         .shadow(color: .black.opacity(0.25), radius: 10, y: 4)
                         .multilineTextAlignment(.center)
-                        .minimumScaleFactor(0.75)
-                        .lineLimit(2)
 
-                    Text(isRtl ? "לחצו להזמנה" : "Tap to order")
+                    Text(welcomeSubtitle)
                         .font(.menuRegular(subtitleFont).weight(.bold))
                         .foregroundColor(.white.opacity(0.92))
                         .shadow(color: .black.opacity(0.25), radius: 10, y: 4)
@@ -4848,23 +5501,39 @@ struct KioskWelcomeView: View {
                         .padding(.top, subtitleTopPad)
 
                     HStack(spacing: 14) {
-                        kioskButton(title: isRtl ? "לשבת" : "Dine-in") {
-                            choose(intent: "sit")
-                        }
-                        kioskButton(title: isRtl ? "לקחת" : "Takeaway") {
-                            choose(intent: "ta")
-                        }
+                        kioskButton(title: dineInLabel) { choose(intent: "sit") }
+                        kioskButton(title: takeawayLabel) { choose(intent: "ta") }
                     }
-                    .padding(.top, 8)
+                    .padding(.top, isPhone ? 26 : 34)
                 }
                 .padding(.horizontal, sidePadding)
 
                 Spacer(minLength: bottomSpacer)
             }
-
-           
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+
+        // ✅ Place pill safely under top bars
+        .safeAreaInset(edge: .top) {
+            HStack {
+                Spacer()
+               // languagePill
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 10)
+            .padding(.bottom, 6)
+            .background(Color.clear)
+            .zIndex(999)
+        }
+
+        .toolbar(.hidden, for: .navigationBar)
+        .navigationBarHidden(true)
+
+        // ✅ Timer
         .onAppear {
+            // Make sure global state matches current language
+            syncGlobalLanguageState()
+
             timer?.invalidate()
             timer = Timer.scheduledTimer(withTimeInterval: 7.5, repeats: true) { _ in
                 withAnimation(.easeInOut(duration: 0.6)) {
@@ -4876,15 +5545,85 @@ struct KioskWelcomeView: View {
             timer?.invalidate()
             timer = nil
         }
-        .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
+
+        // ✅ When language changes -> flip RTL for the WHOLE APP instantly
+        .onChange(of: langOverride) { _ in
+            syncGlobalLanguageState()
+        }
+
+        // ✅ Ensure the welcome view itself always renders correctly
+        .environment(\.layoutDirection, effectiveIsRtl ? .rightToLeft : .leftToRight)
+        .environment(\.locale, effectiveLocale)
     }
+
+    // MARK: - Global sync
+
+    private func syncGlobalLanguageState() {
+        let rtl = effectiveIsRtl
+
+        // ✅ The key you inject from MINIS_02App root
+        appIsRtl = rtl
+
+        // ✅ Optional legacy sync
+        direction = rtl ? "rtl" : "ltr"
+
+        // If you also want to ensure any environment(\.isRtl) reads instantly in the stack:
+        // (Root will re-inject anyway, but syncing doesn't hurt)
+        UserDefaults.standard.set(rtl, forKey: "app.isRtl")
+        UserDefaults.standard.set(direction, forKey: "direction")
+    }
+
+    // MARK: - Actions
 
     private func choose(intent: String) {
         checkoutIntentRaw = intent
-        serviceModeLabel = (intent == "sit") ? "לשבת" : "לקחת"
+
+        // ✅ Keep stored labels aligned with language
+        if effectiveIsRtl {
+            serviceModeLabel = (intent == "sit") ? "לשבת" : "לקחת"
+        } else {
+            serviceModeLabel = (intent == "sit") ? "Dine-in" : "Takeaway"
+        }
+
         didShowWelcome = true
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         dismiss()
+    }
+
+    // MARK: - UI bits
+
+    private var languagePill: some View {
+        HStack(spacing: 6) {
+            langButton(title: "EN", value: "en")
+            Divider().frame(height: 16).opacity(0.25)
+            langButton(title: "עב", value: "he")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial)
+        .clipShape(Capsule())
+    }
+
+    private func langButton(title: String, value: String) -> some View {
+        let selected = (effectiveLang == value)
+
+        return Button {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            langOverride = value   // ✅ triggers onChange -> syncGlobalLanguageState()
+        } label: {
+            Text(title)
+                .font(.menuRegular(15).weight(.bold))
+                .foregroundColor(selected ? .white : .white.opacity(0.85))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(
+                    selected
+                    ? (Color(hex: "#324E57") ?? .black).opacity(0.85)
+                    : Color.clear
+                )
+                .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
     }
 
     private func kioskButton(title: String, action: @escaping () -> Void) -> some View {
@@ -4936,34 +5675,55 @@ private struct MembersUpsellCard: View {
     let isRtl: Bool
     let stampsEarnedNow: Int
     let onDownloadTap: () -> Void
+    private func stampsEarnedText(_ count: Int) -> String {
+        guard count > 0 else { return "" }
 
+        if count == 1 {
+            return "הרווחת חותמת אחת לקפה 10 עלינו ☕️"
+        } else {
+            return "הרווחת \(count) חותמות לקפה 10 עלינו ☕️"
+        }
+    }
+    private var shopName: String {
+        let miniId = UserDefaults.standard.integer(forKey: "miniAppId")
+
+        if miniId == 12 { return "בית העם" }
+        if miniId == 13 { return "Vitamin" }
+
+        // fallback (important)
+        return UserDefaults.standard.string(forKey: "miniTitle")
+            ?? "החנות"
+    }
+    
     var body: some View {
         VStack(spacing: 16) {
 
             // 👆 Earned message ABOVE the card
-            Text(
-                isRtl
-                ? "הרווחת חותמת לקפה 10 חינם ☕️"
-                : "You earned \(stampsEarnedNow) stamp for your coffee ☕️"
-            )
-            .font(.menuRegular(16).weight(.semibold))
-            .foregroundColor(MenuTheme.buttonBackground)
-            .frame(maxWidth: .infinity, alignment: .center)
+            if stampsEarnedNow > 0 {
+                Text(stampsEarnedText(stampsEarnedNow))
+                    .font(.menuRegular(16).weight(.semibold))
+                    .foregroundColor(.primary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            }
 
             // 🎁 Members card
             
             VStack(spacing: 18) {
 
                 // Centered title
-                Text(isRtl ? "החברים של בית העם" : "Members club")
+                Text(
+                    isRtl
+                    ? "החברים של \(shopName)"
+                    : "Members club"
+                )
                     .font(.menuRegular(20).weight(.semibold))
                     .frame(maxWidth: .infinity, alignment: .center)
 
                 // Benefits list (left-aligned for readability)
                 VStack(alignment: .leading, spacing: 15) {
-                  
-                    bullet(isRtl ? "30% סוף יום על מאפים וכיכים" : "30% end-of-day discount on baked goods")
                     bullet(isRtl ? "כל קפה 10 חינם ☕️"  : "Every 10th coffee is free")
+                    bullet(isRtl ? "30% סוף יום על מאפים וכריכים" : "30% end-of-day discount on baked goods")
+                   
                     bullet(isRtl ? "50% שובר יום הולדת" : "50% birthday voucher")
                  
                 }
@@ -5014,39 +5774,57 @@ struct CategoryRail: View {
 
     @Binding var intent: ServiceIntent
 
+    // ✅ NEW
+    var showServiceSegment: Bool = true
+
+    // ✅ existing
+    var onServiceLongPress: (() -> Void)? = nil
+
     @Environment(\.colorScheme) private var scheme
     @Environment(\.isRtl) private var isRtl
 
     var body: some View {
         VStack(spacing: 10) {
 
-            // ✅ Picker at top (same width)
-            ServiceSegment(intent: $intent)
-                .frame(height: 46)
-                .padding(.horizontal, 10)
-                .padding(.top, 10)
-
-            // ✅ Rail list below
+            
+            if MenuTheme.miniId == 12 {
+                ServiceSegment(intent: $intent)
+                    .frame(height: 46)
+                    .padding(.horizontal, 10)
+                    .padding(.top, 10)
+            } else {
+                Color.clear
+                    .frame(height: 40)
+                    .contentShape(Rectangle()) // ✅ makes the whole area tappable
+                    .onLongPressGesture(minimumDuration: 1.2) {
+                        UserDefaults.standard.set(true, forKey: "cashPointMode")
+                        UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
+                    }
+            }
+            
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(spacing: 10) {
                     ForEach(categories, id: \.self) { cat in
                         Button { onTap(cat) } label: {
-                            Text(cat)
-                                .font(.menuRegular(16).weight(.semibold))
-                                .foregroundColor(cat == selected ? .white : .primary.opacity(0.85))
-                                .multilineTextAlignment(.leading) // ✅ important
-                                .frame(
-                                    maxWidth: .infinity,
-                                    alignment: .leading            // ✅ leading (RTL = right)
-                                )
-                                .padding(.vertical, 10)
-                                .padding(.horizontal, 12)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                        .fill(cat == selected
-                                              ? MenuTheme.buttonBackground
-                                              : Color.clear)
-                                )
+
+                            // ✅ Full-width hit area
+                            HStack(spacing: 0) {
+                                Text(cat)
+                                    .font(.menuRegular(16).weight(.semibold))
+                                    .foregroundColor(cat == selected ? .white : .primary.opacity(0.85))
+                                    .multilineTextAlignment(.leading)
+
+                                Spacer(minLength: 0)
+                            }
+                            .padding(.vertical, 10)
+                            .padding(.horizontal, 12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .fill(cat == selected ? MenuTheme.buttonBackground : Color.clear)
+                            )
+                            .contentShape(Rectangle()) // ✅ THIS is the key
+
                         }
                         .buttonStyle(.plain)
                     }
@@ -5056,7 +5834,7 @@ struct CategoryRail: View {
             }
         }
         .frame(width: 200)
-        .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight) // ✅ ensure leading works
+        .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
     }
 }
 
@@ -5087,9 +5865,12 @@ extension View {
     }
 }
 
+
+
 extension Notification.Name {
     static let productSheetContentHeight = Notification.Name("productSheetContentHeight")
 }
 extension Notification.Name {
     static let studentClaimArrived = Notification.Name("studentClaimArrived")
 }
+

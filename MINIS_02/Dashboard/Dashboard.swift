@@ -59,11 +59,11 @@ private enum ZDateUtil {
     }
 }
 
-private extension ZReport {
+private extension ZReportDashboard {
     var rangeFromDate: Date? { ZDateUtil.parseDate(rangeFrom) }
 }
 
- extension Array where Element == ZReport {
+ extension Array where Element == ZReportDashboard {
     func dailyPaidMap(cal: Calendar) -> [String: Double] {
         var out: [String: Double] = [:]
         for r in self {
@@ -467,12 +467,12 @@ struct DashboardView: View {
                     // Items report card (placeholder list for now)
                     NavigationLink {
                         SalesReportView(
-                            title: "פריטים",
-                            shopName: "",
-                            initialRange: range,
-                            items: topItemsForRange,
-                            categories: topCategoriesForRange,
-                            accent: .blue
+                          title: "פריטים",
+                          shopName: "",
+                          initialRange: range,
+                          reports: store.reports,
+                          makeTop: { subset in store.aggregatedTop(from: subset) },
+                          accent: .blue
                         )
                     } label: {
                         itemsSalesSummaryCard
@@ -515,17 +515,17 @@ struct DashboardView: View {
             }
             
             .navigationDestination(isPresented: $showCashpoint) {
-               // CashpointPlaceholderView()   // או ה־CashPointView האמיתי שלך
+              CashPointView()
             }
             .background(Color(UIColor.systemGroupedBackground))
             .navigationBarTitleDisplayMode(.inline)
             .onAppear {
                 print("📦 miniAppId =", miniAppId)
 
-                if store.reports.isEmpty {
-                    store.loadCached()
-                }
+                // ✅ 1) instant render from cache
+                store.loadCached()
 
+                // ✅ 2) then refresh from network
                 Task {
                     await store.syncSince(miniAppId: miniAppId)
                 }
@@ -651,7 +651,7 @@ struct DashboardView: View {
         }
     }
 
-    private func parseTop(from report: ZReport) -> (cats: [ZReportDashboardPayload.TopLine], items: [ZReportDashboardPayload.TopLine]) {
+    private func parseTop(from report: ZReportDashboard) -> (cats: [ZReportDashboardPayload.TopLine], items: [ZReportDashboardPayload.TopLine]) {
         guard let s = report.jsonData, !s.isEmpty,
               let data = s.data(using: .utf8)
         else { return ([], []) }
@@ -665,7 +665,7 @@ struct DashboardView: View {
         }
     }
     
-    private var zReportsInCurrentRange: [ZReport] {
+    private var zReportsInCurrentRange: [ZReportDashboard] {
         let cal = calendarIL
         let interval = currentInterval(for: range)
 
@@ -746,7 +746,7 @@ struct DashboardView: View {
         return (t.discounts ?? 0, t.cancellations ?? 0, t.other ?? 0)
     }
     
-    private func parseReductions(from report: ZReport) -> (discounts: Double, cancellations: Double, other: Double) {
+    private func parseReductions(from report: ZReportDashboard) -> (discounts: Double, cancellations: Double, other: Double) {
         guard let s = report.jsonData, !s.isEmpty,
               let data = s.data(using: .utf8)
         else { return (0, 0, 0) }
@@ -910,4 +910,144 @@ struct DashboardView: View {
             )
         }
     }
+}
+
+struct ExportRangeSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let defaultRange: DateInterval
+    let buildCSV: (_ range: DateInterval) -> String
+
+    @State private var mode: Mode = .current
+    @State private var start: Date
+    @State private var end: Date
+
+    // ✅ share sheet
+    @State private var showShare = false
+    @State private var shareURL: URL?
+
+    enum Mode: String, CaseIterable, Identifiable {
+        case current = "תצוגה נוכחית"
+        case custom  = "טווח מותאם"
+        var id: String { rawValue }
+    }
+
+    init(defaultRange: DateInterval, buildCSV: @escaping (DateInterval) -> String) {
+        self.defaultRange = defaultRange
+        self.buildCSV = buildCSV
+        _start = State(initialValue: defaultRange.start)
+        _end   = State(initialValue: defaultRange.end)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Picker("טווח", selection: $mode) {
+                        ForEach(Mode.allCases) { m in
+                            Text(m.rawValue).tag(m)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                }
+
+                if mode == .custom {
+                    Section("תאריכים") {
+                        DatePicker("מתאריך", selection: $start, displayedComponents: .date)
+                        DatePicker("עד תאריך", selection: $end, displayedComponents: .date)
+                    }
+                } else {
+                    Section("ייצוא") {
+                        Text(pretty(defaultRange))
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                Section {
+                    Button {
+                        let interval = (mode == .current)
+                        ? defaultRange
+                        : DateInterval(start: min(start, end), end: max(start, end))
+
+                        let csv = buildCSV(interval)
+                        let filename = makeFilename(for: interval)
+
+                        do {
+                            shareURL = try writeTempCSV(filename: filename, csv: csv)
+                            showShare = true
+                        } catch {
+                            print("❌ Share export failed:", error)
+                        }
+                    } label: {
+                        Text("שיתוף קובץ CSV")
+                            .font(.system(size: 16, weight: .semibold))
+                    }
+                    .disabled(mode == .custom &&
+                              Calendar.current.startOfDay(for: start) > Calendar.current.startOfDay(for: end))
+                }
+            }
+            .navigationTitle("ייצוא")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("סגור") { dismiss() }
+                }
+            }
+            .sheet(isPresented: $showShare) {
+                if let shareURL {
+                    ShareSheet(items: [shareURL])
+                }
+            }
+        }
+        .environment(\.layoutDirection, .rightToLeft)
+        .environment(\.locale, Locale(identifier: "he_IL"))
+    }
+
+    private func pretty(_ r: DateInterval) -> String {
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "he_IL")
+        df.dateStyle = .medium
+        return "\(df.string(from: r.start)) – \(df.string(from: r.end))"
+    }
+
+    private func makeFilename(for r: DateInterval) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd"
+        return "income-\(f.string(from: r.start))_to_\(f.string(from: r.end))"
+        // no .csv here — writeTempCSV adds it
+    }
+}
+// MARK: - CSV FileDocument
+ struct CSVDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.commaSeparatedText] }
+
+    var csv: String
+
+    init(csv: String) { self.csv = csv }
+
+    init(configuration: ReadConfiguration) throws {
+        let data = configuration.file.regularFileContents ?? Data()
+        self.csv = String(data: data, encoding: .utf8) ?? ""
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: Data(csv.utf8))
+    }
+}
+
+func writeTempCSV(filename: String, csv: String) throws -> URL {
+    let dir = FileManager.default.temporaryDirectory
+    let url = dir.appendingPathComponent(filename).appendingPathExtension("csv")
+    try csv.data(using: .utf8)?.write(to: url, options: .atomic)
+    return url
+}
+struct ShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }

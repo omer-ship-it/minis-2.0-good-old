@@ -258,7 +258,7 @@ struct AdminOrdersView: View {
 
     @State private var allowAutoPrint = true
     private let baseURL = "https://minis.studio/api/admin/orders"
-    private let miniAppId = 12
+    private let miniAppId = MenuTheme.miniId
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.isRtl)   private var isRtl
@@ -1128,14 +1128,20 @@ struct AdminOrdersView: View {
         let mode = diningMode(for: order)
         let ticketNumber = Int(order.orderId) ?? order.id
 
-        PrinterManager.shared.printCashPointSplit(
-            orderNumber: ticketNumber,
-            entries: entries,
-            total: order.total,
-            diningMode: mode,
-            customerName: order.customerName,
-            customerPhone: order.customerPhone       // ✅ NEW
-        )
+        Task {
+            let ok = await PrinterManager.shared.printCashPointSplit(
+                orderNumber: ticketNumber,
+                entries: entries,
+                total: order.total,
+                diningMode: mode,
+                customerName: order.customerName,
+                customerPhone: order.customerPhone
+            )
+
+            if !ok {
+                print("❌ printCashPointSplit failed for order \(ticketNumber)")
+            }
+        }
     }
 
     private func update(order: AdminOrderItem, to newStatus: AdminOrderStatus) {
@@ -1164,16 +1170,7 @@ struct AdminOrdersView: View {
     private func loadOrders(showSpinner: Bool) async {
         guard miniAppId > 0 else { return }
 
-        let cacheKey = "AdminOrdersCache_\(miniAppId)"
-
-        if showSpinner, orders.isEmpty {
-            if let cachedData = UserDefaults.standard.data(forKey: cacheKey),
-               let cachedOrders = decodeAdminOrders(from: cachedData) {
-                self.orders = cachedOrders
-                await MainActor.run { publishRemaining() }
-                print("🟡 admin/orders: showing cached orders (\(cachedOrders.count))")
-            }
-        }
+       
 
         if showSpinner { isLoading = true }
         defer { if showSpinner { isLoading = false } }
@@ -1197,7 +1194,7 @@ struct AdminOrdersView: View {
             }
 
             guard let freshOrders = decodeAdminOrders(from: data) else { return }
-            UserDefaults.standard.set(data, forKey: cacheKey)
+         
             self.orders = freshOrders
             await MainActor.run { publishRemaining() }
             
@@ -1629,6 +1626,72 @@ struct TipsDraft: Equatable {
 }
 
 
+private struct EODStepBusinessDayView<Next: View>: View {
+    let miniAppId: Int
+    @Binding var businessDate: Date
+    let next: () -> Next
+
+    var body: some View {
+        VStack(spacing: 14) {
+
+            VStack(alignment: .trailing, spacing: 10) {
+                Text("תאריך עסקי")
+                    .font(.system(size: 20, weight: .bold))
+
+                Text("בחר תאריך עבור דוח סוף יום. ברירת מחדל היא היום, ניתן לשנות.")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(.secondary)
+
+                HStack {
+                    DatePicker(
+                        "",
+                        selection: $businessDate,
+                        displayedComponents: .date
+                    )
+                    .datePickerStyle(.compact)
+                    .labelsHidden()
+
+                    Spacer()
+
+                    Text(formatBusinessDate(businessDate))
+                        .font(.system(size: 17, weight: .bold, design: .rounded))
+                        .monospacedDigit()
+                }
+                .padding(.top, 4)
+            }
+            .frame(maxWidth: .infinity, alignment: .trailing)
+            .padding(16)
+            .background(Color(UIColor.secondarySystemGroupedBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+            Spacer()
+
+            NavigationLink {
+                next()
+            } label: {
+                Text("הבא")
+                    .font(.system(size: 17, weight: .bold))
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 52)
+                    .background(Color.black)
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+            .padding(.bottom, 14)
+        }
+        .padding(.horizontal, 16)
+        .background(Color(UIColor.systemGroupedBackground))
+        .navigationTitle("0/3 תאריך עסקי")
+    }
+
+    private func formatBusinessDate(_ d: Date) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "he_IL")
+        f.timeZone = TimeZone(identifier: "Asia/Jerusalem")
+        f.dateFormat = "EEEE, dd/MM/yyyy"
+        return f.string(from: d)
+    }
+}
 
 
 struct EODWizardView: View {
@@ -1636,16 +1699,24 @@ struct EODWizardView: View {
     let miniAppId: Int
     let onContinueOrder: (AdminOrderItem) -> Void
 
+    // ✅ NEW: selected business day for the wizard
+    @State private var businessDate: Date = Date() // default “obvious”: today (Israel locale already applied)
+
     var body: some View {
         NavigationStack {
-            EODStepOpenOrdersView(
+            EODStepBusinessDayView(
                 miniAppId: miniAppId,
-                onContinueOrder: onContinueOrder,
-                dismissWizard: { dismiss() }
-            )
+                businessDate: $businessDate
+            ) {
+                // continue to step 1
+                EODStepOpenOrdersView(
+                    miniAppId: miniAppId,
+                    businessDate: businessDate,
+                    onContinueOrder: onContinueOrder,
+                    dismissWizard: { dismiss() }
+                )
+            }
             .navigationBarTitleDisplayMode(.inline)
-            // ❌ remove .navigationBarBackButtonHidden(true)
-            // ❌ remove .toolbar custom chevron
         }
         .environment(\.layoutDirection, .rightToLeft)
         .environment(\.locale, Locale(identifier: "he_IL"))
@@ -1686,6 +1757,7 @@ private extension View {
 
 private struct EODStepOpenOrdersView: View {
     let miniAppId: Int
+    let businessDate: Date                 // ✅ NEW
     let onContinueOrder: (AdminOrderItem) -> Void
     let dismissWizard: () -> Void
 
@@ -1715,7 +1787,7 @@ private struct EODStepOpenOrdersView: View {
             NavigationLink {
                 EODStepTipsView(
                     miniAppId: miniAppId,
-                    dismissWizard: dismissWizard
+                    dismissWizard: dismissWizard, businessDate: businessDate
                 )
             } label: {
                 Text("הבא")
@@ -1732,7 +1804,6 @@ private struct EODStepOpenOrdersView: View {
         .padding(.horizontal, 16)
         .background(Color(UIColor.systemGroupedBackground))
         .navigationTitle("1/3 הזמנות פתוחות")
-        // ✅ IMPORTANT: do NOT add any back button here (prevents double)
     }
 
     private func pill(_ title: String, ok: Bool, value: Int?) -> some View {
@@ -1754,7 +1825,7 @@ private struct EODStepOpenOrdersView: View {
 private struct EODStepTipsView: View {
     let miniAppId: Int
     let dismissWizard: () -> Void
-
+    let businessDate: Date
     @State private var cashSystemInclTip: Double? = nil
     @State private var cashCountedText: String = ""
     @State private var cashAdjText: String = ""
@@ -1783,6 +1854,7 @@ private struct EODStepTipsView: View {
             NavigationLink(isActive: $goPreview) {
                 EODStepPreviewView(
                     miniAppId: miniAppId,
+                    businessDate: businessDate,
                     dismissWizard: dismissWizard,
                     cashSystemInclTip: cashSystemInclTip ?? 0,
                     countedCash: countedCash,
@@ -1857,6 +1929,11 @@ private struct EODStepTipsView: View {
     private var canProceedFromTips: Bool {
         guard cashSystemInclTip != nil else { return false }
         guard hasEnteredCountedCash else { return false }
+
+        // ✅ If counted is LOWER than system, allow continuing even if not "balanced"
+        if gap < -0.01 { return true }
+
+        // Otherwise keep strict logic (gap zero or updates match)
         return gapIsZero || updateMatchesGap
     }
 
@@ -1988,7 +2065,7 @@ private struct EODStepTipsView: View {
                                 Text("עדכון פער")
                                     .font(.system(size: 16, weight: .bold))
                                 Spacer()
-                                Text("חייב להשתוות לפער")
+                                Text(gap < -0.01 ? "אפשר להמשיך גם אם חסר מזומן" : "חייב להשתוות לפער")
                                     .font(.system(size: 13, weight: .semibold))
                                     .foregroundColor(.secondary)
                             }
@@ -2011,7 +2088,7 @@ private struct EODStepTipsView: View {
                             if !gapIsZero && !updateMatchesGap {
                                 HStack {
                                     Spacer()
-                                    Text("הפער לא נסגר")
+                                    Text(gap < -0.01 ? "אפשר להמשיך גם אם חסר מזומן" : "חייב להשתוות לפער")
                                         .font(.system(size: 13, weight: .semibold))
                                         .foregroundColor(.red)
                                 }
@@ -2196,6 +2273,7 @@ private struct EODStepTipsView: View {
 
 private struct EODStepPreviewView: View {
     let miniAppId: Int
+    let businessDate: Date
     let dismissWizard: () -> Void
 
     let cashSystemInclTip: Double
@@ -2214,13 +2292,23 @@ private struct EODStepPreviewView: View {
     @State private var xSnapshot: XReportApiResponse? = nil
     @State private var xSnapshotError: String? = nil
     @State private var isLoadingSnapshot = false
-
+    private func formatBusinessDate(_ d: Date) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "he_IL")
+        f.timeZone = TimeZone(identifier: "Asia/Jerusalem")
+        f.dateFormat = "dd/MM/yyyy"
+        return f.string(from: d)
+    }
+    
     var body: some View {
         VStack(spacing: 12) {
 
             VStack(alignment: .trailing, spacing: 10) {
                 Text("סיכום סוף יום")
                     .font(.system(size: 20, weight: .bold))
+                Text("תאריך עסקי: \(formatBusinessDate(businessDate))")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundColor(.secondary)
 
                 line("מזומן מערכת (כולל טיפ)", v: formatILS(cashSystemInclTip))
                 line("נספר במגירה", v: formatILS(countedCash))
@@ -2287,7 +2375,9 @@ private struct EODStepPreviewView: View {
                     }
                 }
             } else {
-                Button { handleZPrimary() } label: {
+                Button {
+                    handleZPrimary()
+                } label: {
                     Text(zPrimaryTitle)
                         .font(.system(size: 18, weight: .bold))
                         .foregroundColor(.white)
@@ -2295,8 +2385,9 @@ private struct EODStepPreviewView: View {
                         .frame(height: 56)
                         .background(Color.black)
                         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        .opacity(zState == .generating ? 0.5 : 1.0)
                 }
-                .disabled(zState == .generating || isLoadingSnapshot)
+                .disabled(zState == .generating)
             }
         }
         .padding(.horizontal, 16)
@@ -2410,29 +2501,29 @@ private struct EODStepPreviewView: View {
     }
 
     private func handleZPrimary() {
-        switch zState {
-        case .idle:
-            Task { await generateZNow() }
-        default:
-            return
-        }
+        guard zState == .idle else { return }
+
+        zState = .generating
+        Task { await generateZNow() }
     }
 
     @MainActor
     private func generateZNow() async {
-        await ensureXSnapshot()
-
         zError = nil
         zResp = nil
-        zState = .generating
         Haptics.light()
 
         do {
-            let resp = try await ZReportGenerateAPI.generate(miniAppId: miniAppId, to: "omer@studionative.io")
+            let resp = try await ZReportGenerateAPI.generate(
+                miniAppId: miniAppId,
+                businessDate: businessDate,          // ✅ NEW
+                to: "eilamomer@gmail.com"
+            )
+
             zResp = resp
             if resp.ok {
-                Haptics.success()
                 zState = .readyToPrint
+                Haptics.success()
             } else {
                 zError = "הפקת הדוח נכשלה"
                 zState = .idle
@@ -2441,7 +2532,7 @@ private struct EODStepPreviewView: View {
         } catch {
             let ns = error as NSError
             let body = ns.userInfo["body"] as? String ?? ""
-            zError = body.isEmpty ? "שגיאה בהפקת דו״ח Z" : "שגיאה בהפקת דו״ח Z: \(body)"
+            zError = body.isEmpty ? "שגיאה בהפקת דו״ח Z" : body
             zState = .idle
             Haptics.error()
         }
@@ -2458,25 +2549,30 @@ enum ZReportGenerateAPI {
         let rangeFromUtc: String?
         let rangeToUtc: String?
         let vatRate: Double?
+        let businessDate: String?     // ✅ NEW (server returns yyyy-MM-dd)
         let emailedTo: String?
         let subject: String?
     }
 
-    static func generate(miniAppId: Int, to: String?) async throws -> Resp {
+    static func generate(miniAppId: Int, businessDate: Date, to: String?) async throws -> Resp {
         var comps = URLComponents(string: "https://minis.studio/api/reports/z")!
+
+        let day = isoBusinessDay(businessDate) // yyyy-MM-dd in Israel TZ
+
         comps.queryItems = [
-            .init(name: "miniAppId", value: String(miniAppId))
+            .init(name: "miniAppId", value: String(miniAppId)),
+            .init(name: "businessDate", value: day)          // ✅ NEW
         ]
+
         if let to, !to.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             comps.queryItems?.append(.init(name: "to", value: to.trimmingCharacters(in: .whitespacesAndNewlines)))
         }
+
         let url = comps.url!
 
         var req = URLRequest(url: url, timeoutInterval: 90)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Accept")
-
-        // ✅ avoid IIS 411 Length Required
         req.httpBody = Data()
 
         print("🧾 Z REPORT cURL:")
@@ -2501,6 +2597,14 @@ enum ZReportGenerateAPI {
         }
 
         return try JSONDecoder().decode(Resp.self, from: data)
+    }
+
+    private static func isoBusinessDay(_ d: Date) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "Asia/Jerusalem")
+        f.dateFormat = "yyyy-MM-dd"
+        return f.string(from: d)
     }
 }
 

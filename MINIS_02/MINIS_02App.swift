@@ -1,255 +1,409 @@
 import SwiftUI
+import StripeCore
 import UIKit
-import UserNotifications
-import StripeApplePay
-
-// MARK: - Reset mini shop defaults
-
-enum AppSettings {
-    enum Key {
-        static let cashPointMode = "cashPointMode"
-    }
-
-    struct Defaults {
-        static let cashPointMode = true
-    }
-
-    static func bootstrapIfNeeded() { 
-        let d = UserDefaults.standard
-        d.set(Defaults.cashPointMode, forKey: Key.cashPointMode)
-
-        #if DEBUG
-        print("⚙️ AppSettings bootstrapped | cashPointMode =", d.bool(forKey: Key.cashPointMode))
-        #endif
-    }
-}
+import NetworkExtension
 
 @main
-struct MINIS_02App: App {
-    @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @Environment(\.scenePhase) private var scenePhase
+struct MiniApp: App {
 
-    // MARK: - App State
-    @AppStorage(AppSettings.Key.cashPointMode) private var cashPointMode: Bool = false
-    @AppStorage("shopId") private var shopId: String = "12"
-    @AppStorage("miniAppId") private var miniAppId: Int = 0
-    @AppStorage("launchMenuOnce") private var launchMenuOnce: Bool = false
-    @AppStorage("autoPrintEnabled") private var autoPrintEnabled: Bool = true
     @AppStorage("direction") private var direction: String = "ltr"
-    @AppStorage("deliveryLoc") private var deliveryLoc: String = ""
-
     @State private var studentClaim: StudentClaim? = nil
 
-    // MARK: - App Group + Keys
+    // ✅ Gate UI until JSON customization applied
+    @State private var didLoadMini = false
+
+    private let wifiSSID = "Beit Ha Am"
+    private let wifiPass = "10203040"
+    private let kDidTryJoinWiFi = "didTryJoinWiFi.v1"
+
     private let appGroupId = "group.minis"
     private let kPendingUniversalLink = "pendingUniversalLink"
     private let kPendingStudentClaim  = "pendingStudentClaim.v1"
 
+    // ✅ NEW: stamps claim handoff
+    private let kPendingStampsClaim   = "pendingStampsClaim.v1"
+
+    // ✅ canonical keys
+    private let kMiniAppId = "miniAppId"
+    private let kShopId    = "shopId"
+    private let kDirection = "direction"
+    private let kDeliveryLoc = "delivery.loc"   // ✅ use one stable key everywhere
+
+    // ✅ launch attribution flag (consumed on launch)
+    private let kOpenedViaLink = "openedViaLink.v1"
+
     init() {
-        AppSettings.bootstrapIfNeeded()
-
-        // default mini for fresh installs
-       
-
         STPAPIClient.shared.publishableKey =
         "pk_live_51H5URzFZIwZSNufssK4R7BjLhpqxHVcfmEZVH8Tg74MAHMA20RfkYhIfbwFjDWJ55KzHWkOhEcqVWhIO2VShjOcU00Tslmi1XT"
 
-        // segmented control appearance
-        let seg = UISegmentedControl.appearance()
-        seg.setTitleTextAttributes([.foregroundColor: UIColor.label], for: .normal)
-        seg.setTitleTextAttributes([.foregroundColor: UIColor.label], for: .selected)
-        seg.selectedSegmentTintColor = UIColor.tertiarySystemFill
+        let std = UserDefaults.standard
+        let miniId = std.integer(forKey: kMiniAppId)
+        let shopId = (std.string(forKey: kShopId) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // Clear saved POS name/phone on fresh launch
-        UserDefaults.standard.removeObject(forKey: "posSavedName")
-        UserDefaults.standard.removeObject(forKey: "posSavedPhone")
+        _ = miniId
+        _ = shopId
     }
 
     var body: some Scene {
         WindowGroup {
             Group {
-                if cashPointMode {
-                    CashPointView()
-                        .tint(.primary)
-                        .environment(\.layoutDirection, .rightToLeft)
-                        .environment(\.locale, Locale(identifier: "he_IL"))
+                if !didLoadMini {
+                    LoadingSplashView()
                 } else {
-                    HomeView()
-                        .tint(.primary)
-                        .environment(\.layoutDirection, .leftToRight)
+                    if direction == "rtl" {
+                        ForceRTL {
+                            NavigationStack {
+                                menuView()
+                                    .environment(\.isRtl, true)
+                                    .environment(\.layoutDirection, .rightToLeft)
+                            }
+                        }
+                    } else {
+                        NavigationStack {
+                            menuView()
+                                .environment(\.isRtl, false)
+                                .environment(\.layoutDirection, .leftToRight)
+                        }
+                    }
                 }
             }
-            .environment(\.isRtl, direction == "rtl")
-            .environment(\.layoutDirection, direction == "rtl" ? .rightToLeft : .leftToRight)
-            .environment(\.currency, direction == "rtl" ? "₪" : "£")
-            .accentColor(.primary)
+            .onAppear {
+                joinBeitHaAmWiFiIfNeeded()
 
-            // MARK: - Universal Links / Deep Links
-            .onOpenURL { url in
-                handleIncoming(url: url)
+                // ✅ If NOT opened via link → force miniAppId = 12
+                applyMiniFallbackIfNotOpenedViaLink()
+
+                loadPendingClaimFromAppGroupIfAny()
+
+                // ✅ Load customization for current mini and ONLY then show HomeView
+                didLoadMini = false
+                parseMiniIfNeeded { _ in
+                    DispatchQueue.main.async {
+                        self.didLoadMini = true
+                    }
+                }
+
+                if let s = suite()?.string(forKey: kPendingUniversalLink),
+                   let url = URL(string: s) {
+                    processIncoming(url)
+                }
+
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    pingInstall()
+                }
             }
             .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
                 if let url = activity.webpageURL {
-                    print("🌐 onContinueUserActivity → \(url.absoluteString)")
-                    handleIncoming(url: url)
-                } else {
-                    print("🌐 onContinueUserActivity → nil url")
+                    processIncoming(url)
                 }
             }
-
-            // MARK: - Cold launch handling
-            .onAppear {
-                // 1) If app group has a pending claim (App Clip → Full App), show it
-                loadPendingClaimFromAppGroupIfAny()
-
-                // 2) If we stored a pending link (cold launch), process it
-                if let s = MinisShared.sharedDefaults.string(forKey: kPendingUniversalLink),
-                   let url = URL(string: s) {
-                    print("🥶 cold-launch pendingUniversalLink → \(url.absoluteString)")
-                    handleIncoming(url: url)
-
-                    MinisShared.sharedDefaults.removeObject(forKey: kPendingUniversalLink)
-                    MinisShared.sharedDefaults.synchronize()
-                }
+            .onOpenURL { url in
+                processIncoming(url)
             }
-
-            // MARK: - Student (full screen like clip)
-          
-            // MARK: - Scene phase (auto print + installs ping)
-            .onChange(of: scenePhase) { phase in
-                switch phase {
-                case .active:
-                    pingInstallIfNeeded()
-
-                    if isIPad && autoPrintEnabled {
-                        print("🖨️ Auto print activated")
-                        OrdersAutoPrinter.shared.startPolling(interval: 10)
-                    } else {
-                        OrdersAutoPrinter.shared.stopPolling()
-                    }
-
-                case .inactive, .background:
-                    OrdersAutoPrinter.shared.stopPolling()
-
-                @unknown default:
-                    break
-                }
-            }
-            .onChange(of: autoPrintEnabled) { enabled in
-                guard scenePhase == .active, cashPointMode else {
-                    OrdersAutoPrinter.shared.stopPolling()
-                    return
-                }
-                enabled
-                ? OrdersAutoPrinter.shared.startPolling(interval: 10)
-                : OrdersAutoPrinter.shared.stopPolling()
+            .fullScreenCover(item: $studentClaim) { claim in
+                StudentDiscountView(
+                    miniAppId: claim.miniAppId,
+                    campaignId: claim.campaignId,
+                    discountPercent: claim.discountPercent,
+                    durationMonths: claim.durationMonths
+                )
+                .interactiveDismissDisabled(true)
+                .onDisappear { studentClaim = nil }
             }
         }
     }
 
+    private func suite() -> UserDefaults? {
+        UserDefaults(suiteName: appGroupId)
+    }
+
+    // MARK: - ✅ Fallback: if not opened via link, force miniAppId = 12
+
+    private func applyMiniFallbackIfNotOpenedViaLink() {
+        let std = UserDefaults.standard
+        let grp = suite()
+
+        let openedViaLink = std.bool(forKey: kOpenedViaLink) || (grp?.bool(forKey: kOpenedViaLink) ?? false)
+
+        if !openedViaLink {
+            std.set(12, forKey: kMiniAppId)
+            std.set("12", forKey: kShopId)
+
+            // ✅ (your original code had grp set to 3; keep shopId consistent)
+            grp?.set(12, forKey: kMiniAppId)
+            grp?.set("12", forKey: kShopId)
+            grp?.synchronize()
+        }
+
+        // ✅ consume immediately so next cold launch without a link falls back again
+        std.set(false, forKey: kOpenedViaLink)
+        grp?.set(false, forKey: kOpenedViaLink)
+        grp?.synchronize()
+    }
+
+    // MARK: - URL parsing helpers
+
+    private func queryValue(_ name: String, in url: URL) -> String? {
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        return items.first(where: { $0.name.lowercased() == name.lowercased() })?.value
+    }
+
+    private func isStudentLink(_ url: URL) -> Bool {
+        let path = url.path.lowercased()
+        if path == "/student" || path == "/student/" { return true }
+
+        if let v = queryValue("student", in: url)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() {
+            if v == "1" || v == "true" || v == "yes" { return true }
+        }
+
+        return false
+    }
+
+    private func makeStudentClaimForCurrentMini() -> StudentClaim? {
+        let mini = UserDefaults.standard.integer(forKey: kMiniAppId)
+        guard mini > 0 else { return nil }
+        return StudentClaim(
+            miniAppId: mini,
+            campaignId: "student",
+            discountPercent: 10,
+            durationMonths: 6
+        )
+    }
+
+    // MARK: - ✅ STAMPS CLAIM (App Group + Notification)
+
+    private struct StampsClaim: Identifiable, Codable, Equatable {
+        var id: String { "\(miniAppId)-\(stamps)" }
+        let miniAppId: Int
+        let stamps: Int
+    }
+
+    private func isStampsLink(_ url: URL) -> (miniId: Int, stamps: Int)? {
+        let host = (url.host ?? "").lowercased()
+        guard host == "minis.studio" || host.hasSuffix(".minis.studio") else { return nil }
+
+        // ✅ Trigger if:
+        // - path contains /stamps
+        // OR
+        // - query contains stamps= (your current /shop/12?stamps=2 use-case)
+        let path = url.path.lowercased()
+        let stampsQ = (queryValue("stamps", in: url) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let hasPathTrigger = path.contains("/stamps")
+        let hasQueryTrigger = !stampsQ.isEmpty
+
+        guard hasPathTrigger || hasQueryTrigger else { return nil }
+
+        // stamps
+        let s = Int(stampsQ) ?? 0
+        let stamps = max(1, min(10, s == 0 ? 1 : s))
+
+        // miniId preference:
+        // 1) explicit miniAppId query
+        // 2) /shop/{id} in path
+        // 3) current stored miniAppId
+        let explicitMini = Int((queryValue("miniAppId", in: url) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+
+        var miniIdFromPath: Int = 0
+        let comps = url.pathComponents.filter { $0 != "/" && !$0.isEmpty }
+        if comps.count >= 2, comps[0].lowercased() == "shop", let id = Int(comps[1]) {
+            miniIdFromPath = id
+        }
+
+        let fallbackMini = UserDefaults.standard.integer(forKey: kMiniAppId)
+        let miniId = (explicitMini > 0 ? explicitMini : (miniIdFromPath > 0 ? miniIdFromPath : fallbackMini))
+
+        guard miniId > 0 else { return nil }
+        return (miniId, stamps)
+    }
+
+    private func saveStampsClaimToAppGroup(_ claim: StampsClaim) {
+        guard let s = suite(), let data = try? JSONEncoder().encode(claim) else { return }
+        s.set(data, forKey: kPendingStampsClaim)
+        s.synchronize()
+    }
+
     // MARK: - Incoming URL Router
 
-    private func handleIncoming(url: URL) {
-        print("🔗 handleIncoming → \(url.absoluteString)")
-        guard url.host?.lowercased() == "minis.studio" else { return }
+    private func processIncoming(_ url: URL) {
+        // ✅ mark that we were opened via a link (so we DON'T force mini=12 on next launch)
+        let std = UserDefaults.standard
+        let grp = suite()
+        std.set(true, forKey: kOpenedViaLink)
+        grp?.set(true, forKey: kOpenedViaLink)
+        grp?.synchronize()
 
-        // ✅ Save for attribution + cold-launch fallback
-        MinisShared.sharedDefaults.set(url.absoluteString, forKey: kPendingUniversalLink)
-        MinisShared.sharedDefaults.synchronize()
+        // MARK: - Persist incoming link (for attribution)
+        suite()?.set(url.absoluteString, forKey: kPendingUniversalLink)
+        suite()?.synchronize()
 
-        // ✅ 1) STUDENT CLAIM FIRST (menuView will present it)
+        // ✅ Only handle minis.studio links
+        let host = (url.host ?? "").lowercased()
+        guard host == "minis.studio" || host.hasSuffix(".minis.studio") else { return }
+
+        // ✅ 0) STAMPS CLAIM FIRST (so it can be /shop/12?stamps=2)
+        if let hit = isStampsLink(url) {
+            let claim = StampsClaim(miniAppId: hit.miniId, stamps: hit.stamps)
+
+            // ensure mini/shop stored (so menu loads correct shop)
+            std.set(hit.miniId, forKey: kMiniAppId)
+            std.set(String(hit.miniId), forKey: kShopId)
+            grp?.set(hit.miniId, forKey: kMiniAppId)
+            grp?.set(String(hit.miniId), forKey: kShopId)
+            grp?.synchronize()
+
+            // save claim + notify UI
+            saveStampsClaimToAppGroup(claim)
+
+            NotificationCenter.default.post(name: .stampsArrived, object: nil)
+
+            // clean pending link (optional)
+            suite()?.removeObject(forKey: kPendingUniversalLink)
+            suite()?.synchronize()
+
+            pingInstall()
+            return
+        }
+
+        // MARK: - 1) Shop deep link: /shop/{id}
+        let comps = url.pathComponents.filter { $0 != "/" && !$0.isEmpty }
+        var incomingMiniId: Int? = nil
+
+        if comps.count >= 2, comps[0].lowercased() == "shop", let id = Int(comps[1]) {
+            incomingMiniId = id
+
+            // ✅ Write BOTH: standard + app group (prevents "loc missing" bug)
+            std.set(id, forKey: kMiniAppId)
+            std.set(String(id), forKey: kShopId)
+
+            grp?.set(id, forKey: kMiniAppId)
+            grp?.set(String(id), forKey: kShopId)
+            grp?.synchronize()
+
+            // ✅ loc from URL (or fallback for mini 3)
+            let loc = (queryValue("loc", in: url) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if !loc.isEmpty {
+                std.set(loc, forKey: kDeliveryLoc)
+                grp?.set(loc, forKey: kDeliveryLoc)
+                grp?.synchronize()
+                print("📍 \(kDeliveryLoc) from URL =", loc)
+            } else {
+                if id == 3 {
+                    std.set("mikkeller", forKey: kDeliveryLoc)
+                    grp?.set("mikkeller", forKey: kDeliveryLoc)
+                    grp?.synchronize()
+                    print("📍 \(kDeliveryLoc) fallback = mikkeller (miniAppId=3)")
+                } else {
+                    std.removeObject(forKey: kDeliveryLoc)
+                    grp?.removeObject(forKey: kDeliveryLoc)
+                    grp?.synchronize()
+                }
+            }
+
+            // ✅ Hold UI while refreshing customization for the new mini
+            DispatchQueue.main.async { self.didLoadMini = false }
+            parseMiniIfNeeded { _ in
+                DispatchQueue.main.async { self.didLoadMini = true }
+            }
+
+            pingInstall()
+        }
+
+        // MARK: - 2) Student triggers
         if let claim = StudentClaim.from(url: url) {
-            print("🎓 Student claim detected → \(claim)")
             saveClaimToAppGroup(claim)
+            studentClaim = claim
 
-            // ✅ tell menuView (if already running) to load + present
-            NotificationCenter.default.post(name: .studentClaimArrived, object: nil)
+            suite()?.removeObject(forKey: kPendingUniversalLink)
+            suite()?.synchronize()
 
+            pingInstall()
             return
         }
 
-        // ✅ 2) Normal deep links (shop/fastlane etc.)
-        deliveryLoc = ""
-        UserDefaults.standard.removeObject(forKey: "deliveryLoc")
+        if isStudentLink(url) {
+            let miniId =
+                incomingMiniId
+                ?? (grp?.integer(forKey: kMiniAppId) ?? 0)
+                ?? std.integer(forKey: kMiniAppId)
 
-        let components = url.pathComponents.filter { $0 != "/" && !$0.isEmpty }
-        guard let last = components.last, let id = Int(last) else {
-            print("⚠️ Deep link ignored: no numeric id in path: \(url.path)")
-            return
+            if let claim = StudentClaim(
+                miniAppId: miniId,
+                campaignId: "student",
+                discountPercent: 10,
+                durationMonths: 6
+            ) as StudentClaim? {
+                saveClaimToAppGroup(claim)
+                studentClaim = claim
+
+                suite()?.removeObject(forKey: kPendingUniversalLink)
+                suite()?.synchronize()
+
+                pingInstall()
+                return
+            }
         }
 
-        let miniType = components.dropLast().last ?? "unknown"
-        print("🎯 Deep link → type=\(miniType), miniAppId=\(id)")
-
-        miniAppId = id
-        UserDefaults.standard.set(id, forKey: "miniAppId")
-
-        let shopIdString = String(id)
-        shopId = shopIdString
-        UserDefaults.standard.set(shopIdString, forKey: "shopId")
-
-        // optional query ?loc=
-        if let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
-           let loc = comps.queryItems?.first(where: { $0.name == "loc" })?.value,
-           !loc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-
-            let clean = loc.trimmingCharacters(in: .whitespacesAndNewlines)
-            deliveryLoc = clean
-            UserDefaults.standard.set(clean, forKey: "deliveryLoc")
-            print("📍 Stored deliveryLoc =", clean)
+        // MARK: - 3) If it wasn't /shop/{id} above, still ping attribution
+        if incomingMiniId == nil {
+            pingInstall()
         }
-
-        // reset shop defaults / force menu mode
-        resetShopUserDefaultsToDefaults()
-        launchMenuOnce = true
-        cashPointMode = false
-
-        // ping with attribution
-        pingInstallIfNeeded(force: true)
-
-        print("✅ Deep link handled → miniAppId=\(miniAppId), shopId=\(shopId), deliveryLoc=\(deliveryLoc)")
     }
 
     // MARK: - Student Claim in App Group
 
     private func saveClaimToAppGroup(_ claim: StudentClaim) {
-        guard let suite = UserDefaults(suiteName: appGroupId) else {
-            print("❌ App Group suite is NIL — check App Groups capability / id")
-            return
-        }
-        guard let data = try? JSONEncoder().encode(claim) else {
-            print("❌ FAILED to encode StudentClaim")
-            return
-        }
-        suite.set(data, forKey: kPendingStudentClaim)
-        suite.synchronize()
-        print("✅ Saved \(kPendingStudentClaim) to App Group. bytes=\(data.count)")
+        guard let s = suite(), let data = try? JSONEncoder().encode(claim) else { return }
+        s.set(data, forKey: kPendingStudentClaim)
+        s.synchronize()
     }
 
     private func loadPendingClaimFromAppGroupIfAny() {
-        guard let suite = UserDefaults(suiteName: appGroupId) else { return }
-        guard let data = suite.data(forKey: kPendingStudentClaim) else { return }
-
+        guard let s = suite(), let data = s.data(forKey: kPendingStudentClaim) else { return }
         guard let claim = try? JSONDecoder().decode(StudentClaim.self, from: data) else {
-            suite.removeObject(forKey: kPendingStudentClaim)
-            suite.synchronize()
+            s.removeObject(forKey: kPendingStudentClaim)
+            s.synchronize()
+            return
+        }
+        studentClaim = claim
+        s.removeObject(forKey: kPendingStudentClaim)
+        s.synchronize()
+    }
+
+    // MARK: - Mini customization fetch
+
+    private func parseMiniIfNeeded(completion: @escaping (Bool) -> Void = { _ in }) {
+        let std = UserDefaults.standard
+        let id = String(std.integer(forKey: kMiniAppId))
+        let t = Int(Date().timeIntervalSince1970)
+
+        guard let url = URL(string: "https://minis.studio/json/\(id).json?\(t)") else {
+            completion(false)
             return
         }
 
-        studentClaim = claim
+        URLSession.shared.dataTask(with: url) { data, _, _ in
+            guard let data else {
+                completion(false)
+                return
+            }
+            // ✅ Your existing function (assumed to set direction/theme/etc)
+            applyMiniCustomization(from: data)
 
-        suite.removeObject(forKey: kPendingStudentClaim)
-        suite.synchronize()
-
-        print("✅ Loaded pending student claim from App Group → showing")
+            completion(true)
+        }.resume()
     }
 
     // MARK: - Install Ping
 
     private struct InstallPingPayload: Codable {
         let anonId: String
-        let platform: String      // "ios"
-        let appVariant: String    // "app"
+        let platform: String
+        let appVariant: String
         let miniAppId: Int?
         let source: String?
         let campaign: String?
@@ -257,14 +411,14 @@ struct MINIS_02App: App {
     }
 
     private func getOrCreateAnonId() -> String {
-        if let suite = UserDefaults(suiteName: appGroupId) {
-            if let existing = suite.string(forKey: "anonUUID"), !existing.isEmpty {
+        if let s = suite() {
+            if let existing = s.string(forKey: "anonUUID"), !existing.isEmpty {
                 UserDefaults.standard.set(existing, forKey: "anonUUID")
                 return existing
             }
             let id = UUID().uuidString
-            suite.set(id, forKey: "anonUUID")
-            suite.synchronize()
+            s.set(id, forKey: "anonUUID")
+            s.synchronize()
             UserDefaults.standard.set(id, forKey: "anonUUID")
             return id
         }
@@ -278,53 +432,40 @@ struct MINIS_02App: App {
         return id
     }
 
-    private func buildAttributionFromPendingLink() -> (source: String?, campaign: String?, referrer: String?) {
-        guard let s = MinisShared.sharedDefaults.string(forKey: kPendingUniversalLink),
+    private func buildInstallAttribution() -> (source: String?, campaign: String?, referrer: String?) {
+        guard let s = suite()?.string(forKey: kPendingUniversalLink),
               let url = URL(string: s)
         else { return (nil, nil, nil) }
 
+        let host = url.host?.lowercased()
+        let path = url.path.lowercased()
+
         let comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
         let q = comps?.queryItems ?? []
+        let utmSource = q.first(where: { $0.name.lowercased() == "utm_source" })?.value
+        let utmCampaign = q.first(where: { $0.name.lowercased() == "utm_campaign" })?.value
 
-        func qv(_ name: String) -> String? {
-            q.first(where: { $0.name.lowercased() == name.lowercased() })?.value?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-        }
+        let source =
+            utmSource
+            ?? (host == "minis.studio" && path.contains("shop") ? "shop_link" : nil)
+            ?? "universal_link"
 
-        let utmSource = qv("utm_source")
-        let utmCampaign = qv("utm_campaign")
-        let utmMedium = qv("utm_medium")
+        let campaign = utmCampaign
+        let ref = (host ?? "link") + url.path
 
-        let host = url.host ?? ""
-        let path = url.path
-        let ref = ([host + path, utmMedium.map { "m:\($0)" }].compactMap { $0 }).joined(separator: "|")
-
-        let source = (utmSource?.isEmpty == false) ? utmSource : "universal_link"
-        let campaign = (utmCampaign?.isEmpty == false) ? utmCampaign : nil
-
-        return (source, campaign, ref.isEmpty ? nil : ref)
+        return (source, campaign, ref)
     }
 
-    private func shouldPingToday() -> Bool {
-        let key = "installs.ping.lastDay"
-        let day = Calendar.current.startOfDay(for: Date()).timeIntervalSince1970
-        let last = UserDefaults.standard.double(forKey: key)
-        if last == day { return false }
-        UserDefaults.standard.set(day, forKey: key)
-        return true
-    }
-
-    private func pingInstallIfNeeded(force: Bool = false) {
-        if !force && !shouldPingToday() { return }
-
+    private func pingInstall() {
         let anonId = getOrCreateAnonId()
-        let attrib = buildAttributionFromPendingLink()
+        let miniId = UserDefaults.standard.integer(forKey: kMiniAppId)
+        let attrib = buildInstallAttribution()
 
         let payload = InstallPingPayload(
             anonId: anonId,
-            platform: "ios",
-            appVariant: "app",
-            miniAppId: miniAppId > 0 ? miniAppId : nil,
+            platform: "appclip",
+            appVariant: "appclip",
+            miniAppId: miniId > 0 ? miniId : nil,
             source: attrib.source,
             campaign: attrib.campaign,
             referrer: attrib.referrer
@@ -336,21 +477,40 @@ struct MINIS_02App: App {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONEncoder().encode(payload)
 
-        URLSession.shared.dataTask(with: req) { data, resp, err in
-            if let err = err {
-                print("📈 installs/ping error:", err.localizedDescription)
-                return
-            }
-            if let http = resp as? HTTPURLResponse {
-                print("📈 installs/ping status:", http.statusCode)
-            }
-            if let data = data, let s = String(data: data, encoding: .utf8) {
-                print("📈 installs/ping resp:", s)
-            }
-        }.resume()
+        URLSession.shared.dataTask(with: req) { _, _, _ in }.resume()
+    }
+
+    // MARK: - WiFi (unchanged)
+
+    private func joinBeitHaAmWiFiIfNeeded() {
+        let std = UserDefaults.standard
+        if std.bool(forKey: kDidTryJoinWiFi) { return }
+        std.set(true, forKey: kDidTryJoinWiFi)
+
+        let config = NEHotspotConfiguration(ssid: wifiSSID, passphrase: wifiPass, isWEP: false)
+        config.joinOnce = true
+
+        NEHotspotConfigurationManager.shared.apply(config) { _ in }
     }
 }
 
-private var isIPad: Bool {
-    UIDevice.current.userInterfaceIdiom == .pad
+// MARK: - Simple loading view while mini JSON loads
+
+private struct LoadingSplashView: View {
+    var body: some View {
+        ZStack {
+            Color(.systemBackground).ignoresSafeArea()
+            VStack(spacing: 12) {
+                ProgressView()
+                Text("Loading…")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+// MARK: - Notification used by menuView
+extension Notification.Name {
+    static let stampsArrived = Notification.Name("stampsArrived")
 }

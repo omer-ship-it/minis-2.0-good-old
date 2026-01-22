@@ -255,6 +255,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
     }
 }
 
+let WELCOME_KEY = "welcome"
 
 
 // MARK: - RTL env
@@ -378,4 +379,23 @@ func getOrCreateAnonId(appGroupId: String) -> String {
 
     return id
 }
+
+
+enum AppSettings {
+    enum Key {
+        static let cashPointMode = "cashPointMode"
+    }
+
+    enum Defaults {
+        static let cashPointMode = false
+    }
+
+    static func bootstrap() {
+        let d = UserDefaults.standard
+        if d.object(forKey: Key.cashPointMode) == nil {
+            d.set(Defaults.cashPointMode, forKey: Key.cashPointMode)
+        }
+    }
+}
+
 

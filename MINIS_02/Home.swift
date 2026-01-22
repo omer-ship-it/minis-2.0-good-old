@@ -156,37 +156,7 @@ struct HomeView: View {
 
             // ✅ Auto-open Menu when app already has a miniAppId (e.g. set by AppDelegate),
             // even if there are no referrals to show on Home.
-            if !openedDefaultMiniOnce {
-                openedDefaultMiniOnce = true
-
-                // If AppDelegate already set miniAppId (like 12), honor it and open menu
-                if !launchMenuOnce && !launchStudioOnce, miniAppId != 0 {
-                    print("🎯 HomeView auto-open → miniAppId already set: \(miniAppId) (referrals=\(referrals.count))")
-
-                    shopId = String(miniAppId)
-                    UserDefaults.standard.set(String(miniAppId), forKey: "shopId")
-                    UserDefaults.standard.set(miniAppId, forKey: "miniAppId")
-
-                    // Important: present cover on next runloop to avoid SwiftUI timing quirks
-                    DispatchQueue.main.async {
-                        withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
-                            showMenu = true
-                        }
-                    }
-                }
-              if !launchMenuOnce && miniAppId == 0, let ref = defaultReferral() {
-                    // referral default
-                    let id = ref.miniAppId
-                    miniAppId = id
-                    shopId = String(id)
-                    UserDefaults.standard.set(id, forKey: "miniAppId")
-                    UserDefaults.standard.set(String(id), forKey: "shopId")
-                    DispatchQueue.main.async {
-                        showMenu = true
-                    }
-                }
-            }
-
+           
             selectedIndex = index(of: selectedFilter)
         }
         .onChange(of: launchStudioOnce) { if $0 { showStudio = true; launchStudioOnce = false } }

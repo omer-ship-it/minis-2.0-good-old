@@ -14,6 +14,11 @@ final class MenuApiModel: ObservableObject {
     @Published var errorMessage: String?
     @Published var version: Int = 0
     @Published var categoryOrder: [String] = []
+    @Published private var nowTick: Int = 0
+    private var clockTimer: AnyCancellable?
+    @Published private var allItems: [ShellMenuItem] = []
+    
+    
     
     func load(shopId explicit: String? = nil, skipCache: Bool = false) {
         let miniAppIdFromDefaults = UserDefaults.standard.integer(forKey: "miniAppId")
@@ -40,6 +45,7 @@ final class MenuApiModel: ObservableObject {
             return
         }
 
+        
         let cacheKey = "MenuJSON_\(shopId)"
         let cacheURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
             .appendingPathComponent("shop_\(shopId).json")
@@ -90,22 +96,34 @@ final class MenuApiModel: ObservableObject {
    
     
     private func applyCategoryOrder(_ items: [ShellMenuItem], order: [String]?) -> [ShellMenuItem] {
+        // ✅ If no category order, return as-is (preserve server order)
         guard let order, !order.isEmpty else { return items }
 
         // category -> rank
         var rank: [String: Int] = [:]
-        for (i, c) in order.enumerated() { rank[c] = i }
+        for (i, c) in order.enumerated() {
+            rank[c] = i
+        }
 
-        // Stable: categories in order first, then anything missing at the end.
+        // ✅ IMPORTANT:
+        // - keep category blocks in the desired order
+        // - keep product order inside category EXACTLY as it arrived from JSON
+        //   (stable tie-break via original index)
+        var originalIndex: [Int: Int] = [:]  // productId -> index
+        originalIndex.reserveCapacity(items.count)
+        for (i, it) in items.enumerated() {
+            originalIndex[it.id] = i
+        }
+
         return items.sorted { a, b in
             let ra = rank[a.category] ?? Int.max
             let rb = rank[b.category] ?? Int.max
             if ra != rb { return ra < rb }
 
-            // same category → keep your existing product sort
-            // (use Sort if you have it; otherwise name/id)
-            if a.id != b.id { return a.id < b.id }
-            return a.name < b.name
+            // ✅ same category: preserve original JSON order
+            let ia = originalIndex[a.id] ?? Int.max
+            let ib = originalIndex[b.id] ?? Int.max
+            return ia < ib
         }
     }
 
@@ -128,6 +146,7 @@ final class MenuApiModel: ObservableObject {
 
                 if let products = wrapper.products {
                     let mapped = mapProducts(products)
+                    
                     let ordered = applyCategoryOrder(mapped, order: wrapper.categoryOrder)
                     await apply(ordered)
                     saveReferralForCurrentShop(kind: .fastlane)
@@ -185,7 +204,9 @@ final class MenuApiModel: ObservableObject {
                 description: $0.description,
                 status: $0.status,
                 stockQuantity: $0.stockQuantity,
-                printer: $0.printer          // 👈 NEW
+                printer: $0.printer,
+                activeFrom: $0.activeFrom,     // ✅ NEW
+                activeTo: $0.activeTo          // ✅ NEW
             )
         }
     }
@@ -231,7 +252,6 @@ struct ShopPayload: Decodable {
     let categoryOrder: [String]?   // ✅ NEW
 }
 
-
 struct ProductPayload: Decodable {
     let productId: Int
     let name: String
@@ -244,6 +264,10 @@ struct ProductPayload: Decodable {
     let modifiers: [ApiModifierGroup]?
     let printer: String?
 
+    // ✅ NEW
+    let activeFrom: Int?
+    let activeTo: Int?
+
     enum CodingKeys: String, CodingKey {
         case productId       = "ProductId"
         case name            = "Name"
@@ -255,7 +279,13 @@ struct ProductPayload: Decodable {
         case description     = "Description"
 
         case printer         = "Printer"
-        case printerLower    = "printer"      // ✅ NEW
+        case printerLower    = "printer"
+
+        // ✅ NEW (support both cases)
+        case activeFrom      = "ActiveFrom"
+        case activeFromLower = "activeFrom"
+        case activeTo        = "ActiveTo"
+        case activeToLower   = "activeTo"
 
         case modifierGroups  = "ModifierGroups"
         case legacyModifiers = "Modifiers"
@@ -263,6 +293,7 @@ struct ProductPayload: Decodable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+
         productId      = try c.decode(Int.self,    forKey: .productId)
         name           = try c.decode(String.self, forKey: .name)
         price          = try c.decode(Double.self, forKey: .price)
@@ -281,6 +312,15 @@ struct ProductPayload: Decodable {
         printer = p?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
+
+        // ✅ NEW: ActiveFrom / ActiveTo (Int, tolerate both key-cases)
+        activeFrom =
+            (try? c.decodeIfPresent(Int.self, forKey: .activeFrom)) ??
+            (try? c.decodeIfPresent(Int.self, forKey: .activeFromLower))
+
+        activeTo =
+            (try? c.decodeIfPresent(Int.self, forKey: .activeTo)) ??
+            (try? c.decodeIfPresent(Int.self, forKey: .activeToLower))
 
         if let groups = try c.decodeIfPresent([ApiModifierGroup].self, forKey: .modifierGroups) {
             modifiers = groups
@@ -330,7 +370,11 @@ struct ShellMenuItem: Identifiable {
     let description: String?
     let status: Int?
     let stockQuantity: Int?
-    let printer: String?     // 👈 NEW
+    let printer: String?
+
+    // ✅ NEW
+    let activeFrom: Int?
+    let activeTo: Int?
 
     var img: URL? {
         if let s = imageURL, !s.isEmpty { return URL(string: s) }
@@ -349,7 +393,9 @@ struct ShellMenuItem: Identifiable {
         description: String?,
         status: Int? = nil,
         stockQuantity: Int? = nil,
-        printer: String? = nil        // 👈 NEW
+        printer: String? = nil,
+        activeFrom: Int? = nil,     // ✅ NEW
+        activeTo: Int? = nil        // ✅ NEW
     ) {
         self.id = id
         self.name = name
@@ -360,7 +406,9 @@ struct ShellMenuItem: Identifiable {
         self.description = description
         self.status = status
         self.stockQuantity = stockQuantity
-        self.printer = printer         // 👈 NEW
+        self.printer = printer
+        self.activeFrom = activeFrom
+        self.activeTo = activeTo
     }
 }
 
@@ -398,6 +446,9 @@ struct BasketEntry: Identifiable {
     var quantity: Int
     var subtitle: String?
     var unitPrice: Double
+    // ✅ NEW: persistent selection
+      var selectedOptions: [String: String] = [:]     // normalized keys + values
+      var selectedAdditions: Set<String> = []         // normalized names
 }
 
 enum DiningMode: String, CaseIterable, Identifiable {
@@ -406,13 +457,14 @@ enum DiningMode: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-struct CategoryPositionKey: PreferenceKey {
+ struct CategoryPositionKey: PreferenceKey {
     static var defaultValue: [String: CGFloat] = [:]
+
     static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) {
-        value.merge(nextValue(), uniquingKeysWith: { $1 })
+        // ✅ MUST merge (not overwrite)
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
     }
 }
-
 struct SheetContentHeightKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
@@ -701,6 +753,10 @@ enum OrderAPI {
             "source": normalizedSource,
             "orderSource": normalizedSource
         ]
+        
+        if let pickupLoc = pickupLocationIfEnabled(miniAppId: miniAppId, defaults: defaults) {
+            payload["pickupLocation"] = pickupLoc
+        }
         // ------------------------------------------------------------
         // ✅ DELIVERY (Fastlane / miniAppId == 3 via loc key)
         // ------------------------------------------------------------
@@ -979,6 +1035,22 @@ struct ZCreditResult {
 
     /// Convenience flag so old code `if result.approved` keeps working
     var approved: Bool { status == .approved }
+}
+
+func pickupLocationIfEnabled(miniAppId: Int, defaults: UserDefaults) -> String? {
+    // ✅ Only minis with multi-location support
+    let supportsPickupLocations: Set<Int> = [13]   // add others later
+
+    guard supportsPickupLocations.contains(miniAppId) else { return nil }
+
+    let raw = (defaults.string(forKey: "pickup.location") ?? "")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+
+    // safety: ignore empty
+    guard !raw.isEmpty else { return nil }
+
+    // Optional: normalize just in case
+    return raw.lowercased()
 }
 
 final class ZCreditPaymentHandler {
@@ -1532,10 +1604,7 @@ func applyMiniCustomization(from data: Data) {
         if let img = mini.miniImage, !img.isEmpty {
             std.set(img, forKey: "miniImage")
         }
-        if let id = mini.miniAppId {
-            std.set(id, forKey: "miniAppId")
-            std.set(String(id), forKey: "shopId")
-        }
+        
     }
 
     if let theme = cfg.theme {
@@ -1680,7 +1749,9 @@ func makeShellMenuItem(from line: AdminOrderLineItem) -> ShellMenuItem {
         description: nil,
         status: nil,
         stockQuantity: nil,
-        printer: line.printer ?? "Bar"
+        printer: line.printer ?? "Bar",
+        activeFrom: nil,
+        activeTo: nil
     )
 }
 
@@ -2096,16 +2167,18 @@ final class ReportPreviewModel: ObservableObject {
     @Published var loadError: String? = nil
     @Published var vatRate: Double = 0.18
 
+    // ✅ NEW: authoritative business day for restore preview (from DB if available)
+    @Published var businessDate: Date? = nil
+
     init(initial: PrinterManager.SalesReportData) {
         self.initial = initial
         self.data = nil          // ✅ empty until load finishes
     }
-    
+
     func printCurrentReport(type: CashPointView.ReportType) {
         if isLoading { return }
         if loadError != nil { return }
-        guard let d = data else { return }     // ✅ add this
-
+        guard let d = data else { return }
         PrinterManager.shared.printSalesReport(d, type: type)
     }
 
@@ -2115,6 +2188,7 @@ final class ReportPreviewModel: ObservableObject {
         isLoading = true
         loadError = nil
         data = nil                  // ✅ clears UI while loading
+        businessDate = nil          // ✅ clear until we know the truth
         defer { isLoading = false }
 
         do {
@@ -2123,7 +2197,7 @@ final class ReportPreviewModel: ObservableObject {
             case .x:
                 let res = try await fetchXReport(miniAppId: shopId)
                 self.data = PrinterManager.SalesReportData
-                    .applyingXReport(res, onto: initial)   // ✅ use initial (clean base)
+                    .applyingXReport(res, onto: initial)
 
             case .z:
                 // ✅ Restore date (Z)
@@ -2132,7 +2206,16 @@ final class ReportPreviewModel: ObservableObject {
                     let ymd = Self.ymd(date, tz: tz)
 
                     let row = try await fetchZByDay(miniAppId: shopId, dayYMD: ymd)
+
+                    // ✅ VAT
                     self.vatRate = row.VatRate
+
+                    // ✅ BusinessDate: prefer DB value if present, else fallback to selected restore date
+                    if let db = parseISODateOnly(row.BusinessDate) {
+                        self.businessDate = db
+                    } else {
+                        self.businessDate = date
+                    }
 
                     var d = initial   // ✅ clean base, no stale values
 
@@ -2181,10 +2264,13 @@ final class ReportPreviewModel: ObservableObject {
                     return
                 }
 
-                // ✅ Normal Z (no restore date) — for now you’re using X endpoint logic
+                // ✅ Normal Z (no restore date) — currently using X endpoint logic
                 let res = try await fetchXReport(miniAppId: shopId)
                 self.data = PrinterManager.SalesReportData
-                    .applyingXReport(res, onto: initial)   // ✅ use initial (not zero)
+                    .applyingXReport(res, onto: initial)
+
+                // No restore → don’t show a specific business day
+                self.businessDate = nil
             }
 
         } catch {
@@ -2193,6 +2279,7 @@ final class ReportPreviewModel: ObservableObject {
             self.loadError = body.isEmpty ? String(describing: error) : body
         }
     }
+
     // MARK: - X report
 
     private func fetchXReport(miniAppId: Int) async throws -> XReportApiResponse {
@@ -2223,6 +2310,9 @@ final class ReportPreviewModel: ObservableObject {
         let MiniAppId: Int
         let RangeFrom: String
         let RangeTo: String
+
+        // ✅ NEW (from DB): "yyyy-MM-dd" (recommended), may be missing on older rows
+        let BusinessDate: String?
 
         let GrossTotal: Double
         let NetTotal: Double
@@ -2293,8 +2383,16 @@ final class ReportPreviewModel: ObservableObject {
         f.dateFormat = "yyyy-MM-dd"
         return f.string(from: date)
     }
-}
 
+    private func parseISODateOnly(_ s: String?) -> Date? {
+        guard let s, !s.isEmpty else { return nil }
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "Asia/Jerusalem")
+        f.dateFormat = "yyyy-MM-dd"
+        return f.date(from: s)
+    }
+}
 #endif
 struct XReportApiResponse: Decodable {
     let ok: Bool
@@ -2955,12 +3053,26 @@ struct MyItem: Codable, Identifiable, Equatable {
     let lastPrice: Double
     let lastSubtitle: String?     // ✅ NEW
     let lastUsedAt: Date
+    
+    let lastSelectedOptions: [String: String]?
+    let lastSelectedAdditions: [String]?
 }
 
 enum MyItemsStore {
+    private static func currentMiniId() -> Int {
+        let d = UserDefaults.standard
+        let mini = d.integer(forKey: "miniAppId")
+        if mini > 0 { return mini }
 
+        if let s = d.string(forKey: "shopId"), let v = Int(s) { return v }
+        return 0
+    }
+     
     // MARK: - Config
-    private static let key = "myItems.v1"
+    private static var key: String {
+        let miniId = currentMiniId()
+        return "myItems.v1.mini.\(miniId)"
+    }
     private static let maxItems = 8
 
     private static var defaults: UserDefaults {
@@ -2984,8 +3096,10 @@ enum MyItemsStore {
         name: String,
         imageURL: String?,
         price: Double,
-        subtitle: String?            // ✅ NEW
-    ) {
+        subtitle: String?,
+        selectedOptions: [String:String]? = nil,
+        selectedAdditions: Set<String>? = nil
+    ){
         var items = load()
         let now = Date()
 
@@ -2994,12 +3108,14 @@ enum MyItemsStore {
             items.remove(at: index)
             items.insert(
                 MyItem(
-                    id: existing.id,
-                    name: existing.name,
-                    imageURL: existing.imageURL,
+                    id: productId,
+                    name: name,
+                    imageURL: imageURL,
                     lastPrice: price,
-                    lastSubtitle: subtitle ?? existing.lastSubtitle,  // ✅ keep if nil
-                    lastUsedAt: now
+                    lastSubtitle: subtitle,
+                    lastUsedAt: now,
+                    lastSelectedOptions: selectedOptions,
+                    lastSelectedAdditions: selectedAdditions.map { Array($0) }
                 ),
                 at: 0
             )
@@ -3011,7 +3127,9 @@ enum MyItemsStore {
                     imageURL: imageURL,
                     lastPrice: price,
                     lastSubtitle: subtitle,
-                    lastUsedAt: now
+                    lastUsedAt: now,
+                    lastSelectedOptions: selectedOptions,
+                    lastSelectedAdditions: selectedAdditions.map { Array($0) }
                 ),
                 at: 0
             )
@@ -3266,4 +3384,38 @@ enum AdminOrderStatus: String, Codable {
     case received   // חדש / בתהליך
     case ready      // מוכן
     case collected  // נאסף
+}
+
+extension ShellMenuItem {
+
+    private static func currentHour(now: Date) -> Int {
+        Calendar.current.component(.hour, from: now) // 0...23
+    }
+
+    /// If no window is set -> available all day.
+    /// If only from/to exists -> treat missing side as open-ended.
+    /// Supports wrap (e.g. 22 -> 2).
+    func isWithinActiveHours(now: Date = Date()) -> Bool {
+        let from = activeFrom
+        let to = activeTo
+        if from == nil && to == nil { return true }
+
+        let h = Self.currentHour(now: now)
+
+        if let from, let to {
+            if from == to { return true } // "all day" edge case
+            if from < to {
+                return (h >= from && h < to)
+            } else {
+                // wraps midnight (e.g. 22..2)
+                return (h >= from || h < to)
+            }
+        }
+
+        if let from { return h >= from }
+        if let to { return h < to }
+        return true
+    }
+
+  
 }

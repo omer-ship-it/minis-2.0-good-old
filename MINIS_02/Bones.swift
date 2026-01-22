@@ -848,14 +848,20 @@ struct DigitalBonesView: View {
                                         let nameSnapshot = fullOrder.bone.customerName
 
                                         // You may want ticketNumber here – for now this still uses DB id:
-                                        PrinterManager.shared.printCashPointSplit(
-                                            orderNumber: fullOrder.id,
-                                            entries: entriesArray,
-                                            total: total,
-                                            diningMode: mode,
-                                            customerName: nameSnapshot,
-                                            customerPhone: nil
-                                        )
+                                        Task {
+                                            let ok = await PrinterManager.shared.printCashPointSplit(
+                                                orderNumber: fullOrder.id,
+                                                entries: entriesArray,
+                                                total: total,
+                                                diningMode: mode,
+                                                customerName: nameSnapshot,
+                                                customerPhone: nil
+                                            )
+
+                                            if !ok {
+                                                print("❌ printCashPointSplit failed for order \(fullOrder.id)")
+                                            }
+                                        }
                                     },
                                     onResendMessage: {
                                         // 🔁 Re-trigger the same READY status → will resend WA + push

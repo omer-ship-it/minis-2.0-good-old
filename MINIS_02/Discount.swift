@@ -15,8 +15,6 @@ struct StudentDiscountView: View {
     @Environment(\.isRtl) private var isRtl
     @Environment(\.dismiss) private var dismiss
 
-    @State private var showStoreSheet = false
-
     private let textColor = Color(hex: "#324E57")
     private let bgColor   = Color(hex: "#D2C1A5")
 
@@ -29,12 +27,12 @@ struct StudentDiscountView: View {
                 .font(.system(size: 72))
 
             Text("הטבת סטודנטים הופעלה")
-                .font(.primariesDemi(isRtl ? 26 : 28))
+                .font(.menuRegular(28).weight(.semibold))
                 .foregroundColor(textColor)
                 .multilineTextAlignment(.center)
 
-            Text("הנחה של \(discountPercent)% להזמנות באפליקציה")
-                .font(.primariesDemi(isRtl ? 18 : 20))
+            Text("הנחה של 10% להזמנות באפליקציה")
+                .font(.menuRegular(20).weight(.semibold))
                 .foregroundColor(textColor)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 28)
@@ -42,9 +40,11 @@ struct StudentDiscountView: View {
             Spacer()
 
             #if APPCLIP
-            // App Clip → keep your download flow
             Button {
-                showStoreSheet = true
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    StoreProductPresenter.shared.present(appId: 6737725110)
+                }
             } label: {
                 Text("להורדת האפליקציה")
                     .font(.primariesDemi(isRtl ? 17 : 18))
@@ -57,12 +57,11 @@ struct StudentDiscountView: View {
             .padding(.horizontal, 24)
             .padding(.bottom, 24)
             #else
-            // Full App → just continue (discount already active)
             Button {
                 dismiss()
             } label: {
                 Text("המשך לתפריט")
-                    .font(.primariesDemi(isRtl ? 17 : 18))
+                    .font(.menuRegular(18).weight(.semibold))
                     .foregroundColor(bgColor)
                     .frame(maxWidth: .infinity)
                     .frame(height: 56)
@@ -75,18 +74,9 @@ struct StudentDiscountView: View {
         }
         .environment(\.layoutDirection, .rightToLeft)
         .background(bgColor.ignoresSafeArea())
-
-        // ✅ THIS is the important part: make the discount live for Menu/Basket
-        .onAppear {
-            activateDiscountNow()
-        }
-
+        .onAppear { activateDiscountNow() }
         #if APPCLIP
         .interactiveDismissDisabled(true)
-        .fullScreenCover(isPresented: $showStoreSheet) {
-            StoreProductPresenter(appId: 6737725110)
-                .ignoresSafeArea()
-        }
         #endif
     }
 
@@ -155,98 +145,12 @@ struct CashPointURLWebView: UIViewRepresentable {
 }
 
 
-import SwiftUI
-import StoreKit
 
-struct AppStoreLoadingSheet: View {
-    let appId: Int
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            ZStack {
-                Color(.systemGroupedBackground).ignoresSafeArea()
-
-                // ✅ immediate UI (never blank)
-                VStack(spacing: 14) {
-                    ProgressView()
-                        .scaleEffect(1.2)
-                    Text("טוען את App Store…")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundColor(.primary)
-                    Text("עוד רגע ונפתח את העמוד")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                // ✅ this will present SKStoreProductViewController when ready
-                StoreProductPresenter(appId: appId)
-                    .frame(width: 0, height: 0)   // keep invisible
-            }
-            .navigationTitle("להורדת האפליקציה")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { dismiss() } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 16, weight: .bold))
-                            .padding(8)
-                            .background(Color(.systemGray5))
-                            .clipShape(Circle())
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-        }
-    }
-}
 
 import SwiftUI
 import StoreKit
 
-struct StoreProductPresenter: UIViewControllerRepresentable {
-    let appId: Int  // numeric id, e.g. 6737725110
-    @Environment(\.dismiss) private var dismiss
 
-    final class Coordinator: NSObject, SKStoreProductViewControllerDelegate {
-        let parent: StoreProductPresenter
-        init(_ parent: StoreProductPresenter) { self.parent = parent }
-        func productViewControllerDidFinish(_ viewController: SKStoreProductViewController) {
-            viewController.dismiss(animated: true) {
-                self.parent.dismiss() // close the SwiftUI cover too
-            }
-        }
-    }
-
-    func makeCoordinator() -> Coordinator { Coordinator(self) }
-
-    func makeUIViewController(context: Context) -> UIViewController {
-        // A plain host VC that will present the Store VC modally (required by Apple).
-        let host = UIViewController()
-        host.view.backgroundColor = .clear
-
-        let storeVC = SKStoreProductViewController()
-        storeVC.delegate = context.coordinator
-
-        let params = [SKStoreProductParameterITunesItemIdentifier: NSNumber(value: appId)]
-        storeVC.loadProduct(withParameters: params) { loaded, error in
-            DispatchQueue.main.async {
-                if let error = error {
-                    print("❌ Store load error:", error.localizedDescription)
-                    self.dismiss()
-                    return
-                }
-                // Present modally (complies with SKStoreProductViewController rules)
-                host.present(storeVC, animated: true, completion: nil)
-            }
-        }
-
-        return host
-    }
-
-    func updateUIViewController(_ uiViewController: UIViewController, context: Context) {}
-}
 
 struct StudentClaim: Identifiable, Codable, Equatable {
 
@@ -368,23 +272,39 @@ struct MembersClubView: View {
     let stampEarnedNow: Int
     @State private var marketingOptIn: Bool = false
 
-    @State private var showStoreSheet = false
     @State private var isSending = false
     @State private var sendError: String? = nil
 
     @State private var name: String = ""
     @State private var email: String = ""
-    @State private var birthDay: Int = 1
-    @State private var birthMonth: Int = 1
+    @State private var birthDay: Int? = nil
+    @State private var birthMonth: Int? = nil
+
+    // ✅ keyboard-aware
+    @State private var keyboardHeight: CGFloat = 0
 
     @FocusState private var focusedField: Field?
     private enum Field { case name, email }
 
-    private let textColor = Color(hex: "#324E57")
-    private let bgColor   = Color(hex: "#D2C1A5")
-    
     @Environment(\.dismiss) private var dismiss
-    var openStoreOnSubmit: Bool = false 
+
+    // ✅ Theme
+    private var accent: Color { MenuTheme.accent }
+    private var accentUi: UIColor { UIColor(accent) }
+    private var placeholderUi: UIColor { UIColor(accent).withAlphaComponent(0.55) }
+    private var underline: Color { accent.opacity(0.35) }
+
+    private var shopName: String {
+        if miniAppId == 12 { return "בית העם" }
+        if miniAppId == 13 { return "Vitamin" }
+
+        let s = (UserDefaults.standard.string(forKey: "miniTitle") ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return s.isEmpty ? "החנות" : s
+    }
+
+    private var titleText: String { "החברים של \(shopName)" }
+    private var ctaText: String { "הצטרף לחברים של \(shopName)" }
 
     private var emailClean: String {
         email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -396,8 +316,9 @@ struct MembersClubView: View {
 
     private var canContinue: Bool {
         guard nameClean.count >= 2 else { return false }
-        // identity = email → require basic valid email
-        return emailClean.contains("@") && emailClean.contains(".")
+        guard emailClean.contains("@"), emailClean.contains(".") else { return false }
+        guard birthMonth != nil, birthDay != nil else { return false }
+        return true
     }
 
     private var hebrewMonthSymbols: [String] {
@@ -406,267 +327,338 @@ struct MembersClubView: View {
         return cal.monthSymbols
     }
 
-    private var monthNameHe: String {
-        let idx = max(1, min(12, birthMonth)) - 1
-        return hebrewMonthSymbols[idx]
-    }
-    
     private func membersFontName() -> String {
-        if let stored = UserDefaults.standard.string(forKey: "fontName"),
-           !stored.isEmpty,
-           stored != "System" {
-            return stored
-        }
-        return primariesFontName
+        return menuFontName()
     }
-    var body: some View {
-        VStack(spacing: 22) {
+
+    private var monthLabel: String {
+        if let m = birthMonth {
+            return "חודש: \(hebrewMonthSymbols[m - 1])"
+        } else {
+            return "בחר חודש"
+        }
+    }
+
+    private var dayLabel: String {
+        if let d = birthDay {
+            return "יום: \(d)"
+        } else {
+            return "בחר יום"
+        }
+    }
+
+    @ViewBuilder
+    private func benefitRow(icon: String, text: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+
+            Image(systemName: icon)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundColor(accent)
+                .frame(width: 20)
+
+            Text(text)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
 
             Spacer()
+        }
+    }
 
-            Text("☕️")
-                .font(.system(size: 72))
+    var body: some View {
+        ZStack {
+            Color.clear.ignoresSafeArea()
 
-            Text("החברים של בית העם")
-                .font(.primariesDemi(30))
-                .foregroundColor(textColor)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: .infinity)
-
-            Text("הרווחת חותמת אחת — כל קפה 10 עלינו")
-                .font(.primariesDemi(17))
-                .foregroundColor(textColor.opacity(0.90))
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 28)
-                .frame(maxWidth: .infinity)
-
-            VStack(spacing: 18) {
-
-                UnderlineRTLTextField(
-                    placeholder: "שם מלא",
-                    text: $name,
-                    keyboard: .default,
-                    returnKey: .next,
-                    textContentType: .name,
-                    autocap: .words,
-                    fontName: membersFontName(),   // 👈 now resolved here
-                    fontSize: 17,
-                    onReturn: { focusedField = .email }
-                )
-
-                UnderlineRTLTextField(
-                    placeholder: "אימייל",
-                    text: $email,
-                    keyboard: .emailAddress,
-                    returnKey: .done,
-                    textContentType: .emailAddress,
-                    autocap: .none,
-                    fontName: membersFontName(),
-                    fontSize: 17,
-                    onReturn: { focusedField = nil }
-                )
-                .focused($focusedField, equals: .email)
-
-                Text("יום הולדת")
-                    .font(.primariesDemi(17))
-                    .foregroundColor(textColor.opacity(0.9))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .multilineTextAlignment(.leading)
-
-                // format: חודש: ינואר   יום: 3
-                HStack(spacing: 18) {
-
-                    Menu {
-                        ForEach(1...12, id: \.self) { m in
-                            Button(hebrewMonthSymbols[m-1]) { birthMonth = m }
-                        }
-                    } label: {
-                        underlineMenuLabel("חודש: \(monthNameHe)")
+            // ✅ XMARK top-leading (always)
+            VStack {
+                HStack {
+                    Button { dismiss() } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundColor(.primary)
+                            .frame(width: 34, height: 34)
+                            .background(.ultraThinMaterial)
+                            .clipShape(Circle())
                     }
                     .buttonStyle(.plain)
-                    .environment(\.layoutDirection, .rightToLeft)
-
-                    Menu {
-                        ForEach(1...31, id: \.self) { d in
-                            Button("\(d)") { birthDay = d }
-                        }
-                    } label: {
-                        underlineMenuLabel("יום: \(birthDay)")
-                    }
-                    .buttonStyle(.plain)
-                    .environment(\.layoutDirection, .rightToLeft)
-                }
-                .environment(\.layoutDirection, .rightToLeft)
-
-                if let err = sendError {
-                    Text(err)
-                        .font(.primariesDemi(14))
-                        .foregroundColor(.red.opacity(0.9))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
-            .padding(.horizontal, 28)
-            .environment(\.layoutDirection, .rightToLeft)
-            .padding(.top, 8)
-            
-            Button {
-                marketingOptIn.toggle()
-                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            } label: {
-                HStack(spacing: 10) {
-                    Image(systemName: marketingOptIn ? "checkmark.square.fill" : "square")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundColor(textColor)
-
-                   
-                    Text("מאשר/ת לקבל עדכונים והטבות מבית העם במייל")
-                        .font(.primariesDemi(13))
-                        
-                        .foregroundColor(textColor.opacity(0.85))
-                        .fixedSize(horizontal: false, vertical: true)
 
                     Spacer()
                 }
+                .padding(.horizontal, 16)
+                .padding(.top, 14)
+
+                Spacer()
             }
-            .padding(20)
-            .buttonStyle(.plain)
-            .contentShape(Rectangle())
-            .padding(.top, 2)
+            .zIndex(50)
 
-            Spacer()
+            ScrollView {
+                VStack(spacing: 22) {
 
-            Button {
-                guard !isSending else { return }
-                isSending = true
-                sendError = nil
+                    Spacer().frame(height: 18)
 
-                // 1) Save locally (always)
-                persistMemberJoin()
+                    Text("☕️")
+                        .font(.system(size: 72))
 
-                // ✅ 2) Dismiss the members sheet right away
-                dismiss()
+                    Text(titleText)
+                        .font(.menuRegular(30).weight(.semibold))
+                        .foregroundColor(accent)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity)
 
-                // 3) Fire-and-forget (don’t block UI)
-                identifyMemberByEmail { ok, msg in
-                    DispatchQueue.main.async {
-                        // no UI now (view is dismissed). Just log if needed.
-                        if !ok {
-                            print("❌ members/join failed:", msg ?? "unknown")
+                    VStack(alignment: .leading, spacing: 10) {
+                        benefitRow(icon: "cup.and.saucer.fill", text: "כל קפה 10 עלינו")
+                        benefitRow(icon: "clock.fill", text: "30% על כל מוצרי המאפה בין 16:00–17:00")
+                        benefitRow(icon: "gift.fill", text: "שובר יום הולדת 50% הנחה")
+                    }
+                    .font(.menuRegular(16).weight(.semibold))
+                    .foregroundColor(accent.opacity(0.9))
+                    .frame(maxWidth: 420, alignment: .leading)
+                    .padding(.horizontal, 28)
+
+                    VStack(spacing: 18) {
+                        UnderlineRTLTextField(
+                            placeholder: "שם מלא",
+                            text: $name,
+                            keyboard: .default,
+                            returnKey: .next,
+                            textContentType: .name,
+                            autocap: .words,
+                            fontName: membersFontName(),
+                            fontSize: 17,
+                            onReturn: { focusedField = .email },
+                            textColor: accentUi,
+                            underlineColor: underline,
+                            placeholderColor: placeholderUi
+                        )
+                        .focused($focusedField, equals: .name)
+
+                        UnderlineRTLTextField(
+                            placeholder: "אימייל",
+                            text: $email,
+                            keyboard: .emailAddress,
+                            returnKey: .done,
+                            textContentType: .emailAddress,
+                            autocap: .none,
+                            fontName: membersFontName(),
+                            fontSize: 17,
+                            onReturn: { focusedField = nil },
+                            textColor: accentUi,
+                            underlineColor: underline,
+                            placeholderColor: placeholderUi
+                        )
+                        .focused($focusedField, equals: .email)
+
+                        Text("יום הולדת")
+                            .font(.menuRegular(17).weight(.semibold))
+                            .foregroundColor(accent.opacity(0.9))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                        HStack(spacing: 18) {
+
+                            Menu {
+                                ForEach(1...12, id: \.self) { m in
+                                    Button(hebrewMonthSymbols[m - 1]) { birthMonth = m }
+                                }
+                            } label: {
+                                underlineMenuLabel(monthLabel)
+                            }
+                            .buttonStyle(.plain)
+                            .environment(\.layoutDirection, .rightToLeft)
+
+                            Menu {
+                                ForEach(1...31, id: \.self) { d in
+                                    Button("\(d)") { birthDay = d }
+                                }
+                            } label: {
+                                underlineMenuLabel(dayLabel)
+                            }
+                            .buttonStyle(.plain)
+                            .environment(\.layoutDirection, .rightToLeft)
+                        }
+                        .environment(\.layoutDirection, .rightToLeft)
+
+                        if let err = sendError {
+                            Text(err)
+                                .font(.menuRegular(14).weight(.semibold))
+                                .foregroundColor(.red.opacity(0.9))
+                                .frame(maxWidth: .infinity, alignment: .leading)
                         }
                     }
-                }
+                    .padding(.horizontal, 28)
+                    .environment(\.layoutDirection, .rightToLeft)
+                    .padding(.top, 8)
 
-            }  label: {
-                ZStack {
-                    Text("הצטרף לחברים של בית העם")
-                        .font(.primariesDemi(18))
-                        .foregroundColor(bgColor)
-                        .opacity(isSending ? 0 : 1)
+                    Button {
+                        marketingOptIn.toggle()
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: marketingOptIn ? "checkmark.square.fill" : "square")
+                                .font(.system(size: 18, weight: .semibold))
+                                .foregroundColor(accent)
 
-                    if isSending {
-                        ProgressView()
-                            .tint(bgColor)
+                            Text("מאשר/ת לקבל עדכונים והטבות מ-\(shopName) במייל")
+                                .font(.menuRegular(13).weight(.semibold))
+                                .foregroundColor(accent.opacity(0.85))
+                                .fixedSize(horizontal: false, vertical: true)
+
+                            Spacer()
+                        }
                     }
+                    .padding(20)
+                    .buttonStyle(.plain)
+                    .contentShape(Rectangle())
+                    .padding(.top, 2)
+
+                    // ✅ this is the key: when keyboard appears, add extra bottom padding so fields can scroll above CTA
+                    Spacer().frame(height: (keyboardHeight > 0) ? (keyboardHeight + 40) : 120)
                 }
-                .frame(maxWidth: .infinity)
-                .frame(height: 56)
-                .background(textColor.opacity(canContinue && !isSending ? 1 : 0.45))
-                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             }
-            .disabled(!canContinue || isSending)
-            .padding(.horizontal, 24)
-            .padding(.bottom, 24)
+            .scrollIndicators(.hidden)
+            .animation(.easeOut(duration: 0.25), value: keyboardHeight)
+        }
+
+        // ✅ fixed CTA pinned to bottom
+        .safeAreaInset(edge: .bottom) {
+            VStack {
+                Button {
+                    guard !isSending else { return }
+                    isSending = true
+                    sendError = nil
+
+                    persistMemberJoin()
+                    dismiss()
+
+                    identifyMemberByEmail { ok, msg in
+                        DispatchQueue.main.async {
+                            if !ok {
+                                print("❌ members/join failed:", msg ?? "unknown")
+                            }
+                        }
+                    }
+                } label: {
+                    ZStack {
+                        Text(ctaText)
+                            .font(.menuRegular(18).weight(.semibold))
+                            .foregroundColor(.white)
+                            .opacity(isSending ? 0 : 1)
+
+                        if isSending {
+                            ProgressView().tint(.white)
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 56)
+                    .background(
+                        canContinue && !isSending
+                        ? MenuTheme.buttonBackground
+                        : Color(.systemGray4)                
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
+                .disabled(!canContinue || isSending)
+                .padding(.horizontal, 24)
+                .padding(.top, 10)
+                .padding(.bottom, 16)
+            }
+            .background(.clear)
         }
         .environment(\.layoutDirection, .rightToLeft)
         .environment(\.locale, Locale(identifier: "he_IL"))
-        .background(bgColor.ignoresSafeArea())
         .interactiveDismissDisabled(false)
         .onAppear {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                focusedField = .name
+            focusedField = nil   // ✅ no auto focus
+
+            // ✅ keyboard observers (push scroll content above CTA)
+            NotificationCenter.default.addObserver(
+                forName: UIResponder.keyboardWillChangeFrameNotification,
+                object: nil,
+                queue: .main
+            ) { notif in
+                guard let frame = notif.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
+                let screenH = UIScreen.main.bounds.height
+                let overlap = max(0, screenH - frame.minY)
+                keyboardHeight = overlap
+            }
+
+            NotificationCenter.default.addObserver(
+                forName: UIResponder.keyboardWillHideNotification,
+                object: nil,
+                queue: .main
+            ) { _ in
+                keyboardHeight = 0
             }
         }
-        .fullScreenCover(isPresented: $showStoreSheet) {
-            StoreProductPresenter(appId: 6737725110)
-                .ignoresSafeArea()
-                .background(bgColor)
-                .environment(\.layoutDirection, .rightToLeft)
-                .environment(\.locale, Locale(identifier: "he_IL"))
+        .onDisappear {
+            NotificationCenter.default.removeObserver(self)
         }
     }
 
     private func underlineMenuLabel(_ text: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-              
                 Text(text)
-                    .font(.primariesDemi(16))
-                    .foregroundColor(textColor)
+                    .font(.menuRegular(16).weight(.semibold))
+                    .foregroundColor(accent)
                 Spacer()
             }
             Rectangle()
-                .fill(Color.primary.opacity(0.35))
+                .fill(underline)
                 .frame(height: 1)
         }
         .padding(.vertical, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    // MARK: - Local persist (App Group ready later)
+    // MARK: - Local persist
     private func persistMemberJoin() {
-        // ✅ birthday fields
-        let mm = String(format: "%02d", birthMonth)
-        let dd = String(format: "%02d", birthDay)
+        guard let bm = birthMonth, let bd = birthDay else { return }
+
+        let mm = String(format: "%02d", bm)
+        let dd = String(format: "%02d", bd)
         let birthdayMMDD = "\(mm)-\(dd)"
 
-        // ✅ stable anon id (best-effort)
         let anon = UserDefaults.standard.string(forKey: "anonUUID") ?? UUID().uuidString
         UserDefaults.standard.set(anon, forKey: "anonUUID")
         UserDefaults.standard.set(nameClean, forKey: "userName")
-        // ✅ build local member profile (what MenuView reads)
+        UserDefaults.standard.set(emailClean, forKey: "userEmail")
+
+        let stamps = max(1, min(10, stampEarnedNow))
+
         var profile: [String: Any] = [
             "miniAppId": miniAppId,
             "campaignId": campaignId,
             "name": nameClean,
             "email": emailClean,
             "birthdayMMDD": birthdayMMDD,
-            "birthMonth": birthMonth,
-            "birthDay": birthDay,
+            "birthMonth": bm,
+            "birthDay": bd,
             "anonId": anon,
             "createdAt": Date().timeIntervalSince1970,
-
-            // ✅ wallet defaults (min 1 stamp)
             "wallet": [
-                "stamps": max(1, min(10, stampEarnedNow)),
+                "stamps": stamps,
                 "redeems": 0,
                 "birthdayVoucherRedeemedYear": 0
-            ]
+            ],
+            "stamps": stamps,
+            "marketingOptIn": marketingOptIn
         ]
-        profile["stamps"] = max(1, min(10, stampEarnedNow))
-        // ✅ marketing consent
-        profile["marketingOptIn"] = marketingOptIn
+
         if marketingOptIn {
-            profile["marketingConsentAt"] = Int(Date().timeIntervalSince1970)     // unix seconds
+            profile["marketingConsentAt"] = Int(Date().timeIntervalSince1970)
             profile["marketingConsentSource"] = "members_join_ios"
-        } else {
-            // keep it clean / compliant
-            profile.removeValue(forKey: "marketingConsentAt")
-            profile.removeValue(forKey: "marketingConsentSource")
         }
 
-        // ✅ Save locally
         UserDefaults.standard.set(profile, forKey: "memberProfileLocal")
-
-        // ✅ Optional: keep pending join payload for retry/debug
         UserDefaults.standard.set(profile, forKey: "pendingMemberJoin")
-
-        // ✅ force UI refresh across app
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "members.updatedAt")
     }
+
     // MARK: - Server call
     private func identifyMemberByEmail(completion: @escaping (Bool, String?) -> Void) {
-        let mm = String(format: "%02d", birthMonth)
-        let dd = String(format: "%02d", birthDay)
+        guard let bm = birthMonth, let bd = birthDay else { return }
+
+        let mm = String(format: "%02d", bm)
+        let dd = String(format: "%02d", bd)
         let birthdayMMDD = "\(mm)-\(dd)"
 
         let anon = UserDefaults.standard.string(forKey: "anonUUID") ?? UUID().uuidString
@@ -698,11 +690,10 @@ struct MembersClubView: View {
             "email": emailClean,
             "name": nameClean,
             "birthdayMMDD": birthdayMMDD,
-            "birthMonth": birthMonth,          // ✅ ADD
-            "birthDay": birthDay               // ✅ ADD
+            "birthMonth": bm,
+            "birthDay": bd
         ]
 
-        // ✅ ADD: marketing consent
         payload["marketingOptIn"] = marketingOptIn
         if marketingOptIn {
             payload["marketingConsentAt"] = Int(Date().timeIntervalSince1970)
@@ -710,16 +701,11 @@ struct MembersClubView: View {
         }
 
         req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
-        
+
         URLSession.shared.dataTask(with: req) { data, resp, err in
-            if let err = err {
-                completion(false, err.localizedDescription)
-                return
-            }
-            guard let http = resp as? HTTPURLResponse else {
-                completion(false, "No response")
-                return
-            }
+            if let err = err { completion(false, err.localizedDescription); return }
+            guard let http = resp as? HTTPURLResponse else { completion(false, "No response"); return }
+
             if (200...299).contains(http.statusCode) {
                 completion(true, nil)
             } else {
@@ -743,6 +729,11 @@ private struct UnderlineRTLTextField: View {
     var fontSize: CGFloat = 17
     var onReturn: (() -> Void)? = nil
 
+    // ✅ NEW: explicit colors
+    var textColor: UIColor
+    var underlineColor: Color
+    var placeholderColor: UIColor
+
     var body: some View {
         VStack(alignment: .trailing, spacing: 6) {
             RTLUITextField(
@@ -754,12 +745,14 @@ private struct UnderlineRTLTextField: View {
                 autocap: autocap,
                 fontName: fontName,
                 fontSize: fontSize,
-                onReturn: onReturn
+                onReturn: onReturn,
+                textColor: textColor,
+                placeholderColor: placeholderColor
             )
             .frame(height: 30)
 
             Rectangle()
-                .fill(Color.primary.opacity(0.35))
+                .fill(underlineColor)
                 .frame(height: 1)
         }
         .frame(maxWidth: .infinity, alignment: .trailing)
@@ -777,6 +770,10 @@ private struct RTLUITextField: UIViewRepresentable {
     let fontName: String
     let fontSize: CGFloat
     let onReturn: (() -> Void)?
+
+    // ✅ NEW
+    let textColor: UIColor
+    let placeholderColor: UIColor
 
     final class Coordinator: NSObject, UITextFieldDelegate {
         var parent: RTLUITextField
@@ -798,9 +795,6 @@ private struct RTLUITextField: UIViewRepresentable {
         let tf = UITextField()
         tf.delegate = context.coordinator
 
-        tf.placeholder = placeholder
-        tf.text = text
-
         tf.semanticContentAttribute = .forceRightToLeft
         tf.textAlignment = .right
 
@@ -811,23 +805,36 @@ private struct RTLUITextField: UIViewRepresentable {
         tf.autocorrectionType = .no
         tf.spellCheckingType = .no
         tf.clearButtonMode = .whileEditing
-        tf.textColor = UIColor(Color(hex: "#324E57"))
-        tf.tintColor = UIColor(Color(hex: "#324E57")) // cursor
-        
+
+        // ✅ force colors (works in dark mode too)
+        tf.textColor = textColor
+        tf.tintColor = textColor // cursor
+
+        tf.attributedPlaceholder = NSAttributedString(
+            string: placeholder,
+            attributes: [.foregroundColor: placeholderColor]
+        )
+
         tf.font = UIFont(name: fontName, size: fontSize)
             ?? UIFont.systemFont(ofSize: fontSize, weight: .semibold)
 
-        tf.addTarget(context.coordinator,
-                     action: #selector(Coordinator.changed(_:)),
-                     for: .editingChanged)
+        tf.addTarget(context.coordinator, action: #selector(Coordinator.changed(_:)), for: .editingChanged)
         return tf
     }
 
     func updateUIView(_ tf: UITextField, context: Context) {
         if tf.text != text { tf.text = text }
-        tf.placeholder = placeholder
+
         tf.semanticContentAttribute = .forceRightToLeft
         tf.textAlignment = .right
+
+        // ✅ keep colors stable
+        tf.textColor = textColor
+        tf.tintColor = textColor
+        tf.attributedPlaceholder = NSAttributedString(
+            string: placeholder,
+            attributes: [.foregroundColor: placeholderColor]
+        )
 
         let desired = UIFont(name: fontName, size: fontSize)
             ?? UIFont.systemFont(ofSize: fontSize, weight: .semibold)
@@ -836,7 +843,6 @@ private struct RTLUITextField: UIViewRepresentable {
         }
     }
 }
-
 struct UnderlineTextField: View {
     let title: String
     @Binding var text: String
@@ -846,7 +852,7 @@ struct UnderlineTextField: View {
     var body: some View {
         VStack(alignment: .trailing, spacing: 6) {
             TextField(title, text: $text)
-                .font(.primariesDemi(16))
+                .font(.menuRegular(16).weight(.regular))
                 .multilineTextAlignment(.trailing)
                 .keyboardType(keyboard)
                 .textInputAutocapitalization(autocap)
@@ -855,6 +861,215 @@ struct UnderlineTextField: View {
             Rectangle()
                 .fill(Color.primary.opacity(0.35))
                 .frame(height: 1)
+        }
+    }
+}
+import SwiftUI
+import UIKit
+import StoreKit
+
+struct AppStoreSheet: UIViewControllerRepresentable {
+    let appId: Int
+    @Binding var isPresented: Bool
+
+    func makeCoordinator() -> Coordinator { Coordinator(isPresented: $isPresented) }
+
+    func makeUIViewController(context: Context) -> SKStoreProductViewController {
+        let vc = SKStoreProductViewController()
+        vc.delegate = context.coordinator
+
+        let params: [String: Any] = [
+            SKStoreProductParameterITunesItemIdentifier: NSNumber(value: appId)
+        ]
+
+        vc.loadProduct(withParameters: params) { loaded, error in
+            if let error = error {
+                print("❌ Store product load error:", error)
+            } else {
+                print("✅ Store product loaded:", loaded)
+            }
+        }
+
+        return vc
+    }
+
+    func updateUIViewController(_ uiViewController: SKStoreProductViewController, context: Context) {}
+
+    final class Coordinator: NSObject, SKStoreProductViewControllerDelegate {
+        private var isPresented: Binding<Bool>
+
+        init(isPresented: Binding<Bool>) {
+            self.isPresented = isPresented
+        }
+
+        func productViewControllerDidFinish(_ viewController: SKStoreProductViewController) {
+            // ✅ close SwiftUI sheet
+            isPresented.wrappedValue = false
+        }
+    }
+}
+
+import UIKit
+import StoreKit
+
+@MainActor
+final class StoreProductPresenter: NSObject, SKStoreProductViewControllerDelegate {
+
+    static let shared = StoreProductPresenter()
+
+    private var isPresenting = false
+
+    func present(appId: Int) {
+        guard !isPresenting else { return }
+        guard let top = Self.topMostViewController() else {
+            print("❌ StoreProductPresenter: No top VC to present from")
+            return
+        }
+
+        isPresenting = true
+
+        let storeVC = SKStoreProductViewController()
+        storeVC.delegate = self
+        storeVC.modalPresentationStyle = .pageSheet
+
+        let params: [String: Any] = [
+            SKStoreProductParameterITunesItemIdentifier: NSNumber(value: appId)
+        ]
+
+        storeVC.loadProduct(withParameters: params) { loaded, error in
+            if let error = error {
+                print("❌ Store product load error:", error)
+            } else {
+                print("✅ Store product loaded:", loaded)
+            }
+        }
+
+        top.present(storeVC, animated: true)
+    }
+
+    func productViewControllerDidFinish(_ viewController: SKStoreProductViewController) {
+        viewController.dismiss(animated: true) { [weak self] in
+            self?.isPresenting = false
+        }
+    }
+
+    private static func topMostViewController() -> UIViewController? {
+        let scenes = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .filter { $0.activationState == .foregroundActive || $0.activationState == .foregroundInactive }
+
+        guard let scene = scenes.first else { return nil }
+
+        let keyWindow = scene.windows.first(where: { $0.isKeyWindow }) ?? scene.windows.first
+        guard var top = keyWindow?.rootViewController else { return nil }
+
+        while let presented = top.presentedViewController {
+            top = presented
+        }
+
+        if let nav = top as? UINavigationController {
+            return nav.visibleViewController ?? nav
+        }
+        if let tab = top as? UITabBarController {
+            return tab.selectedViewController ?? tab
+        }
+
+        return top
+    }
+}
+
+import SwiftUI
+import StoreKit
+
+struct LoyaltyInstallView: View {
+    let earnedStamps: Int
+    @State private var showOverlay = false
+
+    var body: some View {
+        ZStack {
+            Color(.systemBackground).ignoresSafeArea()
+
+            VStack(spacing: 18) {
+
+                // HERO IMAGE
+                Image("loyalty-coffee")
+                    .resizable()
+                    .scaledToFill()
+                    .frame(height: 260)
+                    .clipped()
+                    .clipShape(
+                        RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    )
+                    .padding(.top, 8)
+
+                // CONTENT CARD
+                VStack(spacing: 14) {
+
+                    // TITLE
+                    Text("החברים של בית העם")
+                        .font(.menuRegular(17).weight(.semibold))
+                        .foregroundStyle(.primary)
+
+                    // VALUE
+                    Text("כל קפה עשירי עלינו")
+                        .font(.menuRegular(30).weight(.semibold))
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(.primary)
+
+                    // STAMPS ROW
+                  
+
+                    // STATUS TEXT
+                    Text("הרווחת \(earnedStamps) חותמות")
+                        .font(.menuRegular(20).weight(.semibold))
+                        .foregroundStyle(.secondary)
+
+                    
+                    HStack(spacing: 10) {
+                        ForEach(0..<earnedStamps, id: \.self) { _ in
+                            Image(systemName: "cup.and.saucer.fill")
+                                .font(.menuRegular(22).weight(.semibold))
+                        }
+                    }
+                    .padding(.top, 2)
+                    // CTA
+                    Button {
+                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                            StoreProductPresenter.shared.present(appId: 6737725110)
+                        }
+                    } label: {
+                        Text("שמירה בכרטיסייה")
+                            .font(.menuRegular(18).weight(.semibold))
+                            .foregroundColor(.black)                 // ✅ always black
+                            .frame(maxWidth: .infinity, minHeight: 56)
+                            .background(
+                                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                    .fill(Color(hex: "#D2C1A5"))     // ✅ your beige (or any)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 6)
+                  
+                
+                }
+                .padding(.vertical, 20)
+                .padding(.horizontal, 18)
+                .background(.regularMaterial)
+                .clipShape(
+                    RoundedRectangle(cornerRadius: 24, style: .continuous)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 24, style: .continuous)
+                        .strokeBorder(.quaternary, lineWidth: 1)
+                )
+
+                Spacer(minLength: 12)
+            }
+            .padding(.horizontal, 16)
+        }
+        .appStoreOverlay(isPresented: $showOverlay) {
+            SKOverlay.AppClipConfiguration(position: .bottom)
         }
     }
 }

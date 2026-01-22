@@ -1,0 +1,14 @@
+.simultaneousGesture(
+    TapGesture()
+        .onEnded {
+            guard !cashPointMode else { return }
+            registerInteraction()
+        }
+)
+.simultaneousGesture(
+    DragGesture(minimumDistance: 10)   // ✅ not 0
+        .onChanged { _ in
+            guard !cashPointMode else { return }
+            registerInteraction()
+        }
+)

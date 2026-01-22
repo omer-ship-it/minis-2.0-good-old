@@ -1,4 +1,4 @@
-import SwiftUI
+
 import UniformTypeIdentifiers
 import Kingfisher
 import Combine
@@ -25,22 +25,44 @@ struct CashPointView: View {
     @State private var lastOrder: CashOrderSnapshot?
     @State private var diningMode: DiningMode = .dineIn
     @State private var showOrderFlow = false
-    @State private var editingLineId: Int? = nil
+    @State private var editzingLineId: Int? = nil
     @State private var swipingProductId: Int? = nil
     @State private var outOfStockProductIds: Set<Int> = []
     @State private var draggingProduct: ShellMenuItem?
     @State private var hasChosenServiceMode: Bool = false
     @State private var showLastInvoicePrompt: Bool = false
     @State private var zRestoreMode: Bool = false
+    @AppStorage(AppSettings.Key.cashPointMode) private var cashPointMode: Bool = AppSettings.Defaults.cashPointMode
     @State private var zRestoreDate: Date = Calendar.current.date(byAdding: .day, value: -1, to: Date()) ?? Date()
     @StateObject private var net = NetworkMonitor.shared
     private var isTeamTabMode: Bool { activeTeamTab != nil }
     @State private var pendingFinishAfterSubmit: Bool = false
     @State private var showClearStockConfirm = false
+    @State private var isCategoryReorderMode: Bool = false
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.presentationMode) private var presentationMode
     @StateObject private var stockToggles = StockToggleStore(
         shopId: 12   // 👈 hard-coded miniAppId
     )
     
+    private func goBack() {
+        // If menu is open, close it first (feels natural)
+        if showSideMenu {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                showSideMenu = false
+            }
+            return
+        }
+
+        // If we're inside a NavigationStack push, pop
+        if presentationMode.wrappedValue.isPresented {
+            presentationMode.wrappedValue.dismiss()
+            return
+        }
+
+        // Otherwise, if it's a modal (sheet / fullScreenCover), dismiss
+        dismiss()
+    }
     private var isPhoneDevice: Bool {
         UIDevice.current.userInterfaceIdiom == .phone
     }
@@ -362,7 +384,7 @@ struct CashPointView: View {
     }
     
     private func buildSalesReportData(for type: ReportType) -> PrinterManager.SalesReportData {
-        emptySalesReportData()   // ✅ always start blank
+        return emptySalesReportData()
     }
     
     
@@ -426,8 +448,10 @@ struct CashPointView: View {
             DispatchQueue.main.async {
                 switch res {
                 case .success:
-                    activeTeamTab = nil
-                    isPayLaterMode = false
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                        activeTeamTab = nil
+                        isPayLaterMode = false
+                    }
                     unpaidOrderId = nil
                     lockedLineIds.removeAll()
                     lineSessionTime.removeAll()
@@ -537,10 +561,10 @@ struct CashPointView: View {
         }
 
         // All current lines are now “sent”
-        lockedLineIds = Set(entriesArray.map { $0.id })
+       
 
         // Green check overlay immediately
-        playPrintSuccess()
+       // playPrintSuccess()
         print(phoneSnapshot)
         // (Optional) snapshot for confirmation / debugging
         lastOrder = CashOrderSnapshot(
@@ -555,14 +579,34 @@ struct CashPointView: View {
         // 🔹 2) FIRE & FORGET: print + submit to server in the background
 
         // Print only the new lines
-        PrinterManager.shared.printCashPointSplit(
-            orderNumber: existingId,
-            entries: newEntries,
-            total: newTotal,
-            diningMode: mode,
-            customerName: nameSnapshot,
-            customerPhone: phoneSnapshot
-        )
+        Task {
+            let ok = await PrinterManager.shared.printCashPointSplit(
+                orderNumber: existingId,
+                entries: newEntries,
+                total: newTotal,
+                diningMode: mode,
+                customerName: nameSnapshot,
+                customerPhone: phoneSnapshot
+            )
+
+            await MainActor.run {
+                if ok {
+                    lockedLineIds.formUnion(newEntries.map { $0.id })
+                    // ✅ ALL stations printed / queued successfully
+                    playPrintSuccess()
+                } else {
+                    // ❌ At least one station failed or expired
+                    print("❌ printCashPointSplit failed for order \(existingId)")
+
+                    Haptics.error()
+
+                    // 👇 pick ONE (recommended: outbox so staff can see which printer is pending)
+                    showOutboxLog = true
+                    // OR
+                    // showPrinterStatusSheet = true
+                }
+            }
+        }
         OrderAPI.submitOrder(
             orderId: existingId,
             entries: entriesArray,   // full basket → DB has full order
@@ -978,6 +1022,9 @@ struct CashPointView: View {
             .transition(.move(edge: .top).combined(with: .opacity))
         }
     }
+    private var basketNavTitle: String {
+        isTeamTabMode ? "שולחן צוות" : "קופה"
+    }
 
     @ViewBuilder
     private func basketPanel(inline: Bool) -> some View {
@@ -1158,48 +1205,61 @@ struct CashPointView: View {
                 HStack(spacing: 10) {
 
                     if isTeamTabMode {
-                        NewOrderButton(title: "נקה") {
-                            startNewOrderFromPayLater()
-                        }
-                        .buttonStyle(.plain)
-
-                        Button {
-                            closeActiveTeamTab()
-                        } label: {
-                            Text("סגור")
-                                .font(.system(size: 15, weight: .semibold))
-                                .foregroundColor(.primary)
-                                .frame(width: 90, height: 44)
-                                .background(Color(.systemGray5))
-                                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-
                         let canPrintNewLines = hasAddedLinesInPayLater
 
-                        Button {
-                            guard canPrintNewLines else { return }
+                        HStack(spacing: 12) {
 
-                            guard let _ = unpaidOrderId else {
-                                Haptics.error()
-                                print("⚠️ teamTab print blocked: unpaidOrderId missing")
-                                return
+                            // ⬅️ Back = same as "נקה"
+                            Button {
+                                Haptics.light()
+
+                                // ✅ iPhone: if basket is presented as a sheet, close it first
+                                if isPhoneLayout {
+                                    showBasketSheetPhone = false
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                                        startNewOrderFromPayLater()
+                                    }
+                                } else {
+                                    startNewOrderFromPayLater()
+                                }
+                            } label: {
+                                Image(systemName: "chevron.backward")
+                                    .font(.system(size: 18, weight: .bold))
+                                    .foregroundColor(.primary)
+                                    .frame(width: 44, height: 44)
+                                    .background(Color(.systemGray5))
+                                    .clipShape(Circle())
                             }
-                            printUpdatedUnpaidOrder()
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                                startNewOrderFromPayLater()
+                            .buttonStyle(.plain)
+
+                            // ✅ Full-width print
+                            Button {
+                                guard canPrintNewLines else { return }
+
+                                guard unpaidOrderId != nil else {
+                                    Haptics.error()
+                                    print("⚠️ teamTab print blocked: unpaidOrderId missing")
+                                    return
+                                }
+
+                                printUpdatedUnpaidOrder()
+
+                                // same behavior you had: after print, start fresh “new order”
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                                    startNewOrderFromPayLater()
+                                }
+                            } label: {
+                                Text(canPrintNewLines ? "הדפס" : "הודפס")
+                                    .font(.system(size: 18, weight: .bold))
+                                    .foregroundColor(.white)
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: 50)
+                                    .background(canPrintNewLines ? Color.black : Color.gray.opacity(0.35))
+                                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                             }
-                        } label: {
-                            Text(canPrintNewLines ? "הדפס" : "הודפס")
-                                .font(.system(size: 16, weight: .bold))
-                                .foregroundColor(.white)
-                                .frame(width: 110, height: 44)
-                                .background(canPrintNewLines ? Color.black : Color.gray.opacity(0.35))
-                                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .buttonStyle(.plain)
+                            .disabled(!canPrintNewLines)
                         }
-                        .buttonStyle(.plain)
-                        .disabled(!canPrintNewLines)
-
                     } else if isPayLaterMode {
 
                         NewOrderButton(title: "נקה הזמנה") {
@@ -1482,6 +1542,8 @@ struct CashPointView: View {
             }
         }
     }
+    
+    
     
     private struct ProductDropDelegate: DropDelegate {
         let target: ShellMenuItem
@@ -2813,7 +2875,6 @@ struct CashPointView: View {
     private var sideMenuPanel: some View {
         let menuWidth: CGFloat = 280
 
-        // small helper for full-width clickable row
         func fullRow(_ title: String, _ systemImage: String, action: @escaping () -> Void) -> some View {
             Button(action: action) {
                 HStack(spacing: 10) {
@@ -2827,15 +2888,15 @@ struct CashPointView: View {
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 14)
-                .frame(maxWidth: .infinity, alignment: .leading) // ✅ full width
-                .contentShape(Rectangle())                       // ✅ full hit area
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
         }
 
         return VStack(alignment: isRtl ? .trailing : .leading, spacing: 0) {
 
-            // HEADER
+            // 🔒 HEADER (fixed)
             HStack {
                 Text("בית העם")
                     .font(.system(size: 22, weight: .bold))
@@ -2859,164 +2920,153 @@ struct CashPointView: View {
             .padding(.top, 20)
             .padding(.bottom, 10)
 
-            // MENU ITEMS
-            VStack(alignment: isRtl ? .trailing : .leading, spacing: 0) {
+            Divider()
 
-                fullRow("הזמנות", "list.bullet.rectangle") {
-                    showSideMenu = false
-                    showOrdersAdmin = true
-                }
+            // ✅ SCROLLABLE CONTENT
+            ScrollView {
+                VStack(alignment: isRtl ? .trailing : .leading, spacing: 0) {
 
-                fullRow("בונים", "rectangle.grid.2x2") {
-                    showSideMenu = false
-                    showBones = true
-                }
-
-                fullRow("פתח מגירה", "tray.and.arrow.down") {
-                    PrinterManager.shared.openCashDrawer()
-                }
-
-                fullRow("זיכוי לקוח", "arrow.uturn.left.circle") {
-                    showSideMenu = false
-                    refundInput = ""
-                    showRefundFlow = true
-                }
-                
-               
-
-                // TEAM TABS parent row — FULL WIDTH CLICKABLE
-                Button {
-                    withAnimation(.spring(response: 0.25, dampingFraction: 0.9)) {
-                        teamTabsExpanded.toggle()
+                    fullRow("הזמנות", "list.bullet.rectangle") {
+                        showSideMenu = false
+                        showOrdersAdmin = true
                     }
-                } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: "person.2")
-                            .font(.system(size: 18))
 
-                        Text("שולחנות צוות")
-                            .font(.system(size: 18, weight: .medium))
-
-                        Spacer()
+                    fullRow("בונים", "rectangle.grid.2x2") {
+                        showSideMenu = false
+                        showBones = true
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 14)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
 
-                if teamTabsExpanded {
-                    VStack(alignment: isRtl ? .trailing : .leading, spacing: 0) {
-                        teamTabSubRow(.manager)
-                        teamTabSubRow(.conditur)
-                        teamTabSubRow(.kitchen)
-                        teamTabSubRow(.floor)
+                    fullRow("פתח מגירה", "tray.and.arrow.down") {
+                        PrinterManager.shared.openCashDrawer()
                     }
-                    .padding(.leading,  isRtl ? 0  : 32)
-                    .padding(.trailing, isRtl ? 32 : 0)
-                }
 
-                // REPORTS parent row — FULL WIDTH CLICKABLE
-                Button {
-                    withAnimation(.spring(response: 0.25, dampingFraction: 0.9)) {
-                        reportsExpanded.toggle()
+                    fullRow("זיכוי לקוח", "arrow.uturn.left.circle") {
+                        showSideMenu = false
+                        refundInput = ""
+                        showRefundFlow = true
                     }
-                } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: "doc.text.magnifyingglass")
-                            .font(.system(size: 18))
 
-                        Text("דוחות")
-                            .font(.system(size: 18, weight: .medium))
-
-                        Spacer()
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 14)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-
-                if reportsExpanded {
-                    VStack(alignment: isRtl ? .trailing : .leading, spacing: 0) {
-                        fullRow("דוח X", "doc.text") {
-                            showSideMenu = false
-                            prepareReportPreview(for: .x)
+                    // 🔽 TEAM TABS
+                    Button {
+                        withAnimation(.spring(response: 0.25, dampingFraction: 0.9)) {
+                            teamTabsExpanded.toggle()
                         }
-                        fullRow("דוח Z", "printer") {
-                            showSideMenu = false
-                            showZReportDialog = true
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "person.2")
+                                .font(.system(size: 18))
+                            Text("שולחנות צוות")
+                                .font(.system(size: 18, weight: .medium))
+                            Spacer()
                         }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 14)
+                        .contentShape(Rectangle())
                     }
-                    .padding(.leading,  isRtl ? 0  : 32)
-                    .padding(.trailing, isRtl ? 32 : 0)
-                }
-                
-                // ✅ PINPADS (parent row)
-                Button {
-                    withAnimation(.spring(response: 0.25, dampingFraction: 0.9)) {
-                        pinpadsExpanded.toggle()
+                    .buttonStyle(.plain)
+
+                    if teamTabsExpanded {
+                        VStack(alignment: isRtl ? .trailing : .leading, spacing: 0) {
+                            teamTabSubRow(.manager)
+                            teamTabSubRow(.conditur)
+                            teamTabSubRow(.kitchen)
+                            teamTabSubRow(.floor)
+                        }
+                        .padding(.leading, isRtl ? 0 : 32)
+                        .padding(.trailing, isRtl ? 32 : 0)
                     }
-                } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: "creditcard")
-                            .font(.system(size: 18))
 
-                        Text("מסופי אשראי")
-                            .font(.system(size: 18, weight: .medium))
-
-                        Spacer()
+                    // 🔽 REPORTS
+                    Button {
+                        withAnimation(.spring(response: 0.25, dampingFraction: 0.9)) {
+                            reportsExpanded.toggle()
+                        }
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "doc.text.magnifyingglass")
+                                .font(.system(size: 18))
+                            Text("דוחות")
+                                .font(.system(size: 18, weight: .medium))
+                            Spacer()
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 14)
+                        .contentShape(Rectangle())
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 14)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
+                    .buttonStyle(.plain)
 
-             
-                // 🔻 Suboptions under Pinpads
-                if pinpadsExpanded {
-                    VStack(alignment: isRtl ? .trailing : .leading, spacing: 0) {
-                        ForEach(pinpads, id: \.id) { item in
-                            Button {
+                    if reportsExpanded {
+                        VStack(alignment: isRtl ? .trailing : .leading, spacing: 0) {
+                            fullRow("דוח X", "doc.text") {
                                 showSideMenu = false
-                                setPinpadAndPing(item.id)
-                            } label: {
-                                HStack(spacing: 10) {
-                                    Image(systemName: item.id == currentPinpadId
-                                          ? "checkmark.circle.fill"
-                                          : "circle")
-                                        .foregroundColor(item.id == currentPinpadId ? .primary : .secondary)
-
-                                    Text(item.title)
-                                        .font(.system(size: 16, weight: .semibold))
-
-                                    Spacer()
-                                }
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 10)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .contentShape(Rectangle())
+                                prepareReportPreview(for: .x)
                             }
-                            .buttonStyle(.plain)
+                            fullRow("דוח Z", "printer") {
+                                showSideMenu = false
+                                showZReportDialog = true
+                            }
                         }
+                        .padding(.leading, isRtl ? 0 : 32)
+                        .padding(.trailing, isRtl ? 32 : 0)
                     }
-                    .padding(.leading,  isRtl ? 0  : 32)
-                    .padding(.trailing, isRtl ? 32 : 0)
-                }
-                
-                fullRow("הנחת סטודנטים", "graduationcap.fill") {
-                    showSideMenu = false
-                    showStudentHandshakeSheet = true
-                }
-               
-            }
-            .padding(.top, 8)
 
-            Spacer()
+                    // 🔽 PINPADS
+                    Button {
+                        withAnimation(.spring(response: 0.25, dampingFraction: 0.9)) {
+                            pinpadsExpanded.toggle()
+                        }
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "creditcard")
+                                .font(.system(size: 18))
+                            Text("מסופי אשראי")
+                                .font(.system(size: 18, weight: .medium))
+                            Spacer()
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 14)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+
+                    if pinpadsExpanded {
+                        VStack(alignment: isRtl ? .trailing : .leading, spacing: 0) {
+                            ForEach(pinpads, id: \.id) { item in
+                                Button {
+                                    showSideMenu = false
+                                    setPinpadAndPing(item.id)
+                                } label: {
+                                    HStack(spacing: 10) {
+                                        Image(systemName: item.id == currentPinpadId
+                                              ? "checkmark.circle.fill"
+                                              : "circle")
+                                        Text(item.title)
+                                            .font(.system(size: 16, weight: .semibold))
+                                        Spacer()
+                                    }
+                                    .padding(.horizontal, 16)
+                                    .padding(.vertical, 10)
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(.leading, isRtl ? 0 : 32)
+                        .padding(.trailing, isRtl ? 32 : 0)
+                    }
+
+                    fullRow("הנחת סטודנטים", "graduationcap.fill") {
+                        showSideMenu = false
+                        showStudentHandshakeSheet = true
+                    }
+
+                    fullRow("קופת שירות עצמי", "person.fill") {
+                        cashPointMode = false
+                    }
+                }
+                .padding(.top, 8)
+                .padding(.bottom, 24) // ✅ breathing room at bottom
+            }
         }
         .frame(width: menuWidth)
         .frame(maxHeight: .infinity)
@@ -3177,6 +3227,14 @@ struct CashPointView: View {
         .buttonStyle(.plain)
     }
     
+    private var cashpointHeaderTitle: String {
+        if let tab = activeTeamTab {
+            // Use the actual table name: שולחן מנהלים / שולחן בר / וכו'
+            return tab.titleHe
+        }
+        return "קופה"
+    }
+    
     @ViewBuilder
     private func discountPill(title: String, mode: DiscountMode) -> some View {
         let isSelected = (discountMode == mode)
@@ -3207,82 +3265,104 @@ struct CashPointView: View {
                             // 📱 iPhone: compact 2-row header
                             VStack(alignment: .leading, spacing: 8) {
                                 // Row 1: Title + Stock
-                                HStack(spacing: 12) {
-                                    Button {
-                                        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
-                                            showSideMenu.toggle()
-                                        }
-                                    } label: {
-                                        Image(systemName: "line.3.horizontal")
-                                            .font(.system(size: 20, weight: .bold))
-                                            .padding(8)
-                                          //  .background(Color(.systemGray5))
-                                            .clipShape(Circle())
-                                    }
-                                    Button {
-                                        showPrinterStatusSheet = true
-                                    } label: {
-                                        ZStack(alignment: .topTrailing) {
-
-                                            // MAIN ICON
-                                            Image(systemName: headerPrinterIconName)
-                                                .font(.system(size: 18, weight: .bold))
-                                                .foregroundColor(headerPrinterIconColor)
-                                                .padding(8)
-                                                .background(( printerMonitor.isNetworkUp && printerMonitor.anyPrinterOffline) ?  Color(.systemGray5) : .clear)
+                                // Row 1: Header buttons + centered title
+                                ZStack {
+                                    // base row
+                                    HStack(spacing: 12) {
+                                        Button {
+                                            dismiss()
+                                        } label: {
+                                            Image(systemName: "chevron.backward")
+                                                .font(.system(size: 20, weight: .bold))
+                                                .padding(.leading, 8)
                                                 .clipShape(Circle())
-
-                                            // ⚠️ WARNING BADGE — only when on network AND some printers offline
-                                            if printerMonitor.isNetworkUp && printerMonitor.anyPrinterOffline {
-                                                Image(systemName: "exclamationmark.circle.fill")
-                                                    .font(.system(size: 12, weight: .bold))
-                                                    .foregroundColor(.black)
-                                                    .background(Color(.systemBackground))
-                                                    .clipShape(Circle())
-                                                    .offset(x: 4, y: -4)
-                                            }
-                                        }
-                                    }
-                                    .buttonStyle(.plain)
-
-                                    Spacer()
-                                    
-                                    HStack(spacing: 8) {
-                                        if isStockEditMode,
-                                           !selectedCategory.isEmpty,
-                                           selectedCategory != "✏️ הערות" {
-                                            Button {
-                                                clearStockForSelectedCategory()
-                                            } label: {
-                                                Text("אפס")
-                                                    .font(.system(size: 14, weight: .semibold))
-                                                    .padding(.horizontal, 10)
-                                                    .padding(.vertical, 6)
-                                                    .background(Color(.systemGray5))
-                                                    .clipShape(Capsule())
-                                            }
                                         }
 
                                         Button {
-                                            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
-                                                isStockEditMode.toggle()
-                                                if isStockEditMode {
-                                                    stockEditWorkItem?.cancel()
-                                                    stockEditWorkItem = nil
-                                                    editingStockProductId = nil
-                                                }
+                                            withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                                                showSideMenu.toggle()
                                             }
                                         } label: {
-                                            Text(isRtl
-                                                 ? (isStockEditMode ? "סיים" : "מלאי")
-                                                 : (isStockEditMode ? "Done" : "Stock"))
-                                                .font(.system(size: 14, weight: .semibold))
-                                                .padding(.horizontal, 12)
-                                                .padding(.vertical, 6)
-                                                .background(Color(.systemGray5))
-                                                .clipShape(Capsule())
+                                            Image(systemName: "line.3.horizontal")
+                                                .font(.system(size: 20, weight: .bold))
+                                                .padding(8)
+                                                .clipShape(Circle())
+                                        }
+
+                                        Button {
+                                            showPrinterStatusSheet = true
+                                        } label: {
+                                            ZStack(alignment: .topTrailing) {
+                                                Image(systemName: headerPrinterIconName)
+                                                    .font(.system(size: 18, weight: .bold))
+                                                    .foregroundColor(headerPrinterIconColor)
+                                                    .padding(8)
+                                                    .background((printerMonitor.isNetworkUp && printerMonitor.anyPrinterOffline) ? Color(.systemGray5) : .clear)
+                                                    .clipShape(Circle())
+
+                                                if printerMonitor.isNetworkUp && printerMonitor.anyPrinterOffline {
+                                                    Image(systemName: "exclamationmark.circle.fill")
+                                                        .font(.system(size: 12, weight: .bold))
+                                                        .foregroundColor(.black)
+                                                        .background(Color(.systemBackground))
+                                                        .clipShape(Circle())
+                                                        .offset(x: 4, y: -4)
+                                                }
+                                            }
+                                        }
+                                        .buttonStyle(.plain)
+
+                                        Spacer()
+
+                                        if cashPointMode {
+                                            HStack(spacing: 8) {
+                                                if isStockEditMode,
+                                                   !selectedCategory.isEmpty,
+                                                   selectedCategory != "✏️ הערות" {
+                                                    Button {
+                                                        clearStockForSelectedCategory()
+                                                    } label: {
+                                                        Text("אפס")
+                                                            .font(.system(size: 14, weight: .semibold))
+                                                            .padding(.horizontal, 10)
+                                                            .padding(.vertical, 6)
+                                                            .background(Color(.systemGray5))
+                                                            .clipShape(Capsule())
+                                                    }
+                                                }
+
+                                                Button {
+                                                    withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                                                        isStockEditMode.toggle()
+                                                        if isStockEditMode {
+                                                            stockEditWorkItem?.cancel()
+                                                            stockEditWorkItem = nil
+                                                            editingStockProductId = nil
+                                                        }
+                                                    }
+                                                } label: {
+                                                    Text(isRtl
+                                                         ? (isStockEditMode ? "סיים" : "מלאי")
+                                                         : (isStockEditMode ? "Done" : "Stock"))
+                                                    .font(.system(size: 14, weight: .semibold))
+                                                    .padding(.horizontal, 12)
+                                                    .padding(.vertical, 6)
+                                                    .background(Color(.systemGray5))
+                                                    .clipShape(Capsule())
+                                                }
+                                            }
                                         }
                                     }
+
+                                    // ✅ centered "nav bar" title
+                                    Text(cashpointHeaderTitle)
+                                        .font(.system(size: 18, weight: .bold))
+                                        .foregroundColor(.primary)
+                                        .lineLimit(1)
+                                        .allowsHitTesting(false)
+                                        .contentTransition(.interpolate)
+                                        .animation(.easeInOut(duration: 0.25),
+                                                   value: cashpointHeaderTitle)
                                 }
                                 
                                 // Row 2: Search + compact "+"
@@ -3334,11 +3414,29 @@ struct CashPointView: View {
                                     .background(Color(.secondarySystemBackground))
                                     .clipShape(RoundedRectangle(cornerRadius: 12))
 
-                                    // +
-                                    Button { /* your add product */ } label: {
+                                    Button {
+                                        Haptics.light()
+
+                                        let defaultCategory =
+                                            selectedCategory.isEmpty
+                                            ? (api.items.first?.category ?? (isRtl ? "כללי" : "General"))
+                                            : selectedCategory
+
+                                        adminDraft = AdminProductDraft(
+                                            productId: nil,
+                                            name: "",
+                                            priceText: "0",
+                                            category: defaultCategory,
+                                            description: "",
+                                            imageURL: "https://beithaam.com/wp-content/uploads/2024/12/share.jpg",
+                                            modifierGroups: []
+                                        )
+                                    } label: {
                                         Image(systemName: "plus.circle.fill")
-                                            .font(.system(size: 26, weight: .semibold))
+                                            .font(.system(size: 28, weight: .semibold))
                                             .foregroundColor(.primary)
+                                            .padding(6)                 // ✅ bigger hit area
+                                            .contentShape(Rectangle())  // ✅ whole area tappable
                                     }
                                     .buttonStyle(.plain)
                                 }
@@ -3536,7 +3634,7 @@ struct CashPointView: View {
                                         selectedCategory = cat
                                     },
                                     onOrdersTap: { showOrdersAdmin = true },
-                                    enableReorder: false,
+                                    enableReorder: true,
                                     draggingCategory: $draggingCategory,
                                     categoryOrder: $categoryOrder,
                                     onReorderCommitted: {
@@ -3546,23 +3644,24 @@ struct CashPointView: View {
                                            let first = categoryOrder.first { selectedCategory = first }
                                     }
                                 )
-
-                                VStack(spacing: 8) {
-                                    printBacklogHUD()
-
-                                    if showLastInvoicePrompt,
-                                       let title = lastInvoicePromptTitle(),
-                                       let snapshot = lastOrder {
-                                        LastInvoicePill(
-                                            isRtl: isRtl,
-                                            title: title,
-                                            onPrint: { printInvoice(for: snapshot) },
-                                            onClose: { showLastInvoicePrompt = false }
-                                        )
+                                if isPad{
+                                    VStack(spacing: 8) {
+                                        printBacklogHUD()
+                                        
+                                        if showLastInvoicePrompt,
+                                           let title = lastInvoicePromptTitle(),
+                                           let snapshot = lastOrder {
+                                            LastInvoicePill(
+                                                isRtl: isRtl,
+                                                title: title,
+                                                onPrint: { printInvoice(for: snapshot) },
+                                                onClose: { showLastInvoicePrompt = false }
+                                            )
+                                        }
                                     }
+                                    .padding(.horizontal, 8)
+                                    .padding(.bottom, 8)
                                 }
-                                .padding(.horizontal, 8)
-                                .padding(.bottom, 8)
                             }
                             .frame(width: 190)
                             .transition(
@@ -3584,7 +3683,13 @@ struct CashPointView: View {
                                 ScrollView {
                                     LazyVStack(spacing: 8) {
                                         ForEach(filteredItems) { item in
-                                            let qty   = quantityInBasket(for: item)
+                                            let qty: Int = {
+                                                if isTeamTabMode {
+                                                    return freshQuantityInBasket(for: item)   // ✅ only fresh lines
+                                                } else {
+                                                    return quantityInBasket(for: item)        // ✅ normal behaviour
+                                                }
+                                            }()
                                             let remainingForItem = maxAdditionalQuantity(for: item)
 
                                             let isOut =
@@ -3777,7 +3882,7 @@ struct CashPointView: View {
                                             let swipeableTile = baseTile
                                                 .simultaneousGesture(productSwipeGesture(for: item))
 
-                                            if isPhoneLayout {
+                                            if 1==2 {
                                                 swipeableTile
                                             } else {
                                                 swipeableTile
@@ -3965,11 +4070,17 @@ struct CashPointView: View {
                 
                 if isPhoneLayout && !basket.isEmpty {
                     BasketBar(
+                        isTeamTabMode: isTeamTabMode,
+                        teamTitle: activeTeamTab?.titleHe,
                         totalQuantity: basketTotalQuantity,
-                        totalPrice: finalTotal
-                    ) {
-                        showBasketSheetPhone = true
-                    }
+                        totalPrice: finalTotal,
+                        onBack: {
+                            startNewOrderFromPayLater()   // ✅ same as “נקה”
+                        },
+                        onTap: {
+                            showBasketSheetPhone = true
+                        }
+                    )
                 }
                 sideMenuContainer()
                 if showPrintSuccess {
@@ -4270,14 +4381,27 @@ struct CashPointView: View {
                         }()
 
                         // 🖨️ PRINT – once
-                        PrinterManager.shared.printCashPointSplit(
-                            orderNumber: ticketNumber,
-                            entries: entriesArray,
-                            total: totalForPrint,
-                            diningMode: diningMode,
-                            customerName: safeName,
-                            customerPhone: posSavedPhone
-                        )
+                        Task {
+                            let ok = await PrinterManager.shared.printCashPointSplit(
+                                orderNumber: ticketNumber,
+                                entries: entriesArray,
+                                total: totalForPrint,
+                                diningMode: diningMode,
+                                customerName: safeName,
+                                customerPhone: posSavedPhone
+                            )
+
+                            await MainActor.run {
+                                if ok {
+                                    playPrintSuccess()
+                                } else {
+                                    print("❌ printCashPointSplit failed for order \(ticketNumber)")
+                                    Haptics.error()
+                                    showOutboxLog = true
+                                    // or showPrinterStatusSheet = true
+                                }
+                            }
+                        }
                         
                         hasPrintedFromSwipe = true
 
@@ -4733,14 +4857,30 @@ struct CashPointView: View {
               hasPrintedFromSwipe=\(hasPrintedFromSwipe)
             """)
 
-            PrinterManager.shared.printCashPointSplit(
-                orderNumber: ticketNumber,
-                entries: printerEntries,
-                total: printerTotal,
-                diningMode: mode,
-                customerName: nameSnapshot,
-                customerPhone: phoneSnapshot     // ✅ FIX (was nil)
-            )
+            Task {
+                let ok = await PrinterManager.shared.printCashPointSplit(
+                    orderNumber: ticketNumber,
+                    entries: printerEntries,
+                    total: printerTotal,
+                    diningMode: mode,
+                    customerName: nameSnapshot,
+                    customerPhone: phoneSnapshot
+                )
+
+                await MainActor.run {
+                    if ok {
+                        playPrintSuccess()
+                    } else {
+                        print("❌ printCashPointSplit failed for order \(ticketNumber)")
+                        Haptics.error()
+
+                        // pick one:
+                        showOutboxLog = true
+                        // or:
+                        // showPrinterStatusSheet = true
+                    }
+                }
+            }
         }
 
         hasPrintedFromSwipe = false
@@ -5048,11 +5188,12 @@ struct CashPointView: View {
         showSideMenu = false
 
         // enter team mode immediately
-        activeTeamTab = tab
-        isPayLaterMode = true
-        hasChosenServiceMode = true
-        diningMode = .dineIn
-
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+            activeTeamTab = tab
+            isPayLaterMode = true
+            hasChosenServiceMode = true
+            diningMode = .dineIn
+        }
         // reset local state
         basket.removeAll()
         lockedLineIds.removeAll()
@@ -5689,64 +5830,126 @@ struct CashPointView: View {
         @Environment(\.isRtl) private var isRtl
         @Environment(\.currency) private var currency
 
+        let isTeamTabMode: Bool
+        let teamTitle: String?
+
         let totalQuantity: Int
         let totalPrice: Double
+
+        let onBack: () -> Void      // ✅ NEW
         let onTap: () -> Void
+
+        private var teamButtonTitle: String {
+            let raw = (teamTitle ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if raw.isEmpty { return isRtl ? "שולחן" : "Table" }
+            if raw.contains("שולחן") { return raw }
+            return (isRtl ? "שולחן " : "Table ") + raw
+        }
 
         var body: some View {
             HStack {
-                Button(action: onTap) {
-                    HStack {
-                        if isRtl {
-                            // RTL: quantity • הזמנה • price
-                            HStack(spacing: 12) {
-                                Text("\(totalQuantity)")
-                                    .font(.system(size: 15, weight: .semibold))
-                                    .foregroundColor(Color.black)
-                                    .frame(width: 28, height: 28)
-                                    .background(Color.white)
-                                    .clipShape(Circle())
+                Button {
 
-                                Text("הזמנה")
+                    // MAIN TAP (opens basket)
+                    onTap()
+
+                } label: {
+
+                    ZStack {
+
+                        // 🔹 TEAM TAB MODE
+                        if isTeamTabMode {
+
+                            HStack {
+
+                                // ⬅️ BACK / CLEAR BUTTON
+                                Button {
+                                    onBack()
+                                } label: {
+                                    Image(systemName: "chevron.backward")
+                                        .font(.system(size: 18, weight: .bold))
+                                        .foregroundColor(.black)
+                                        .frame(width: 44, height: 44)
+                                        .background(Color.white)
+                                        .clipShape(Circle())
+                                }
+                                .buttonStyle(.plain)
+
+                                Spacer()
+
+                                // 🏷️ CENTER TITLE
+                                Text(teamButtonTitle)
                                     .font(.system(size: 18, weight: .semibold))
                                     .foregroundColor(.white)
+
+                                Spacer()
+
+                                // spacer to keep title perfectly centered
+                                Color.clear
+                                    .frame(width: 44, height: 44)
                             }
-
-                            Spacer()
-
-                            Text(String(format: "\(currency)%.2f", totalPrice))
-                                .font(.system(size: 18, weight: .semibold))
-                                .foregroundColor(.white)
+                            .padding(.horizontal, 12)
+                            .frame(height: 60)
+                            .frame(maxWidth: .infinity)
+                            .background(
+                                Color.black
+                                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                            )
 
                         } else {
-                            // LTR: price • Order • quantity
-                            Text(String(format: "\(currency)%.2f", totalPrice))
-                                .font(.system(size: 18, weight: .semibold))
-                                .foregroundColor(.white)
 
-                            Spacer()
+                            // 🔹 NORMAL MODE (unchanged)
+                            HStack {
+                                if isRtl {
+                                    HStack(spacing: 12) {
+                                        Text("\(totalQuantity)")
+                                            .font(.system(size: 15, weight: .semibold))
+                                            .foregroundColor(.black)
+                                            .frame(width: 28, height: 28)
+                                            .background(Color.white)
+                                            .clipShape(Circle())
 
-                            HStack(spacing: 12) {
-                                Text("Order")
-                                    .font(.system(size: 18, weight: .semibold))
-                                    .foregroundColor(.white)
+                                        Text("הזמנה")
+                                            .font(.system(size: 18, weight: .semibold))
+                                            .foregroundColor(.white)
+                                    }
 
-                                Text("\(totalQuantity)")
-                                    .font(.system(size: 15, weight: .semibold))
-                                    .foregroundColor(Color.black)
-                                    .frame(width: 28, height: 28)
-                                    .background(Color.white)
-                                    .clipShape(Circle())
+                                    Spacer()
+
+                                    Text(String(format: "\(currency)%.2f", totalPrice))
+                                        .font(.system(size: 18, weight: .semibold))
+                                        .foregroundColor(.white)
+
+                                } else {
+                                    Text(String(format: "\(currency)%.2f", totalPrice))
+                                        .font(.system(size: 18, weight: .semibold))
+                                        .foregroundColor(.white)
+
+                                    Spacer()
+
+                                    HStack(spacing: 12) {
+                                        Text("Order")
+                                            .font(.system(size: 18, weight: .semibold))
+                                            .foregroundColor(.white)
+
+                                        Text("\(totalQuantity)")
+                                            .font(.system(size: 15, weight: .semibold))
+                                            .foregroundColor(.black)
+                                            .frame(width: 28, height: 28)
+                                            .background(Color.white)
+                                            .clipShape(Circle())
+                                    }
+                                }
                             }
+                            .padding(.horizontal, 20)
+                            .frame(height: 60)
+                            .frame(maxWidth: .infinity)
+                            .background(
+                                Color.black
+                                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                            )
                         }
                     }
-                    .padding(.horizontal, 20)
-                    .frame(height: 60)
-                    .frame(maxWidth: .infinity)
-                    .background(
-                        Color.black
-                            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                    )
                 }
                 .buttonStyle(.plain)
             }
@@ -5940,7 +6143,7 @@ struct CashPointView: View {
             Calendar.current.date(byAdding: .day, value: -1, to: Date()) ?? Date()
         }
 
-        /// Date used to FETCH the Z row (previous day)
+        /// Date used to FETCH the Z row (selected day)
         private var queryDate: Date {
             Calendar.current.date(byAdding: .day, value: +0, to: restoreDate) ?? restoreDate
         }
@@ -5959,14 +6162,20 @@ struct CashPointView: View {
             )
         }
 
-        // ✅ Header date reflects restore selection when restoring Z
+        // ✅ Header date:
+        // - Normal mode: today
+        // - Restore Z: use DB BusinessDate if available, otherwise restoreDate
         private var headerDate: Date {
-            (type == .z && restoreMode) ? restoreDate : Date()
+            if type == .z && restoreMode {
+                return model.businessDate ?? restoreDate
+            }
+            return Date()
         }
 
         private var headerDateText: String {
             let df = DateFormatter()
             df.locale = Locale(identifier: "he_IL")
+            df.timeZone = TimeZone(identifier: "Asia/Jerusalem")
             df.dateFormat = "dd/MM/yyyy"
             return df.string(from: headerDate)
         }
@@ -5976,14 +6185,17 @@ struct CashPointView: View {
 
             let t = DateFormatter()
             t.locale = Locale(identifier: "he_IL")
+            t.timeZone = TimeZone(identifier: "Asia/Jerusalem")
             t.dateFormat = "HH:mm:ss"
 
             let d = DateFormatter()
             d.locale = Locale(identifier: "he_IL")
+            d.timeZone = TimeZone(identifier: "Asia/Jerusalem")
             d.dateFormat = "dd/MM/yyyy"
 
             if type == .z && restoreMode {
-                return "שחזור לתאריך \(lrm)\(d.string(from: restoreDate))"
+                let shown = model.businessDate ?? restoreDate
+                return "שחזור לתאריך \(lrm)\(d.string(from: shown))"
             }
             return "הופק בתאריך \(lrm)\(t.string(from: Date())) \(d.string(from: Date()))"
         }
@@ -6228,6 +6440,7 @@ struct CashPointView: View {
                 }
             )
         }
+
         private var cashReportTable: some View {
             guard let d = model.data else { return AnyView(EmptyView()) }
 
@@ -6484,181 +6697,189 @@ struct CashPointView: View {
             }
         )
 
+        // ✅ Sent styling
+        let sentOpacity: Double = isLocked ? 0.42 : 1.0
+        let sentBg: Color = isLocked ? Color(.systemGray6) : Color.clear
+
         // Main content for this row
-        let content = VStack(alignment: .leading, spacing: 6) {
-            // MAIN ROW
-            HStack(spacing: 8) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(entry.item.name)
-                        .font(.system(size: 20, weight: .medium))
+        let content = ZStack(alignment: .topTrailing) {
 
-                    if let s = entry.subtitle, !s.isEmpty, !isExpanded {
-                        Text(cleanModifierSubtitle(s) ?? s)
-                            .font(.system(size: 13))
+            VStack(alignment: .leading, spacing: 6) {
+                // MAIN ROW
+                HStack(spacing: 8) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(entry.item.name)
+                            .font(.system(size: 20, weight: .medium))
+                            .strikethrough(isLocked, color: .secondary)
+
+                        if let s = entry.subtitle, !s.isEmpty, !isExpanded {
+                            Text(cleanModifierSubtitle(s) ?? s)
+                                .font(.system(size: 13))
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+
+                    Spacer()
+
+                    // ✅ RIGHT SIDE: line total + qty controls
+                    HStack(spacing: 10) {
+                        Text(String(format: "\(currency)%.0f", lineTotal))
+                            .font(.system(size: 16, weight: .semibold))
                             .foregroundColor(.secondary)
-                            .lineLimit(1)
-                    }
-                }
+                            .frame(minWidth: 86, alignment: isRtl ? .leading : .trailing)
 
-                Spacer()
-
-                // ✅ RIGHT SIDE: line total + qty controls
-                HStack(spacing: 10) {
-                    Text(String(format: "\(currency)%.0f", lineTotal))
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundColor(.secondary)
-                        .frame(minWidth: 86, alignment: isRtl ? .leading : .trailing)
-
-                    HStack(spacing: 8) {
-                        if !isLocked {
-                            Button { decrementEntry(entry.id) } label: {
-                                Image(systemName: "minus.circle.fill")
-                                    .font(.system(size: 22))
+                        HStack(spacing: 8) {
+                            if !isLocked {
+                                Button { decrementEntry(entry.id) } label: {
+                                    Image(systemName: "minus.circle.fill")
+                                        .font(.system(size: 22))
+                                }
                             }
-                        }
 
-                        Text("\(entry.quantity)")
-                            .font(.system(size: 17, weight: .semibold))
-                            .frame(minWidth: 26)
+                            Text("\(entry.quantity)")
+                                .font(.system(size: 17, weight: .semibold))
+                                .frame(minWidth: 26)
 
-                        if !isLocked {
-                            Button { incrementEntry(entry.id) } label: {
-                                Image(systemName: "plus.circle.fill")
-                                    .font(.system(size: 22))
+                            if !isLocked {
+                                Button { incrementEntry(entry.id) } label: {
+                                    Image(systemName: "plus.circle.fill")
+                                        .font(.system(size: 22))
+                                }
                             }
                         }
                     }
                 }
-            }
 
-            // EXPANDED: modifiers + notes
-            if isExpanded {
-                if let groups = entry.item.modifiers, !groups.isEmpty {
-                    VStack(alignment: .leading, spacing: 12) {
+                // EXPANDED: modifiers + notes
+                if isExpanded {
+                    if let groups = entry.item.modifiers, !groups.isEmpty {
+                        VStack(alignment: .leading, spacing: 12) {
 
-                        // 🔹 Separator BETWEEN modifier groups
-                        ForEach(Array(groups.enumerated()), id: \.element.id) { index, g in
-                            if index > 0 {
-                                Rectangle()
-                                    .fill(Color.black.opacity(0.06))
-                                    .frame(height: 1)
-                                    .padding(.vertical, 4)
-                            }
+                            // 🔹 Separator BETWEEN modifier groups
+                            ForEach(Array(groups.enumerated()), id: \.element.id) { index, g in
+                                if index > 0 {
+                                    Rectangle()
+                                        .fill(Color.black.opacity(0.06))
+                                        .frame(height: 1)
+                                        .padding(.vertical, 4)
+                                }
 
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text(g.title)
-                                    .font(.system(size: 14, weight: .semibold))
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text(g.title)
+                                        .font(.system(size: 14, weight: .semibold))
 
-                                switch g.type {
-                                case .options:
-                                    if g.items.count > 3 {
-                                        let rowStarts = Array(stride(from: 0, to: g.items.count, by: 3))
-                                        
-                                        VStack(alignment: isRtl ? .leading : .trailing, spacing: 8) {
-                                            ForEach(rowStarts, id: \.self) { start in
-                                                let end = min(start + 3, g.items.count)
-                                                let rowItems = Array(g.items[start..<end])
-                                                
-                                                HStack(spacing: 8) {
-                                                    if !isRtl { Spacer() }
-                                                    ForEach(rowItems) { opt in
-                                                        optionChip(entry: entry, group: g, opt: opt)
-                                                    }
-                                                    if isRtl { Spacer() }
-                                                }
-                                            }
-                                        }
-                                    } else {
-                                        HStack(spacing: 8) {
-                                            if !isRtl { Spacer() }
-                                            ForEach(g.items) { opt in
-                                                optionChip(entry: entry, group: g, opt: opt)
-                                            }
-                                            if isRtl { Spacer() }
-                                        }
-                                        .frame(maxWidth: .infinity,
-                                               alignment: isRtl ? .leading : .trailing)
-                                    }
-                                    
-                                case .additions:
-                                    Group {
-                                        let items = g.items
-                                        let first = items.first
-                                        let rest  = Array(items.dropFirst())
-                                        
-                                        VStack(alignment: isRtl ? .leading : .trailing, spacing: 8) {
-                                            
-                                            // ✅ Row 1: FIRST addition only
-                                            if let first {
-                                                HStack(spacing: 8) {
-                                                    if !isRtl { Spacer() }
-                                                    
-                                                    let isSelected =
-                                                    (additionSelections[entry.id] ?? []).contains(first.name)
-                                                    
-                                                    Text(first.extraPrice > 0
-                                                         ? "\(first.name) +\(Int(first.extraPrice))"
-                                                         : first.name)
-                                                    .font(.system(size: 17, weight: .medium))
-                                                    .padding(.horizontal, 16)
-                                                    .padding(.vertical, 8)
-                                                    .background(isSelected ? Color.black : Color(.systemGray5))
-                                                    .foregroundColor(isSelected ? .white : .primary)
-                                                    .clipShape(Capsule())
-                                                    .onTapGesture {
-                                                        // ✅ Default behaves like "None": selects ONLY itself (clears others)
-                                                        additionSelections[entry.id] = [first.name]
-                                                        updateEntryPricingAndSubtitle(lineId: entry.id)
-                                                        Haptics.light()
-                                                    }
-                                                    
-                                                    if isRtl { Spacer() }
-                                                }
-                                            }
-                                            
-                                            // ✅ Row 2+: the rest in rows of 3
-                                            if !rest.isEmpty {
-                                                let rowStarts = Array(stride(from: 0, to: rest.count, by: 3))
-                                                
+                                    switch g.type {
+                                    case .options:
+                                        if g.items.count > 3 {
+                                            let rowStarts = Array(stride(from: 0, to: g.items.count, by: 3))
+
+                                            VStack(alignment: isRtl ? .leading : .trailing, spacing: 8) {
                                                 ForEach(rowStarts, id: \.self) { start in
-                                                    let end = min(start + 3, rest.count)
-                                                    let rowItems = Array(rest[start..<end])
-                                                    
+                                                    let end = min(start + 3, g.items.count)
+                                                    let rowItems = Array(g.items[start..<end])
+
                                                     HStack(spacing: 8) {
                                                         if !isRtl { Spacer() }
-                                                        
                                                         ForEach(rowItems) { opt in
-                                                            let isSelected =
-                                                            (additionSelections[entry.id] ?? []).contains(opt.name)
-                                                            
-                                                            Text(opt.extraPrice > 0
-                                                                 ? "\(opt.name) +\(Int(opt.extraPrice))"
-                                                                 : opt.name)
-                                                            .font(.system(size: 17, weight: .medium))
-                                                            .padding(.horizontal, 16)
-                                                            .padding(.vertical, 8)
-                                                            .background(isSelected ? Color.black : Color(.systemGray5))
-                                                            .foregroundColor(isSelected ? .white : .primary)
-                                                            .clipShape(Capsule())
-                                                            .onTapGesture {
-                                                                var set = additionSelections[entry.id] ?? []
-
-                                                                // ✅ If you pick any non-default, remove the default
-                                                                set.remove(first?.name ?? "")
-
-                                                                if isSelected {
-                                                                    set.remove(opt.name)
-                                                                } else {
-                                                                    set.insert(opt.name)
-                                                                }
-
-                                                                additionSelections[entry.id] = set
-                                                                updateEntryPricingAndSubtitle(lineId: entry.id)
-                                                                Haptics.light()
-                                                            }
+                                                            optionChip(entry: entry, group: g, opt: opt)
                                                         }
-                                                        
                                                         if isRtl { Spacer() }
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            HStack(spacing: 8) {
+                                                if !isRtl { Spacer() }
+                                                ForEach(g.items) { opt in
+                                                    optionChip(entry: entry, group: g, opt: opt)
+                                                }
+                                                if isRtl { Spacer() }
+                                            }
+                                            .frame(maxWidth: .infinity,
+                                                   alignment: isRtl ? .leading : .trailing)
+                                        }
+
+                                    case .additions:
+                                        Group {
+                                            let items = g.items
+                                            let first = items.first
+                                            let rest  = Array(items.dropFirst())
+
+                                            VStack(alignment: isRtl ? .leading : .trailing, spacing: 8) {
+
+                                                // ✅ Row 1: FIRST addition only
+                                                if let first {
+                                                    HStack(spacing: 8) {
+                                                        if !isRtl { Spacer() }
+
+                                                        let isSelected =
+                                                        (additionSelections[entry.id] ?? []).contains(first.name)
+
+                                                        Text(first.extraPrice > 0
+                                                             ? "\(first.name) +\(Int(first.extraPrice))"
+                                                             : first.name)
+                                                        .font(.system(size: 17, weight: .medium))
+                                                        .padding(.horizontal, 16)
+                                                        .padding(.vertical, 8)
+                                                        .background(isSelected ? Color.black : Color(.systemGray5))
+                                                        .foregroundColor(isSelected ? .white : .primary)
+                                                        .clipShape(Capsule())
+                                                        .onTapGesture {
+                                                            // ✅ Default behaves like "None": selects ONLY itself (clears others)
+                                                            additionSelections[entry.id] = [first.name]
+                                                            updateEntryPricingAndSubtitle(lineId: entry.id)
+                                                            Haptics.light()
+                                                        }
+
+                                                        if isRtl { Spacer() }
+                                                    }
+                                                }
+
+                                                // ✅ Row 2+: the rest in rows of 3
+                                                if !rest.isEmpty {
+                                                    let rowStarts = Array(stride(from: 0, to: rest.count, by: 3))
+
+                                                    ForEach(rowStarts, id: \.self) { start in
+                                                        let end = min(start + 3, rest.count)
+                                                        let rowItems = Array(rest[start..<end])
+
+                                                        HStack(spacing: 8) {
+                                                            if !isRtl { Spacer() }
+
+                                                            ForEach(rowItems) { opt in
+                                                                let isSelected =
+                                                                (additionSelections[entry.id] ?? []).contains(opt.name)
+
+                                                                Text(opt.extraPrice > 0
+                                                                     ? "\(opt.name) +\(Int(opt.extraPrice))"
+                                                                     : opt.name)
+                                                                .font(.system(size: 17, weight: .medium))
+                                                                .padding(.horizontal, 16)
+                                                                .padding(.vertical, 8)
+                                                                .background(isSelected ? Color.black : Color(.systemGray5))
+                                                                .foregroundColor(isSelected ? .white : .primary)
+                                                                .clipShape(Capsule())
+                                                                .onTapGesture {
+                                                                    var set = additionSelections[entry.id] ?? []
+
+                                                                    // ✅ If you pick any non-default, remove the default
+                                                                    set.remove(first?.name ?? "")
+
+                                                                    if isSelected {
+                                                                        set.remove(opt.name)
+                                                                    } else {
+                                                                        set.insert(opt.name)
+                                                                    }
+
+                                                                    additionSelections[entry.id] = set
+                                                                    updateEntryPricingAndSubtitle(lineId: entry.id)
+                                                                    Haptics.light()
+                                                                }
+                                                            }
+
+                                                            if isRtl { Spacer() }
+                                                        }
                                                     }
                                                 }
                                             }
@@ -6667,37 +6888,50 @@ struct CashPointView: View {
                                 }
                             }
                         }
+                        .padding(.top, 6)
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(isRtl ? "הערות" : "Notes")
+                            .font(.system(size: 13, weight: .semibold))
+
+                        Button {
+                            let currentText = noteBinding.wrappedValue
+                            noteEditingLineId = entry.id
+                            noteEditingText = currentText
+                        } label: {
+                            HStack {
+                                if noteBinding.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                    Text(isRtl ? "הוסף הערה..." : "Add a note…")
+                                        .foregroundColor(.secondary)
+                                } else {
+                                    Text(noteBinding.wrappedValue)
+                                        .lineLimit(1)
+                                        .foregroundColor(.primary)
+                                }
+                                Spacer()
+                            }
+                            .padding(8)
+                            .background(Color(.secondarySystemBackground))
+                            .cornerRadius(8)
+                        }
+                        .buttonStyle(.plain)
                     }
                     .padding(.top, 6)
                 }
+            }
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(isRtl ? "הערות" : "Notes")
-                        .font(.system(size: 13, weight: .semibold))
-
-                    Button {
-                        let currentText = noteBinding.wrappedValue
-                        noteEditingLineId = entry.id
-                        noteEditingText = currentText
-                    } label: {
-                        HStack {
-                            if noteBinding.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                Text(isRtl ? "הוסף הערה..." : "Add a note…")
-                                    .foregroundColor(.secondary)
-                            } else {
-                                Text(noteBinding.wrappedValue)
-                                    .lineLimit(1)
-                                    .foregroundColor(.primary)
-                            }
-                            Spacer()
-                        }
-                        .padding(8)
-                        .background(Color(.secondarySystemBackground))
-                        .cornerRadius(8)
-                    }
-                    .buttonStyle(.plain)
-                }
-                .padding(.top, 6)
+            // ✅ Sent badge
+            if isLocked {
+                Text(isRtl ? "נשלח" : "Sent")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color(.systemBackground))
+                    .clipShape(Capsule())
+                    .padding(.top, 10)
+                    .padding(.trailing, 12)
             }
         }
 
@@ -6705,6 +6939,11 @@ struct CashPointView: View {
             content
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 12).fill(sentBg)
+                )
+                .opacity(sentOpacity)
+                .saturation(isLocked ? 0 : 1)
 
             Rectangle()
                 .fill(Color.black.opacity(0.06))
@@ -6714,7 +6953,7 @@ struct CashPointView: View {
         .offset(x: swipeOffset)
         .contentShape(Rectangle())
         .simultaneousGesture(basketSwipeGesture(for: entry))
-        
+
         // ✅ KEEP ONLY ONE note sheet (you had it twice)
         .sheet(item: Binding(
             get: { noteEditingLineId.map { NoteEditHandle(id: $0) } },
@@ -6736,6 +6975,7 @@ struct CashPointView: View {
             .presentationDragIndicator(.hidden)
         }
         .onTapGesture {
+            guard !isLocked else { return } // ✅ don’t expand sent rows
             withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                 if expandedBasketLineId == entry.id {
                     expandedBasketLineId = nil
@@ -6777,7 +7017,13 @@ struct CashPointView: View {
                 updateEntryPricingAndSubtitle(lineId: entry.id)
             }
         }
-        
+    }
+    
+    private func freshQuantityInBasket(for item: ShellMenuItem) -> Int {
+        basket.values
+            .filter { $0.item.id == item.id }
+            .filter { !lockedLineIds.contains($0.id) }   // ✅ only unsent lines
+            .reduce(0) { $0 + $1.quantity }
     }
     
     private struct NoteEditHandle: Identifiable {

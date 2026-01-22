@@ -9,6 +9,9 @@ struct MiniApp: App {
     @AppStorage("direction") private var direction: String = "ltr"
     @State private var studentClaim: StudentClaim? = nil
 
+    // ✅ Gate UI until JSON customization applied
+    @State private var didLoadMini = false
+
     private let wifiSSID = "Beit Ha Am"
     private let wifiPass = "10203040"
     private let kDidTryJoinWiFi = "didTryJoinWiFi.v1"
@@ -23,6 +26,9 @@ struct MiniApp: App {
     private let kDirection = "direction"
     private let kDeliveryLoc = "delivery.loc"   // ✅ use one stable key everywhere
 
+    // ✅ launch attribution flag (consumed on launch)
+    private let kOpenedViaLink = "openedViaLink.v1"
+
     init() {
         STPAPIClient.shared.publishableKey =
         "pk_live_51H5URzFZIwZSNufssK4R7BjLhpqxHVcfmEZVH8Tg74MAHMA20RfkYhIfbwFjDWJ55KzHWkOhEcqVWhIO2VShjOcU00Tslmi1XT"
@@ -31,40 +37,48 @@ struct MiniApp: App {
         let miniId = std.integer(forKey: kMiniAppId)
         let shopId = (std.string(forKey: kShopId) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // ✅ default mini for clip
-        if miniId == 0 && shopId.isEmpty {
-            std.set(3, forKey: kMiniAppId)
-            std.set("3", forKey: kShopId)
-            std.set("ltr", forKey: kDirection)
-
-            // ✅ default delivery loc for mini 3 if no URL arrives
-            std.set("mikkeller", forKey: kDeliveryLoc)
-        }
+        _ = miniId
+        _ = shopId
     }
 
     var body: some Scene {
         WindowGroup {
             Group {
-                if direction == "rtl" {
-                    ForceRTL {
+                if !didLoadMini {
+                    LoadingSplashView()
+                } else {
+                    if direction == "rtl" {
+                        ForceRTL {
+                            NavigationStack {
+                                menuView()
+                                    .environment(\.isRtl, true)
+                                    .environment(\.layoutDirection, .rightToLeft)
+                            }
+                        }
+                    } else {
                         NavigationStack {
                             menuView()
-                                .environment(\.isRtl, true)
-                                .environment(\.layoutDirection, .rightToLeft)
+                                .environment(\.isRtl, false)
+                                .environment(\.layoutDirection, .leftToRight)
                         }
-                    }
-                } else {
-                    NavigationStack {
-                        menuView()
-                            .environment(\.isRtl, false)
-                            .environment(\.layoutDirection, .leftToRight)
                     }
                 }
             }
             .onAppear {
                 joinBeitHaAmWiFiIfNeeded()
-                parseMiniIfNeeded()
+
+                // ✅ If NOT opened via link → force miniAppId = 12
+                applyMiniFallbackIfNotOpenedViaLink()
+
                 loadPendingClaimFromAppGroupIfAny()
+
+                // ✅ Load customization for current mini and ONLY then show HomeView
+                didLoadMini = false
+                parseMiniIfNeeded { _ in
+                    DispatchQueue.main.async {
+                        self.didLoadMini = true
+                    }
+                }
 
                 if let s = suite()?.string(forKey: kPendingUniversalLink),
                    let url = URL(string: s) {
@@ -100,6 +114,29 @@ struct MiniApp: App {
         UserDefaults(suiteName: appGroupId)
     }
 
+    // MARK: - ✅ Fallback: if not opened via link, force miniAppId = 12
+
+    private func applyMiniFallbackIfNotOpenedViaLink() {
+        let std = UserDefaults.standard
+        let grp = suite()
+
+        let openedViaLink = std.bool(forKey: kOpenedViaLink) || (grp?.bool(forKey: kOpenedViaLink) ?? false)
+
+        if !openedViaLink {
+            std.set(12, forKey: kMiniAppId)
+            std.set("12", forKey: kShopId)
+
+            grp?.set(3, forKey: kMiniAppId)
+            grp?.set("12", forKey: kShopId)
+            grp?.synchronize()
+        }
+
+        // ✅ consume immediately so next cold launch without a link falls back again
+        std.set(false, forKey: kOpenedViaLink)
+        grp?.set(false, forKey: kOpenedViaLink)
+        grp?.synchronize()
+    }
+
     // MARK: - URL parsing helpers
 
     private func queryValue(_ name: String, in url: URL) -> String? {
@@ -108,10 +145,6 @@ struct MiniApp: App {
     }
 
     private func isStudentLink(_ url: URL) -> Bool {
-        // ✅ Accept:
-        // 1) /student
-        // 2) any url with ?student=1 (or true/yes)
-        // 3) keep existing StudentClaim.from(url:) support (advanced format)
         let path = url.path.lowercased()
         if path == "/student" || path == "/student/" { return true }
 
@@ -127,7 +160,6 @@ struct MiniApp: App {
     private func makeStudentClaimForCurrentMini() -> StudentClaim? {
         let mini = UserDefaults.standard.integer(forKey: kMiniAppId)
         guard mini > 0 else { return nil }
-        // match your existing defaults in StudentClaim.from(url:) simple format
         return StudentClaim(
             miniAppId: mini,
             campaignId: "student",
@@ -139,6 +171,13 @@ struct MiniApp: App {
     // MARK: - Incoming URL Router
 
     private func processIncoming(_ url: URL) {
+        // ✅ mark that we were opened via a link (so we DON'T force mini=12 on next launch)
+        let std = UserDefaults.standard
+        let grp = suite()
+        std.set(true, forKey: kOpenedViaLink)
+        grp?.set(true, forKey: kOpenedViaLink)
+        grp?.synchronize()
+
         // MARK: - Helpers (local)
         func suite() -> UserDefaults? { UserDefaults(suiteName: appGroupId) }
 
@@ -154,9 +193,7 @@ struct MiniApp: App {
             let q = (queryValue("student", in: url) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             if q == "1" || q.lowercased() == "true" || q.lowercased() == "yes" { return true }
 
-            // also allow shop/12/student=1 (some people accidentally write it like that)
             if path.contains("student=1") { return true }
-
             return false
         }
 
@@ -171,7 +208,6 @@ struct MiniApp: App {
         }
 
         func saveStudentClaim(_ claim: StudentClaim) {
-            // keep your existing helper
             saveClaimToAppGroup(claim)
             studentClaim = claim
 
@@ -189,11 +225,7 @@ struct MiniApp: App {
         let host = (url.host ?? "").lowercased()
         guard host == "minis.studio" || host.hasSuffix(".minis.studio") else { return }
 
-        let std = UserDefaults.standard
-        let grp = suite()   // app group defaults
-
         // MARK: - 1) Shop deep link first: /shop/{id}
-        // We do this first so student claim can resolve to the correct miniAppId from URL.
         let comps = url.pathComponents.filter { $0 != "/" && !$0.isEmpty }
         var incomingMiniId: Int? = nil
 
@@ -230,22 +262,22 @@ struct MiniApp: App {
                 }
             }
 
-            // Refresh customization for the new mini
-            parseMiniIfNeeded()
+            // ✅ Hold UI while refreshing customization for the new mini
+            DispatchQueue.main.async { self.didLoadMini = false }
+            parseMiniIfNeeded { _ in
+                DispatchQueue.main.async { self.didLoadMini = true }
+            }
 
-            // ping after setting ids/loc
             pingInstall()
         }
 
-        // MARK: - 2) Student triggers (supports /student, ?student=1, and advanced StudentClaim.from(url:))
-        // If /student link has no mini in path, we use current stored miniAppId.
+        // MARK: - 2) Student triggers
         if let claim = StudentClaim.from(url: url) {
             saveStudentClaim(claim)
             return
         }
 
         if isStudentLink(url) {
-            // Prefer mini id from URL (/shop/{id}?student=1), else stored
             let miniId =
                 incomingMiniId
                 ?? (grp?.integer(forKey: kMiniAppId) ?? 0)
@@ -258,7 +290,6 @@ struct MiniApp: App {
         }
 
         // MARK: - 3) If it wasn't /shop/{id} above, still ping attribution
-        // (optional, but keeps your attribution behavior consistent)
         if incomingMiniId == nil {
             pingInstall()
         }
@@ -286,16 +317,25 @@ struct MiniApp: App {
 
     // MARK: - Mini customization fetch
 
-    private func parseMiniIfNeeded() {
+    private func parseMiniIfNeeded(completion: @escaping (Bool) -> Void = { _ in }) {
         let std = UserDefaults.standard
         let id = String(std.integer(forKey: kMiniAppId))
         let t = Int(Date().timeIntervalSince1970)
 
-        guard let url = URL(string: "https://minis.studio/json/\(id).json?\(t)") else { return }
+        guard let url = URL(string: "https://minis.studio/json/\(id).json?\(t)") else {
+            completion(false)
+            return
+        }
 
         URLSession.shared.dataTask(with: url) { data, _, _ in
-            guard let data else { return }
+            guard let data else {
+                completion(false)
+                return
+            }
+            // ✅ Your existing function (assumed to set direction/theme/etc)
             applyMiniCustomization(from: data)
+
+            completion(true)
         }.resume()
     }
 
@@ -392,5 +432,21 @@ struct MiniApp: App {
         config.joinOnce = true
 
         NEHotspotConfigurationManager.shared.apply(config) { _ in }
+    }
+}
+
+// MARK: - Simple loading view while mini JSON loads
+
+private struct LoadingSplashView: View {
+    var body: some View {
+        ZStack {
+            Color(.systemBackground).ignoresSafeArea()
+            VStack(spacing: 12) {
+                ProgressView()
+                Text("Loading…")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 }

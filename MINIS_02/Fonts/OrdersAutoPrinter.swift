@@ -7,16 +7,13 @@ import Darwin   // getifaddrs / inet_ntop
 func currentLANIPv4() -> String? {
     var ifaddrPtr: UnsafeMutablePointer<ifaddrs>?
 
-    guard getifaddrs(&ifaddrPtr) == 0, let firstAddr = ifaddrPtr else {
-        return nil
-    }
+    guard getifaddrs(&ifaddrPtr) == 0, let firstAddr = ifaddrPtr else { return nil }
     defer { freeifaddrs(ifaddrPtr) }
 
     for ptr in sequence(first: firstAddr, next: { $0.pointee.ifa_next }) {
         let interface = ptr.pointee
         let name = String(cString: interface.ifa_name)
 
-        // We only care about Wi-Fi (en0) and Ethernet bridge (bridge100)
         guard name == "en0" || name == "bridge100" else { continue }
         guard interface.ifa_addr.pointee.sa_family == sa_family_t(AF_INET) else { continue }
 
@@ -48,7 +45,7 @@ private struct AutoLineDTO: Decodable {
     let qty: Int
     let category: String?
     let status: Int
-    let station: String?     // NOTE: this field holds routing (Printer/printer/station collapsed)
+    let station: String?
     let modifiers: String?
 
     enum CodingKeys: String, CodingKey {
@@ -74,11 +71,9 @@ private struct AutoLineDTO: Decodable {
         category  = try c.decodeIfPresent(String.self, forKey: .category)
         status    = try c.decode(Int.self,             forKey: .status)
 
-        // ✅ FIX: Prefer per-product Printer fields first. station is fallback.
         let p1 = try? c.decodeIfPresent(String.self, forKey: .printer)
         let p2 = try? c.decodeIfPresent(String.self, forKey: .printerLower)
         let st = try? c.decodeIfPresent(String.self, forKey: .station)
-
         station = p1 ?? p2 ?? st
 
         if let m = try c.decodeIfPresent(String.self, forKey: .modifiers) {
@@ -89,6 +84,10 @@ private struct AutoLineDTO: Decodable {
             modifiers = nil
         }
     }
+}
+
+private struct ClaimDTO: Decodable {
+    let token: String?
 }
 
 private struct AutoOrderDTO: Decodable {
@@ -108,12 +107,14 @@ private struct AutoOrderDTO: Decodable {
     let status: Int?
     let service: String?
     let customerPhone: String?
-    
+    let claim: ClaimDTO?
+
     enum CodingKeys: String, CodingKey {
-        case id, source, bucket, stage, placedAt, scheduledFor,
-             customerName, customerDisplayName, customerPhone,   // ✅ add
-             totalGBP, itemSummary,
-             isDelivery, shortCode, lines, status
+        case id, source, bucket, stage, placedAt, scheduledFor
+        case customerName, customerDisplayName, customerPhone
+        case totalGBP, itemSummary
+        case isDelivery, shortCode, lines, status
+        case claim
         case Status = "Status"
         case service
         case Service = "Service"
@@ -121,6 +122,7 @@ private struct AutoOrderDTO: Decodable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+
         id           = try c.decode(Int.self,    forKey: .id)
         source       = try c.decode(String.self, forKey: .source)
         bucket       = try c.decode(String.self, forKey: .bucket)
@@ -135,6 +137,9 @@ private struct AutoOrderDTO: Decodable {
         shortCode    = try? c.decodeIfPresent(String.self, forKey: .shortCode)
         lines        = try c.decode([AutoLineDTO].self, forKey: .lines)
         customerPhone = try? c.decodeIfPresent(String.self, forKey: .customerPhone)
+
+        // ✅ NEW: claim (token)
+        claim = try? c.decodeIfPresent(ClaimDTO.self, forKey: .claim)
 
         if let s = try? c.decodeIfPresent(Int.self, forKey: .status) {
             status = s
@@ -151,7 +156,7 @@ private struct AutoOrderDTO: Decodable {
         }
 
         service = (try? c.decodeIfPresent(String.self, forKey: .service))
-               ?? (try? c.decodeIfPresent(String.self, forKey: .Service))
+              ?? (try? c.decodeIfPresent(String.self, forKey: .Service))
     }
 }
 
@@ -178,7 +183,7 @@ final class OrdersAutoPrinter {
         let unitPrice: Double
         let category: String?
         let modifiers: String?
-        let station: String           // ✅ canonical: "kitchen" / "bar" / "bakery"
+        let station: String
     }
 
     private func isToastName(_ s: String) -> Bool {
@@ -187,18 +192,35 @@ final class OrdersAutoPrinter {
         if t.lowercased().contains("toast") { return true }
         return false
     }
+
     private struct SimpleOrder {
         let id: Int
         let source: String
         let bucket: String
         let customerName: String
-        let customerPhone: String?    // ✅ NEW
+        let customerPhone: String?
         let subtitle: String
         let total: Double
         let placedAt: Date
         let items: [SimpleLine]
         let service: String?
         let isDelivery: Bool
+
+        // ✅ token returned from backend claim
+        let claimToken: String?
+    }
+
+    // MARK: - ClientId helper (shared with backend headers)
+
+    private func printerClientId() -> String {
+        let key = "printer.clientId"
+        if let existing = UserDefaults.standard.string(forKey: key),
+           !existing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return existing
+        }
+        let newId = UUID().uuidString
+        UserDefaults.standard.set(newId, forKey: key)
+        return newId
     }
 
     // MARK: - Public API
@@ -246,6 +268,9 @@ final class OrdersAutoPrinter {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Accept")
 
+        // ✅ send client id so server stores PrintClaimedBy
+        req.setValue(printerClientId(), forHTTPHeaderField: "X-Printer-ClientId")
+
         do {
             let (data, response) = try await URLSession.shared.data(for: req)
             guard let http = response as? HTTPURLResponse else {
@@ -289,7 +314,8 @@ final class OrdersAutoPrinter {
                 return
             }
 
-            processFetchedOrders(parsed.orders, trigger: trigger)
+            await processFetchedOrders(parsed.orders, trigger: trigger)
+
         } catch {
             print("❌ OrdersAutoPrinter network error:", error.localizedDescription)
         }
@@ -297,16 +323,13 @@ final class OrdersAutoPrinter {
 
     // MARK: - Mapping + print logic
 
-    private func processFetchedOrders(_ dtos: [AutoOrderDTO], trigger: String) {
+    private func processFetchedOrders(_ dtos: [AutoOrderDTO], trigger: String) async {
         guard !dtos.isEmpty else {
             print("ℹ️ [OrdersAutoPrinter] no claimed orders to print (trigger=\(trigger))")
             return
         }
 
-        // Kiosk sources only
         let allowedSources: Set<String> = ["mini", "kiosk", "appclip", "fastlane"]
-
-        // Block CashPoint/POS
         let blockedBuckets: Set<String> = ["cashpoint", "pos", "admin"]
         let blockedSources: Set<String> = ["cashpoint", "pos", "register", "till", "admin"]
 
@@ -359,13 +382,14 @@ final class OrdersAutoPrinter {
                 source: dto.source,
                 bucket: dto.bucket,
                 customerName: displayName,
-                customerPhone: dto.customerPhone,   // ✅ NEW
+                customerPhone: dto.customerPhone,
                 subtitle: dto.itemSummary,
                 total: dto.totalGBP,
                 placedAt: dto.placedAt,
                 items: items,
                 service: dto.service,
-                isDelivery: dto.isDelivery
+                isDelivery: dto.isDelivery,
+                claimToken: dto.claim?.token   // ✅ NEW
             )
         }
 
@@ -379,7 +403,7 @@ final class OrdersAutoPrinter {
         }
 
         for order in newOrders {
-            Task { await self.printAndMark(order: order, trigger: trigger) }
+            await printAndMark(order: order, trigger: trigger)
         }
     }
 
@@ -402,25 +426,17 @@ final class OrdersAutoPrinter {
         }
     }
 
-    // ✅ Simple + safe: API printer wins if present, else catalog, else bar.
     private func resolvePrinter(productId: Int?, station: String?, name: String) -> String {
+        if isToastName(name) { return "kitchen" }
 
-        // ✅ HARD RULE: טוסט always routes as kitchen (so it prints kitchen + kitchenBack)
-        if isToastName(name) {
-            return "kitchen"
-        }
-
-        // 1️⃣ Catalog (shop json) is the truth
         if let cat = normalizePrinter(MenuCatalog.shared.printer(for: productId)) {
             return cat
         }
 
-        // 2️⃣ Fallback: whatever server sent (Printer/station)
         if let api = normalizePrinter(station) {
             return api
         }
 
-        // 3️⃣ Last resort
         return "bar"
     }
 
@@ -432,48 +448,52 @@ final class OrdersAutoPrinter {
         let entries = toBasketEntries(from: order)
         let mode    = diningMode(for: order)
 
-        let grouped = Dictionary(grouping: entries) { e in
-            normalizePrinter(e.item.printer) ?? "bar"
+        let ok = await PrinterManager.shared.printCashPointSplit(
+            orderNumber: order.id,
+            entries: entries,
+            total: order.total,
+            diningMode: mode,
+            customerName: order.customerName,
+            customerPhone: order.customerPhone
+        )
+
+        guard ok else {
+            print("❌ [OrdersAutoPrinter] printCashPointSplit FAILED order #\(order.id) — not marking printed")
+            return
         }
 
-        print("🧾 AUTO PRINT order #\(order.id) groups=\(grouped.keys.sorted()) totalEntries=\(entries.count)")
-        print("🧾 AUTO groups:", grouped.map { "\($0.key)=\($0.value.count)" }.sorted().joined(separator: ", "))
-
-        for (printer, list) in grouped {
-            print("   • group=\(printer) lines=\(list.count)")
-            for e in list {
-                print("     - \(e.quantity)x \(e.item.name) printer=\(e.item.printer ?? "nil")")
-            }
-
-            PrinterManager.shared.printCashPointSplit(
-                orderNumber: order.id,
-                entries: list,
-                total: list.reduce(0.0) { $0 + (Double($1.quantity) * $1.unitPrice) },
-                diningMode: mode,
-                customerName: order.customerName,
-                customerPhone: order.customerPhone      // ✅ NEW
-            )
+        let marked = await markPrinted(orderId: order.id, claimToken: order.claimToken)
+        if marked {
+            printedOrderIds.insert(order.id)
         }
-
-        printedOrderIds.insert(order.id)
-        await markPrinted(orderId: order.id)
     }
 
-    private func markPrinted(orderId: Int) async {
-        guard let url = URL(string: "\(printedURLBase)/\(orderId)/printed?miniAppId=\(miniAppId)") else {
+    private func markPrinted(orderId: Int, claimToken: String?) async -> Bool {
+        var comps = URLComponents(string: "\(printedURLBase)/\(orderId)/printed")!
+        comps.queryItems = [
+            URLQueryItem(name: "miniAppId", value: String(miniAppId))
+        ]
+
+        if let t = claimToken?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty {
+            comps.queryItems?.append(URLQueryItem(name: "token", value: t))
+        }
+
+        guard let url = comps.url else {
             print("❌ markPrinted: bad URL for order \(orderId)")
-            return
+            return false
         }
 
         var req = URLRequest(url: url, timeoutInterval: 10)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.setValue(printerClientId(), forHTTPHeaderField: "X-Printer-ClientId")
 
         do {
             let (_, response) = try await URLSession.shared.data(for: req)
             if let http = response as? HTTPURLResponse {
                 if http.statusCode == 200 {
                     print("✅ [OrdersAutoPrinter] markPrinted(\(orderId)) OK")
+                    return true
                 } else {
                     print("⚠️ [OrdersAutoPrinter] markPrinted(\(orderId)) HTTP \(http.statusCode)")
                 }
@@ -481,13 +501,16 @@ final class OrdersAutoPrinter {
         } catch {
             print("❌ [OrdersAutoPrinter] markPrinted(\(orderId)) network error:", error.localizedDescription)
         }
+
+        return false
     }
+
+    // MARK: - Mapping to BasketEntry (unchanged)
 
     private func toBasketEntries(from order: SimpleOrder) -> [BasketEntry] {
         order.items.enumerated().map { idx, li in
             let pid = li.productId
 
-            // canonical printer for this line
             let resolvedPrinter =
                 normalizePrinter(MenuCatalog.shared.printer(for: pid))
                 ?? normalizePrinter(li.station)

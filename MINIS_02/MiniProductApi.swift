@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import SwiftUI
 
 struct MinisCustomizationAPI {
     var baseURL = URL(string: "https://minis.studio")!
@@ -124,9 +125,11 @@ final class CustomizationUpdater: ObservableObject {
 
 struct MinisProductAPI {
     var baseURL = URL(string: "https://minis.studio")!
-
+    @AppStorage("miniAppId") private var miniAppId: Int = 0
     enum APIError: Error { case badURL, badResponse(Int, String) }
-    private let hardCodedMiniAppId = 12
+
+    private var hardCodedMiniAppId: Int { miniAppId }   // ✅ changed (computed)
+   
     
     struct UpsertPayload: Encodable {
         var Id: Int?                 // nil for new; DB product id for edit
