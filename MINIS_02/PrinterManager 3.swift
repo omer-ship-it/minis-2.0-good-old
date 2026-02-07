@@ -7,6 +7,13 @@ import Combine
 import Darwin
 
 
+import Foundation
+import Network
+import UIKit
+import CoreFoundation
+import Combine
+import Darwin
+
 enum OneShotPrinter {
 
     private static let connectTimeout: TimeInterval = 4.0
@@ -18,16 +25,19 @@ enum OneShotPrinter {
     private static let fastRetryDelayBase: TimeInterval = 0.35
     private static let fastRetryJitterMax: TimeInterval = 0.25
 
-    // Slow retry window (per job)
-    private static let slowRetryEvery: TimeInterval = 5.0
-    private static let slowRetryMaxWindow: TimeInterval = 60.0   // 1 minute total
+    // ✅ Slow retry window (per job)
+    // ✅ BACK TO STABLE: 1 minute max so "bone" jobs never block for minutes.
+    private static let slowRetryMaxWindow: TimeInterval = 60.0
 
-    // Pending pump
+    // ✅ BACK TO STABLE: fixed retry interval (no taper)
+    private static let slowRetryEvery: TimeInterval = 5.0
+
+    // Pending pump (keeps drain alive even if no UI triggers it)
     private static let pendingPumpInterval: TimeInterval = 5.0
 
     // ✅ RETRY LOG THROTTLE
     private static let slowRetryLogEvery: Int = 3
-    
+
     // Per-printer serialization
     private static let lock = NSLock()
     private static var queues: [String: DispatchQueue] = [:]
@@ -39,18 +49,17 @@ enum OneShotPrinter {
     private static func removeJob(pk: String, dedupeKey: String) {
         lock.lock(); defer { lock.unlock() }
 
-        // remove from order list
         if var order = pendingOrder[pk] {
             order.removeAll { $0 == dedupeKey }
             pendingOrder[pk] = order
         }
 
-        // remove from map
         if var map = pendingMap[pk] {
             map.removeValue(forKey: dedupeKey)
             pendingMap[pk] = map
         }
     }
+
     private static var isDraining: Set<String> = []
     private static var pendingPumpScheduled: Set<String> = []
 
@@ -68,6 +77,7 @@ enum OneShotPrinter {
             }
         }
     }
+
     private struct Job {
         let id: UUID
         let createdAt: Date
@@ -111,6 +121,11 @@ enum OneShotPrinter {
     private static func isOnPrinterLan(_ ip: String?) -> Bool {
         guard let ip else { return false }
         return ip.hasPrefix("10.100.10.")
+    }
+
+    // ✅ 1-minute max window for ALL jobs
+    private static func slowRetryMaxWindow(for tag: String) -> TimeInterval {
+        slowRetryMaxWindow
     }
 
     private static func key(_ host: String, _ port: UInt16) -> String { "\(host):\(port)" }
@@ -173,8 +188,7 @@ enum OneShotPrinter {
 
     /// Main send with per-job completion.
     /// ✅ completion(true) only when bytes were sent successfully.
-    /// ✅ completion(false) only when job EXPIRES (slowRetryMaxWindow reached).
-    /// (No completion calls for transient retries.)
+    /// ✅ completion(false) only when job EXPIRES (1 min window reached).
     static func send(
         host: String,
         port: UInt16,
@@ -198,7 +212,6 @@ enum OneShotPrinter {
         var order = pendingOrder[pk] ?? []
 
         if let existing = map[dedupeKey] {
-            // replace payload but keep retry counter and job id
             jobId = existing.id
             let job = Job(
                 id: existing.id,
@@ -229,7 +242,6 @@ enum OneShotPrinter {
         pendingOrder[pk] = order
         lock.unlock()
 
-        // ✅ register completion (dedupe overwrites)
         storeCompletion(pk: pk, dedupeKey: dedupeKey, jobId: jobId, completion: completion)
 
         queue(for: host, port: port).async {
@@ -298,14 +310,12 @@ enum OneShotPrinter {
                 if let j = pendingMap[pk]?[dk] {
                     return j
                 } else {
-                    // 🧹 corrupted head: order has dk but map doesn't
                     pendingOrder[pk]?.removeFirst()
                     return nil
                 }
             }()
 
             guard let job else {
-                // If queue is truly empty, stop. If we just removed a corrupted head, continue once.
                 lock.lock()
                 let emptyNow = (pendingOrder[pk]?.isEmpty ?? true)
                 lock.unlock()
@@ -315,7 +325,6 @@ enum OneShotPrinter {
                     log("DRAIN STOP \(pk) empty")
                     return
                 } else {
-                    // there are more items, keep going
                     queue(for: host, port: port).async { next() }
                     return
                 }
@@ -324,25 +333,19 @@ enum OneShotPrinter {
             trySendWithSlowWindow(host: host, port: port, job: job) { outcome in
                 switch outcome {
                 case .success(let doneJob):
-                    // ✅ NOW remove from queue
                     removeJob(pk: pk, dedupeKey: doneJob.dedupeKey)
-
                     fireCompletion(pk: pk, dedupeKey: doneJob.dedupeKey, jobId: doneJob.id, ok: true)
                     queue(for: host, port: port).async { next() }
 
                 case .expired(let deadJob):
                     log("DROP \(pk) \(deadJob.dedupeKey) (expired)")
-
-                    // ✅ Remove on expiry too (otherwise it blocks the queue forever)
                     removeJob(pk: pk, dedupeKey: deadJob.dedupeKey)
-
                     fireCompletion(pk: pk, dedupeKey: deadJob.dedupeKey, jobId: deadJob.id, ok: false)
 
                     lock.lock()
                     isDraining.remove(pk)
                     lock.unlock()
 
-                    // keep pump in case other pending jobs exist
                     schedulePendingPump(host: host, port: port)
                     return
                 }
@@ -352,9 +355,7 @@ enum OneShotPrinter {
         next()
     }
 
-    // MARK: - Send strategy
-    // ✅ This function ONLY calls completion on success OR expiry.
-    // It keeps retrying internally until one of those happens.
+    // MARK: - Send strategy (stable: fixed 5s retries within 60s window)
 
     private static func trySendWithSlowWindow(
         host: String,
@@ -366,7 +367,8 @@ enum OneShotPrinter {
         sendImpl(host: host, port: port, data: job.data, attempt: 1, maxAttempts: fastAttempts, tag: job.dedupeKey) { ok in
             if ok { completion(.success(job)); return }
 
-            let deadline = job.createdAt.addingTimeInterval(slowRetryMaxWindow)
+            // ✅ stable: fixed 60s window
+            let deadline = job.createdAt.addingTimeInterval(slowRetryMaxWindow(for: job.dedupeKey))
 
             func slowTick(_ current: Job) {
                 if Date() >= deadline {
@@ -375,14 +377,13 @@ enum OneShotPrinter {
                     return
                 }
 
-                let nextAttempt = current.slowAttempts + 1
                 let updated = Job(
                     id: current.id,
                     createdAt: current.createdAt,
                     data: current.data,
                     tag: current.tag,
                     dedupeKey: current.dedupeKey,
-                    slowAttempts: nextAttempt
+                    slowAttempts: current.slowAttempts + 1
                 )
 
                 if updated.slowAttempts % slowRetryLogEvery == 0 {
@@ -501,14 +502,13 @@ enum OneShotPrinter {
                         }
                     })
                 })
+
             case .waiting(let e):
                 finish(success: false, reason: "waiting: \(e)")
             case .failed(let error):
                 finish(success: false, reason: "connection failed: \(error)")
-
             case .cancelled:
                 if !didFinish { finish(success: false, reason: "cancelled") }
-
             default:
                 break
             }
@@ -889,22 +889,236 @@ final class PrinterManager {
             self.lastSendHadNetworkError = !success
         }
     }
+    
+    private func normalizeBucketKeyToStationId(_ bucketKey: String) -> String? {
+        let k = bucketKey.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if k.hasPrefix("s") { return bucketKey }        // already station id
+        if k == "kitchen" { return "s1" }
+        if k == "bar"     { return "s2" }
+        if k == "bakery"  { return "s3" }
+        return nil
+    }
 
+    private func resolveHostForPrinterKey(_ key: String) -> String? {
+        let raw = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return nil }
+
+        // If it's already an IP
+        if raw.first?.isNumber == true { return raw }
+
+        // If it's a station id (s1/s2/s3/...)
+        if raw.hasPrefix("s"), let st = dynStation(byId: raw) {
+            return st.host
+        }
+
+        // Legacy string -> station id -> host
+        if let sid = dynStationId(forLegacyName: raw),
+           let st = dynStation(byId: sid) {
+            return st.host
+        }
+
+        return nil
+    }
     static let shared = PrinterManager()
     private let debugTickets = true
 
+    private let useDynamicPrinters: Bool = true
+
+       // Saved by MenuApiModel.persistPrinters(...) into UserDefaults:
+       // key = "printers.config.shop{shopId}"
+       private struct SavedPrintersPayload: Decodable {
+           let netPrefix: String?
+           let stations: [SavedStation]?
+           struct SavedStation: Decodable {
+               let id: String
+               let label: String
+               let octet: Int
+               let set: String?
+               let status: Int?
+           }
+       }
+
+       private struct DynStation {
+           let id: String
+           let label: String
+           let host: String
+           let family: PrinterFamily
+           let status: Int
+       }
+
+       private func resolveShopKeyId() -> String? {
+           let d = UserDefaults.standard
+           if let s = d.string(forKey: "shopId"), !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+               return s.trimmingCharacters(in: .whitespacesAndNewlines)
+           }
+           let mini = d.integer(forKey: "miniAppId")
+           if mini > 0 { return String(mini) }
+           return nil
+       }
+
+   
+    private var dynCache: [String: (hash: Int, stations: [DynStation])] = [:]
+
+
+    private func resolveBranchKey(_ branchKey: String?) -> String {
+        let raw = (branchKey ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return raw.isEmpty ? "default" : raw
+    }
+
+    private func decodeStations(_ data: Data, cacheKey: String) -> [DynStation] {
+        let h = data.hashValue
+        if let c = dynCache[cacheKey], c.hash == h {
+            return c.stations
+        }
+
+        guard let decoded = try? JSONDecoder().decode(SavedPrintersPayload.self, from: data),
+              let prefix = decoded.netPrefix?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !prefix.isEmpty
+        else {
+            dynCache[cacheKey] = (hash: h, stations: [])
+            return []
+        }
+
+        func familyFromSet(_ s: String?) -> PrinterFamily {
+            let t = (s ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return (t.contains("rongta") || t == "ron") ? .ron : .tabit
+        }
+
+        let rawStations = decoded.stations ?? []
+        let active = rawStations.filter { ($0.status ?? 1) != 0 }
+
+        let stations: [DynStation] = active.map {
+            DynStation(
+                id: $0.id,
+                label: $0.label,
+                host: prefix + String($0.octet),
+                family: familyFromSet($0.set),
+                status: $0.status ?? 1
+            )
+        }
+
+        dynCache[cacheKey] = (hash: h, stations: stations)
+        return stations
+    }
+
+    /// ✅ drop-in replacement
+    /// Pass branchKey = order.pickupLocation (e.g. "cafeteria" / "scienceBuilding")
+    private func loadDynamicStationsCached(branchKey: String? = nil) -> [DynStation] {
+        guard useDynamicPrinters else { return [] }
+        guard let sid = resolveShopKeyId() else { return [] }
+
+        let branch = resolveBranchKey(branchKey)
+
+        // 1) try branch-specific config
+        let keyBranch = "printers.config.shop\(sid).branch.\(branch)"
+        if let data = UserDefaults.standard.data(forKey: keyBranch) {
+            return decodeStations(data, cacheKey: keyBranch)
+        }
+
+        // 2) fallback: old single-config key
+        let keyDefault = "printers.config.shop\(sid)"
+        guard let data = UserDefaults.standard.data(forKey: keyDefault) else { return [] }
+        return decodeStations(data, cacheKey: keyDefault)
+    }
+     
+    private func dynStation(byId id: String, branchKey: String? = nil) -> DynStation? {
+        let cleaned = id.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return nil }
+        return loadDynamicStationsCached(branchKey: branchKey).first(where: { $0.id == cleaned })
+    }
+
+
+    private func dynStationId(forLegacyName legacy: String, branchKey: String? = nil) -> String? {
+        let t = legacy
+            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+            .lowercased()
+
+        let stations = loadDynamicStationsCached(branchKey: branchKey)
+
+        func match(_ containsAny: [(String, String)]) -> String? {
+            for st in stations {
+                let l  = st.label.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+                let lo = l.lowercased()
+                for (en, he) in containsAny {
+                    if lo.contains(en) || l.contains(he) { return st.id }
+                }
+            }
+            return nil
+        }
+
+        if t == "bar"     { return match([("bar","בר")]) }
+        if t == "kitchen" { return match([("kitchen","מטבח")]) }
+        if t == "bakery"  { return match([("bakery","מאפ"), ("vitrine","ויטר")]) }
+
+        if t.contains("bar")     { return match([("bar","בר")]) }
+        if t.contains("kitchen") { return match([("kitchen","מטבח")]) }
+        if t.contains("bakery")  { return match([("bakery","מאפ"), ("vitrine","ויטר")]) }
+
+        return nil
+    }
+
+       // Map station id -> legacy Station (bar/kitchen/bakery) for backwards compatibility
+       private func legacyStationFromStationId(_ stationId: String) -> Station? {
+           guard let st = dynStation(byId: stationId) else { return nil }
+           let l = st.label
+           let lo = l.lowercased()
+           if lo.contains("bar") || l.contains("בר") { return .bar }
+           if lo.contains("kitchen") || l.contains("מטבח") { return .kitchen }
+           if lo.contains("bakery") || l.contains("מאפ") || l.contains("ויטר") { return .bakery }
+           return nil
+       }
+
+       // Returns station ids for a KDS line:
+       // 1) Prefer MenuCatalog product printers (multi) if available
+       // 2) Else use line.station (could be "s2" or "Bar")
+    private func resolvedStationIds(for line: KDSOrderLine) -> [String] {
+        func clean(_ s: String?) -> String {
+            (s ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        // 1) MenuCatalog is authoritative
+        if let pid = line.productId,
+           let item = MenuCatalog.shared.item(for: pid) {
+
+            if let ps = item.printers, !ps.isEmpty {
+                return ps.map { clean($0) }
+                    .filter { $0.hasPrefix("s") }   // ✅ ONLY station ids
+                    .sorted()
+            }
+
+            let p = clean(item.printer)
+            if p.hasPrefix("s") { return [p] }
+        }
+
+        // 2) Fallback ONLY to line.station if it's already sX
+        let st = clean(line.station)
+        if st.hasPrefix("s") { return [st] }
+
+        // 3) Otherwise: no routing (avoid accidental duplicates)
+        Swift.print("⚠️ ROUTE MISSING: productId=\(line.productId ?? -1) name='\(line.name)' station='\(line.station ?? "")'")
+        return []
+    }
+
+       // Convert a "station id" or legacy name into a printable target (host + family)
+    private func resolveTarget(from stationId: String, branchKey: String? = nil) -> (host: String, family: PrinterFamily)? {
+        let raw = stationId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard raw.hasPrefix("s") else { return nil }   // ✅ ONLY sX
+
+        guard let st = dynStation(byId: raw, branchKey: branchKey) else { return nil }
+        return (st.host, st.family)
+    }
     // MARK: - Raw IPs for each physical printer
 
     // Ron / Rongta printers
-    private let RonbarPrinterIP     = "10.100.10.222"
-    private let RonbakeryPrinterIP  = "10.100.10.221"
-    private let RonkitchenPrinterIP = "10.100.10.220"
+    private let RonbarPrinterIP     = "10.100.10.5"
+    private let RonbakeryPrinterIP  = "10.100.10.6"
+    private let RonkitchenPrinterIP = "10.100.10.7"
 
     // Tabit printers
-    private let TabitBarPrinterIP     = "10.100.10.234"
-    private let TabitBakeryPrinterIP  = "10.100.10.230"   // adjust if needed
-    private let TabitKitchenPrinterIP = "10.100.10.232"
-    private let KitchenBackPrinterIP = "10.100.10.238"
+    private let TabitBarPrinterIP     = "10.100.10.1"
+    private let TabitBakeryPrinterIP  = "10.100.10.2"   // adjust if needed
+    private let TabitKitchenPrinterIP = "10.100.10.3"
+    private let KitchenBackPrinterIP = "10.100.10.4"
     // ✅ Rongta KitchenBack tuning (make it match the others)
     private let kitchenBackFamily: PrinterFamily = .ron      // uses ESC t 33
     private let kitchenBackRotated: Bool = false              // or false if you don’t want rotation
@@ -965,23 +1179,36 @@ final class PrinterManager {
 
     // Computed active IPs based on current set
     private var activeBarIP: String {
+        if useDynamicPrinters {
+            // prefer station ids if present
+            if let host = resolveHostForPrinterKey("s2") { return host }   // your Bar id
+            if let host = resolveHostForPrinterKey("Bar") { return host }
+        }
         switch activePrinterSet {
         case .ron:   return RonbarPrinterIP
         case .tabit: return TabitBarPrinterIP
         }
     }
 
-    private var activeBakeryIP: String {
-        switch activePrinterSet {
-        case .ron:   return RonbakeryPrinterIP
-        case .tabit: return TabitBakeryPrinterIP
-        }
-    }
-
     private var activeKitchenIP: String {
+        if useDynamicPrinters {
+            if let host = resolveHostForPrinterKey("s1") { return host }   // your Kitchen id
+            if let host = resolveHostForPrinterKey("Kitchen") { return host }
+        }
         switch activePrinterSet {
         case .ron:   return RonkitchenPrinterIP
         case .tabit: return TabitKitchenPrinterIP
+        }
+    }
+
+    private var activeBakeryIP: String {
+        if useDynamicPrinters {
+            if let host = resolveHostForPrinterKey("s3") { return host }   // your Vitrine/Bakery id
+            if let host = resolveHostForPrinterKey("Bakery") { return host }
+        }
+        switch activePrinterSet {
+        case .ron:   return RonbakeryPrinterIP
+        case .tabit: return TabitBakeryPrinterIP
         }
     }
 
@@ -1227,9 +1454,7 @@ final class PrinterManager {
         job += EscPos.initPrinter
         job += EscPos.feed(1)
 
-        let fam = activeFamily
-        job += escSelectHebrew(fam.codePage)
-
+       
         // ===== TITLE (BIG, CENTER) =====
         job += EscPos.align(1)
         job += EscPos.style(doubleHeight: true, doubleWidth: true, bold: true)
@@ -1334,13 +1559,33 @@ final class PrinterManager {
         job += EscPos.feed(4)
         job += EscPos.cut
 
-        let host = activeBakeryIP
-        Swift.print("🧾 [PrinterManager] printTaxInvoice → bakery (one-shot) \(host):\(port)")
+       
+        let invoiceTarget: (host: String, family: PrinterFamily) = {
+            if let t = resolveTarget(from: "s3") {
+                return t
+            }
+
+            // Fallbacks (if dynamic config missing)
+            let hostFallback = activeBakeryIP
+            let famFallback  = activeFamily
+
+            Swift.print("⚠️ [PrinterManager] printTaxInvoice: resolveTarget('s3') == nil")
+            Swift.print("   shopKeyId=\(resolveShopKeyId() ?? "nil")")
+            Swift.print("   dynStations=\(loadDynamicStationsCached().map { "\($0.id)=\($0.host) (\($0.label))" }.joined(separator: ", "))")
+            Swift.print("   FALLBACK host=\(hostFallback) family=\(famFallback)")
+
+            return (hostFallback, famFallback)
+        }()
+
+        let fam = invoiceTarget.family
+        job += escSelectHebrew(fam.codePage)
+
+        let host = invoiceTarget.host
+        Swift.print("🧾 [PrinterManager] printTaxInvoice → s3 (one-shot) \(host):\(port) family=\(fam)")
         OneShotPrinter.send(host: host, port: port, data: job)
     }
 
     // MARK: - Main order printing
-
     func print(order o: KDSAdminOrder, for station: StationFilter) {
         guard o.source == .kiosk else {
             Swift.print("🛑 [PrinterManager] skipping print for non-kiosk source: \(o.source)")
@@ -1348,127 +1593,138 @@ final class PrinterManager {
         }
 
         let allLines = o.lines
-        let kitchenLines = sortForPrint(allLines.filter { classifyStation(for: $0) == .kitchen })
-        let bakeryLines  = sortForPrint(allLines.filter { classifyStation(for: $0) == .bakery })
-        let barLines     = sortForPrint(allLines.filter { classifyStation(for: $0) == .bar })
-        
-        switch station {
-        case .kitchen:
-            guard !kitchenLines.isEmpty else {
-                Swift.print("🧑‍🍳 KITCHEN: no lines to print for order #\(o.id)")
-                return
-            }
-
-            // ✅ Always print ALL kitchen lines to Kitchen (unchanged)
-            do {
-                debugTicketPreview(order: o, lines: kitchenLines, stationLabel: "Kitchen")
-                let host = activeKitchenIP
-                let fam  = activeFamily
-                let job  = makeJob(order: o, lines: kitchenLines, rotated: false, family: fam)
-                Swift.print("🧑‍🍳 KITCHEN: sending \(job.count) bytes to \(host):\(port)")
-                send(job, host: host, dedupeKey: "bone|\(o.id)|kitchen")
-            }
-
-            // ✅ Additionally print ONLY toast lines to KitchenBack (Rongta)
-            let toastLines = kitchenLines.filter { isToastLine($0) }
-            if !toastLines.isEmpty {
-                debugTicketPreview(order: o, lines: toastLines, stationLabel: "KitchenBack (טוסט)")
-
-                let host = KitchenBackPrinterIP
-
-                // 🔥 FORCE Rongta decoding (ESC t 33) regardless of activePrinterSet
-                let backFamily: PrinterFamily = .ron
-
-                // If your Rongta is physically rotated, set rotated: true (kept true here)
-                let backJob = makeJob(
-                    order: o,
-                    lines: toastLines,
-                    rotated: kitchenBackRotated,
-                    family: kitchenBackFamily,
-                    lineWidth: kitchenBackLineWidth
-                )
-
-                Swift.print("🧑‍🍳 KITCHENBACK (RONGTA): sending \(backJob.count) bytes to \(host):\(port)")
-                send(backJob, host: host, dedupeKey: "bone|\(o.id)|kitchenback|toast")
-            }
-
+        guard !allLines.isEmpty else {
+            Swift.print("🖨 no lines to print for order #\(o.id)")
             return
-            
+        }
 
-        case .bakery:
-            Swift.print("🧁 BAKERY printing order #\(o.id), lines=",
-                        bakeryLines.map { "\($0.name) (\($0.category ?? "-"))" })
+        // ------------------------------------------------------------
+        // ✅ Dynamic routing (printerIds / printerId) with legacy fallback
+        // ------------------------------------------------------------
+        // - If product has Printers[] -> print to those station IDs (s1/s2/s3)
+        // - Else fallback to legacy classification (bar/kitchen/bakery)
+        // ------------------------------------------------------------
+        var buckets: [String: [KDSOrderLine]] = [:]   // key = "s1"/"s2"/"s3" OR "bar"/"kitchen"/"bakery"
 
-            guard !bakeryLines.isEmpty else {
-                Swift.print("🧁 BAKERY: no lines to print for order #\(o.id)")
-                return
+        for ln in allLines {
+            let ids = resolvedStationIds(for: ln)  // returns ONLY ["sX"] now when available
+            if ids.isEmpty {
+                let legacy = classifyStation(for: ln).rawValue   // "bar"/"kitchen"/"bakery"
+                buckets[legacy, default: []].append(ln)
+            } else {
+                for id in ids {
+                    buckets[id, default: []].append(ln)
+                }
+            }
+        }
+
+        // ✅ Now that buckets are built, compute bar+bakery presence
+        let hasBar = buckets.keys.contains("s2") || buckets.keys.contains("bar")
+        let hasBakery = buckets.keys.contains("s3") || buckets.keys.contains("bakery")
+        let hasBarAndBakery = hasBar && hasBakery
+
+        // Stable: keep deterministic line ordering inside every bucket
+        for k in buckets.keys {
+            buckets[k] = sortForPrint(buckets[k] ?? [])
+        }
+
+        // ------------------------------------------------------------
+        // ✅ Toast special (KitchenBack) - keep your existing behavior
+        // Only when the order is printed to "kitchen" or "all"
+        // ------------------------------------------------------------
+        func maybePrintKitchenBackToast(fromKitchenLines kitchenLines: [KDSOrderLine]) {
+            let toastLines = kitchenLines.filter { isToastLine($0) }
+            guard !toastLines.isEmpty else { return }
+
+            debugTicketPreview(order: o, lines: toastLines, stationLabel: "KitchenBack (טוסט)")
+
+            let kb = kitchenBackDynamicTarget()
+            let host = kb?.host ?? KitchenBackPrinterIP
+            let fam  = kb?.family ?? kitchenBackFamily
+            let backJob = makeJob(
+                order: o,
+                lines: toastLines,
+                rotated: kitchenBackRotated,
+                family: fam,
+                lineWidth: kitchenBackLineWidth,
+                waitBanner: nil
+            )
+
+            Swift.print("🧑‍🍳 KITCHENBACK (RONGTA): sending \(backJob.count) bytes to \(host):\(port)")
+            send(backJob, host: host, dedupeKey: "bone|\(o.id)|kitchenback|toast")
+        }
+
+        // ------------------------------------------------------------
+        // Helper: send ONE bucket (stationId or legacy) if allowed by filter
+        // ------------------------------------------------------------
+        func allowedByFilter(bucketKey: String, stationFilter: StationFilter) -> Bool {
+            // stationFilter is legacy concept; map it to station ids
+            switch stationFilter {
+            case .all:
+                return true
+            case .kitchen:
+                return bucketKey == "s1" || bucketKey == "kitchen"
+            case .bar:
+                return bucketKey == "s2" || bucketKey == "bar"
+            case .bakery:
+                return bucketKey == "s3" || bucketKey == "bakery"
+            }
+        }
+
+        // ------------------------------------------------------------
+        // ✅ Print buckets according to the requested filter
+        // ------------------------------------------------------------
+        // Also collect "kitchen lines" (s1 or legacy kitchen) for KitchenBack toast logic.
+        var kitchenLinesForToast: [KDSOrderLine] = []
+
+        for (bucketKey, lines) in buckets {
+            guard !lines.isEmpty else { continue }
+            guard allowedByFilter(bucketKey: bucketKey, stationFilter: station) else { continue }
+
+            // Track kitchen lines for KitchenBack toast
+            if bucketKey == "s1" || bucketKey == "kitchen" {
+                kitchenLinesForToast.append(contentsOf: lines)
             }
 
-            debugTicketPreview(order: o, lines: bakeryLines, stationLabel: "Bakery")
-
-            let host = activeBakeryIP
-            let fam  = activeFamily
-            let job  = makeJob(order: o, lines: bakeryLines, rotated: false, family: fam)
-            Swift.print("🧁 BAKERY: sending \(job.count) bytes to \(host):\(port)")
-            let dk = "bone|\(o.id)|bakery"
-            send(job, host: host, dedupeKey: dk)
-
-        case .all:
-            guard !allLines.isEmpty else {
-                Swift.print("📦 ALL: no lines to print for order #\(o.id)")
-                return
+            guard let sid = normalizeBucketKeyToStationId(bucketKey),
+                  let target = resolveTarget(from: sid)
+            else {
+                Swift.print("⚠️ no printer target for bucket=\(bucketKey)")
+                continue
             }
 
-            let host = activeBarIP
-            let fam  = activeFamily
-            let job  = makeJob(order: o, lines: allLines, rotated: false, family: fam)
-            Swift.print("📦 ALL: sending \(job.count) bytes to bar \(host):\(port)")
-            debugTicketPreview(order: o, lines: allLines, stationLabel: "All stations")
-            let dk = "bone|\(o.id)|all"
-            send(job, host: host, dedupeKey: dk)
+            debugTicketPreview(order: o, lines: lines, stationLabel: "Dyn \(bucketKey)")
 
-        case .bar:
-            Swift.print("🖨 BAR station handling order #\(o.id)")
-            Swift.print("   • bakeryLines =",
-                        bakeryLines.map { "\($0.name) (\($0.category ?? "-"))" })
-            Swift.print("   • barLines    =",
-                        barLines.map { "\($0.name) (\($0.category ?? "-"))" })
+            // ✅ Banner for bar+bakery orders (NO emojis)
+            let waitBanner: String? = {
+                guard hasBarAndBakery else { return nil }
+                if bucketKey == "s3" || bucketKey == "bakery" { return "מחכה לשתייה" }
+                return nil
+            }()
 
-            if bakeryLines.isEmpty && barLines.isEmpty {
-                Swift.print("🖨 BAR: no lines to print for order #\(o.id)")
-                return
-            }
+            let job = makeJob(
+                order: o,
+                lines: lines,
+                rotated: false, // keep your current default for normal tickets
+                family: target.family,
+                lineWidth: 42,
+                waitBanner: waitBanner
+            )
 
-            if !bakeryLines.isEmpty {
-                debugTicketPreview(order: o,
-                                   lines: bakeryLines,
-                                   stationLabel: "Bakery via BAR")
+            let dk = "bone|\(o.id)|\(bucketKey)"
+            Swift.print("🖨 PRINT \(bucketKey): sending \(job.count) bytes to \(target.host):\(port)")
+            send(job, host: target.host, dedupeKey: dk)
+        }
 
-                let host = activeBakeryIP
-                let fam  = activeFamily
-                let bakeryJob = makeJob(order: o, lines: bakeryLines, rotated: false, family: fam)
-
-                Swift.print("🧁 BAKERY (from BAR): sending \(bakeryJob.count) bytes to \(host):\(port)")
-
-                // ✅ IMPORTANT: unique per-order+station so jobs don't overwrite each other
-                let dedupeKey = "bone|\(o.id)|bakery"
-                send(bakeryJob, host: host, dedupeKey: dedupeKey)
-            }
-
-            if !barLines.isEmpty {
-                debugTicketPreview(order: o,
-                                   lines: barLines,
-                                   stationLabel: "Bar")
-
-                let host = activeBarIP
-                let fam  = activeFamily
-                let barJob = makeJob(order: o, lines: barLines, rotated: false, family: fam)
-
-                Swift.print("🖨 BAR: sending \(barJob.count) bytes to \(host):\(port)")
-
-                // ✅ Stable per-order + station dedupe key
-                let dedupeKey = "bone|\(o.id)|bar"
-                send(barJob, host: host, dedupeKey: dedupeKey)
+        // ------------------------------------------------------------
+        // ✅ KitchenBack toast printing only when relevant
+        // - If printing "kitchen" -> toast subset from kitchen buckets
+        // - If printing "all"    -> toast subset from kitchen buckets too
+        // ------------------------------------------------------------
+        if station == .kitchen || station == .all {
+            if !kitchenLinesForToast.isEmpty {
+                let toastSrc = sortForPrint(kitchenLinesForToast)
+                maybePrintKitchenBackToast(fromKitchenLines: toastSrc)
             }
         }
     }
@@ -1482,99 +1738,97 @@ final class PrinterManager {
         }
 
         let allLines = o.lines
-
-        // ✅ sort once if you added sortForPrint(...)
-        // let kitchenLines = sortForPrint(allLines.filter { classifyStation(for: $0) == .kitchen })
-        // let bakeryLines  = sortForPrint(allLines.filter { classifyStation(for: $0) == .bakery })
-        // let barLines     = sortForPrint(allLines.filter { classifyStation(for: $0) == .bar })
-
-        let kitchenLines: [KDSOrderLine] = allLines.filter { classifyStation(for: $0) == .kitchen }
-        let bakeryLines:  [KDSOrderLine] = allLines.filter { classifyStation(for: $0) == .bakery }
-        let barLines:     [KDSOrderLine] = allLines.filter { classifyStation(for: $0) == .bar }
-
-        if kitchenLines.isEmpty && bakeryLines.isEmpty && barLines.isEmpty {
+        guard !allLines.isEmpty else {
             Swift.print("🖨 SPLIT-ALL: no lines to print for order #\(o.id)")
             return
         }
 
-        let fam = activeFamily
-
-        // ✅ Precompute toast subset BEFORE using it anywhere
-        let toastLines = kitchenLines.filter { isToastLine($0) }
-
-        // ---------------- KITCHEN ----------------
-        if !kitchenLines.isEmpty {
-            debugTicketPreview(order: o, lines: kitchenLines, stationLabel: "Kitchen (split all)")
-
-            let host = activeKitchenIP
-            let rotated = fam.supportsRotation
-
-            let job = makeJob(
-                order: o,
-                lines: kitchenLines,                 // ✅ kitchen gets ALL kitchen lines
-                rotated: rotated,
-                family: fam,
-                lineWidth: 42                        // or your default variable
-            )
-
-            Swift.print("🧑‍🍳 SPLIT-ALL KITCHEN: sending \(job.count) bytes to \(host):\(port)")
-            send(job, host: host, dedupeKey: "bone|\(o.id)|kitchen")
+        // ✅ Dynamic grouping (multi printer support)
+        // line -> stationIds (from MenuCatalog printers[] OR line.station)
+        // then bucket lines per stationId
+        var buckets: [String: [KDSOrderLine]] = [:]
+        for ln in allLines {
+            let ids = resolvedStationIds(for: ln)   // returns ONLY ["sX"] now
+            if ids.isEmpty {
+                // fallback safety (rare in your current routing)
+                let legacy = classifyStation(for: ln).rawValue
+                buckets[legacy, default: []].append(ln)
+            } else {
+                for id in ids {
+                    buckets[id, default: []].append(ln)
+                }
+            }
         }
 
-        // ---------------- KITCHEN BACK (RONGTA) ----------------
+        // ✅ bar+bakery presence (for waitBanner)
+        let hasBar = buckets.keys.contains("s2") || buckets.keys.contains("bar")
+        let hasBakery = buckets.keys.contains("s3") || buckets.keys.contains("bakery")
+        let hasBarAndBakery = hasBar && hasBakery
+
+        // Stable ordering inside buckets
+        for k in buckets.keys {
+            buckets[k] = sortForPrint(buckets[k] ?? [])
+        }
+
+        // ---- Toast special (keep your existing kitchen-back behavior) ----
+        let kitchenLinesForToast = allLines.filter { classifyStation(for: $0) == .kitchen }
+        let toastLines = kitchenLinesForToast.filter { isToastLine($0) }
         if !toastLines.isEmpty {
             debugTicketPreview(order: o, lines: toastLines, stationLabel: "KitchenBack (split all) טוסט")
-
             let host = KitchenBackPrinterIP
 
             let job = makeJob(
                 order: o,
                 lines: toastLines,
-                rotated: kitchenBackRotated,         // ✅ your knob (true/false)
-                family: kitchenBackFamily,           // ✅ forced .ron
-                lineWidth: kitchenBackLineWidth      // ✅ 42 (or 32 if 58mm)
+                rotated: kitchenBackRotated,
+                family: kitchenBackFamily,
+                lineWidth: kitchenBackLineWidth,
+                waitBanner: nil
             )
 
             Swift.print("🧑‍🍳 SPLIT-ALL KITCHENBACK: sending \(job.count) bytes to \(host):\(port)")
             send(job, host: host, dedupeKey: "bone|\(o.id)|kitchenback|toast")
         }
 
-        // ---------------- BAKERY ----------------
-        if !bakeryLines.isEmpty {
-            debugTicketPreview(order: o, lines: bakeryLines, stationLabel: "Bakery (split all)")
+        // ---- Send per bucket ----
+        for (bucketKey, lines) in buckets {
+            guard !lines.isEmpty else { continue }
 
-            let host = activeBakeryIP
+            // Resolve host/family for station id
+            guard let sid = normalizeBucketKeyToStationId(bucketKey),
+                  let target = resolveTarget(from: sid)
+            else {
+                Swift.print("⚠️ no printer target for bucket=\(bucketKey)")
+                continue
+            }
+
+            let host = target.host
+            let fam  = target.family
+
+            debugTicketPreview(order: o, lines: lines, stationLabel: "Dyn \(bucketKey)")
+
+            // Rotation only if Ron-family supports it
             let rotated = fam.supportsRotation
+
+            // ✅ Banner (NO emojis) on bar/bakery bones only when BOTH exist
+            let waitBanner: String? = {
+                guard hasBarAndBakery else { return nil }
+                if bucketKey == "s3" || bucketKey == "bakery" { return "מחכה לשתייה" }
+                return nil
+            }()
 
             let job = makeJob(
                 order: o,
-                lines: bakeryLines,
+                lines: lines,
                 rotated: rotated,
                 family: fam,
-                lineWidth: 42
+                lineWidth: 42,
+                waitBanner: waitBanner
             )
 
-            Swift.print("🧁 SPLIT-ALL BAKERY: sending \(job.count) bytes to \(host):\(port)")
-            send(job, host: host, dedupeKey: "bone|\(o.id)|bakery")
-        }
-
-        // ---------------- BAR ----------------
-        if !barLines.isEmpty {
-            debugTicketPreview(order: o, lines: barLines, stationLabel: "Bar (split all)")
-
-            let host = activeBarIP
-            let rotated = fam.supportsRotation
-
-            let job = makeJob(
-                order: o,
-                lines: barLines,
-                rotated: rotated,
-                family: fam,
-                lineWidth: 42
-            )
-
-            Swift.print("🍹 SPLIT-ALL BAR: sending \(job.count) bytes to \(host):\(port)")
-            send(job, host: host, dedupeKey: "bone|\(o.id)|bar")
+            let dk = "bone|\(o.id)|\(bucketKey)"
+            Swift.print("🖨 SPLIT-ALL \(bucketKey): sending \(job.count) bytes to \(host):\(port)")
+            send(job, host: host, dedupeKey: dk)
         }
     }
 
@@ -1593,7 +1847,16 @@ final class PrinterManager {
         .lowercased()
     }
     fileprivate func classifyStation(for line: KDSOrderLine) -> Station {
+        // If station is a stationId like "s2", map it using printers config label
+        if useDynamicPrinters,
+           let raw = line.station?.trimmingCharacters(in: .whitespacesAndNewlines),
+           raw.hasPrefix("s"),
+           let legacy = legacyStationFromStationId(raw) {
+            return legacy
+        }
+
         if let s = stationFromString(line.station) { return s }
+
         Swift.print("⚠️ [PrinterManager] missing station for productId=\(line.productId ?? -1) name='\(line.name)' → default Kitchen")
         return .kitchen
     }
@@ -1648,7 +1911,8 @@ final class PrinterManager {
         lines: [KDSOrderLine],
         rotated: Bool = false,
         family: PrinterFamily,
-        lineWidth: Int = 42
+        lineWidth: Int = 42,
+        waitBanner: String? = nil
     ) -> Data {
 
         struct PrintItem {
@@ -1657,6 +1921,7 @@ final class PrinterManager {
             var modsClean: String
         }
 
+        
         
         let phoneLine: String? = {
             let p = o.customerPhone?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -1789,6 +2054,16 @@ final class PrinterManager {
                 job += asciiLine(p)          // ✅ keep digits stable
                 job += EscPos.feed(1)
             }
+            
+            if let msg = waitBanner, !msg.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                job += EscPos.feed(1)
+                job += EscPos.align(1)
+                job += makeBlackTitle(msg, totalWidth: 24)   // ✅ once, bold, no emojis
+                job += EscPos.align(0)
+                job += EscPos.feed(1)
+            }
+            
+            
 
             if isTakeAwayService {
                 job += EscPos.feed(1)
@@ -1879,6 +2154,13 @@ final class PrinterManager {
                 job += EscPos.feed(1)
             }
 
+            if let msg = waitBanner, !msg.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                job += EscPos.feed(1)
+                job += EscPos.align(1)
+                job += makeBlackTitle(msg, totalWidth: 24)
+                job += EscPos.align(0)
+                job += EscPos.feed(1)
+            }
             job += EscPos.style(doubleHeight: false, doubleWidth: false, bold: false)
             job += EscPos.align(0)
             job += EscPos.feed(1)
@@ -2439,7 +2721,11 @@ extension PrinterManager {
         
         // ✅ THIS is what you want to print as "cash" (cash + tips)
         let printedTips = max(report.tipBaseTotal - printTipAdjustment, 0)
-        let printedCashWithTip = max(report.cashAmount    , 0)
+
+
+        let printedCashWithTip = max(report.cashAmount + printedTips, 0)
+
+
         
         // ✅ Totals for printing (cash already includes tip now)
         let printedCollectionsTotal = printedCashWithTip + report.cardAmount
@@ -2648,6 +2934,18 @@ extension PrinterManager {
     private func fmt2(_ v: Double) -> String { String(format: "%.2f", v) }
     
     
+    private func kitchenBackDynamicTarget() -> (host: String, family: PrinterFamily)? {
+        let stations = loadDynamicStationsCached()
+        if let st = stations.first(where: {
+            let lo = $0.label.lowercased()
+            return lo.contains("kitchen back")
+                || lo.contains("toast")
+                || $0.label.contains("טוסט")
+        }) {
+            return (st.host, st.family)
+        }
+        return nil
+    }
     
     // ✅ STEP: make this return a real ACK so OrdersAutoPrinter can decide markPrinted()
 
@@ -2660,6 +2958,7 @@ extension PrinterManager {
         customerPhone: String?
     ) async -> Bool {
 
+        // Build KDS lines (keep station string for backwards compat / debug)
         let lines: [KDSOrderLine] = entries.map { entry in
             KDSOrderLine(
                 itemId: nil,
@@ -2668,7 +2967,10 @@ extension PrinterManager {
                 qty: entry.quantity,
                 category: entry.item.category,
                 status: 1,
-                station: entry.item.printer,     // ✅ station routing
+                station: {
+                    let pid = entry.item.effectivePrinterId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    return pid.hasPrefix("s") ? pid : ""
+                }(),
                 modifiers: entry.subtitle
             )
         }
@@ -2693,103 +2995,131 @@ extension PrinterManager {
         )
 
         let allLines = order.lines
-        let fam = activeFamily
 
-        let kitchenLines = allLines.filter { classifyStation(for: $0) == .kitchen }
-        let bakeryLines  = allLines.filter { classifyStation(for: $0) == .bakery }
-        let barLines     = allLines.filter { classifyStation(for: $0) == .bar }
-        let toastLines   = kitchenLines.filter { isToastLine($0) }
+        // ✅ Build dynamic buckets:
+        // Each line can map to multiple printers via MenuCatalog item.printers (station ids),
+        // OR fallback to line.station ("sX" only in your current pipeline).
+        var buckets: [String: [KDSOrderLine]] = [:]
 
-        struct StationAttempt {
-            let name: String
-            let ok: Bool
+        for ln in allLines {
+            let ids = resolvedStationIds(for: ln)
+            Swift.print("🧾 ROUTE productId=\(ln.productId ?? -1) name='\(ln.name)' ids=\(ids)")
+            if ids.isEmpty {
+                // fallback (should be rare in your new routing)
+                let legacy = classifyStation(for: ln).rawValue // "bar"/"kitchen"/"bakery"
+                buckets[legacy, default: []].append(ln)
+            } else {
+                for id in ids {
+                    buckets[id, default: []].append(ln)
+                }
+            }
         }
 
+        // ✅ Determine if order has BOTH bar + bakery (so we can print the "waiting" banner)
+        let hasBar = buckets.keys.contains("s2") || buckets.keys.contains("bar")
+        let hasBakery = buckets.keys.contains("s3") || buckets.keys.contains("bakery")
+        let hasBarAndBakery = hasBar && hasBakery
+
+        // Stable ordering inside each bucket
+        for k in buckets.keys {
+            buckets[k] = sortForPrint(buckets[k] ?? [])
+        }
+
+        // ✅ Toast special: keep your existing KitchenBack behavior (toast lines only)
+        let kitchenLinesForToast = allLines.filter { classifyStation(for: $0) == .kitchen }
+        let toastLines = kitchenLinesForToast.filter { isToastLine($0) }
+
+        struct StationAttempt { let name: String; let ok: Bool }
         var results: [StationAttempt] = []
 
-        // ✅ KITCHEN
-        if !kitchenLines.isEmpty {
-            let job = makeJob(order: order, lines: kitchenLines, rotated: fam.supportsRotation, family: fam, lineWidth: 42)
-            let ok = await OneShotPrinter.sendAwait(
-                host: activeKitchenIP,
-                port: port,
-                data: job,
-                tag: "bone|\(order.id)|kitchen",
-                dedupeKey: "bone|\(order.id)|kitchen"
-            )
-            results.append(.init(name: "Kitchen", ok: ok))
-        }
-
-        // ✅ KITCHENBACK (toast only)
+        // 1) KitchenBack (toast-only) — unchanged routing
         if !toastLines.isEmpty {
-            let dk = "bone|\(order.id)|kitchenback|toast"
 
-            let job = makeJob(
-                order: order,
-                lines: toastLines,
-                rotated: kitchenBackRotated,
-                family: kitchenBackFamily,
-                lineWidth: kitchenBackLineWidth
-            )
+            // ✅ If ANY toast line already routes to a "hot line" printer (פס חם),
+            // then don't do the extra KitchenBack print (it would duplicate).
+            func isHotlineStationId(_ id: String) -> Bool {
+                guard let st = dynStation(byId: id) else { return false }
+                return st.label.contains("פס חם") || st.label.lowercased().contains("hot")
+            }
 
-            let ok = await OneShotPrinter.sendAwait(
-                host: KitchenBackPrinterIP,
-                port: port,
-                data: job,
-                tag: dk,
-                dedupeKey: dk
-            )
+            let toastAlreadyCoversHotline: Bool = toastLines.contains { ln in
+                let ids = resolvedStationIds(for: ln)
+                return ids.contains(where: isHotlineStationId)
+            }
 
-            results.append(.init(name: "KitchenBack", ok: ok))
+            if toastAlreadyCoversHotline {
+                Swift.print("🧯 KitchenBack skipped: toast already routes to hotline via Printers[]")
+            } else {
+                let dk = "bone|\(order.id)|kitchenback|toast"
+
+                let kbTarget = kitchenBackDynamicTarget()
+                let hostToUse = kbTarget?.host ?? KitchenBackPrinterIP
+                let famToUse  = kbTarget?.family ?? kitchenBackFamily
+
+                let job = makeJob(
+                    order: order,
+                    lines: toastLines,
+                    rotated: kitchenBackRotated,
+                    family: famToUse,
+                    lineWidth: kitchenBackLineWidth,
+                    waitBanner: nil
+                )
+
+                _ = await OneShotPrinter.sendAwait(
+                    host: hostToUse,
+                    port: port,
+                    data: job,
+                    tag: dk,
+                    dedupeKey: dk
+                )
+            }
         }
+        let printSession = UUID().uuidString.prefix(6)
+        // 2) Print every bucket (dynamic printers)
+        for (bucketKey, linesForBucket) in buckets {
+            guard let sid = normalizeBucketKeyToStationId(bucketKey),
+                  let target = resolveTarget(from: sid)
+            else {
+                Swift.print("⚠️ no printer target for bucket=\(bucketKey)")
+                continue
+            }
+            let host = target.host
+            let fam  = target.family
+            
+            let dk = "bone|\(order.id)|\(sid)|\(printSession)"
 
-        // ✅ BAKERY
-        if !bakeryLines.isEmpty {
-            let dk = "bone|\(order.id)|bakery"
+            // ✅ Banner (NO emojis) on bar/bakery bones only when BOTH exist
+            let waitBanner: String? = {
+                guard hasBarAndBakery else { return nil }
+                if bucketKey == "s3" || bucketKey == "bakery" { return "מחכה לשתייה" }
+                return nil
+            }()
 
             let job = makeJob(
                 order: order,
-                lines: bakeryLines,
+                lines: linesForBucket,
                 rotated: fam.supportsRotation,
                 family: fam,
-                lineWidth: 42
+                lineWidth: 42,
+                waitBanner: waitBanner
             )
 
             let ok = await OneShotPrinter.sendAwait(
-                host: activeBakeryIP,
+                host: host,
                 port: port,
                 data: job,
                 tag: dk,
                 dedupeKey: dk
             )
 
-            results.append(.init(name: "Bakery", ok: ok))
-        }
-        // ✅ BAR
-        if !barLines.isEmpty {
-            let dk = "bone|\(order.id)|bar"
-            let job = makeJob(
-                order: order,
-                lines: barLines,
-                rotated: fam.supportsRotation,
-                family: fam,
-                lineWidth: 42
-            )
-
-            let ok = await OneShotPrinter.sendAwait(
-                host: activeBarIP,
-                port: port,
-                data: job,
-                tag: dk,
-                dedupeKey: dk
-            )
-
-            results.append(.init(name: "Bar", ok: ok))
+            results.append(.init(name: bucketKey, ok: ok))
         }
 
         let failed = results.filter { !$0.ok }.map(\.name)
-        if !failed.isEmpty {
-            Swift.print("🛑 printCashPointSplit FAILED order=\(order.id) stations=\(failed)")
+
+        // Treat KitchenBack as “optional” (it’s a duplicate/special route)
+        let hardFailed = failed.filter { $0 != "KitchenBack" && !$0.contains("kitchenback") }
+        if !hardFailed.isEmpty {
             return false
         }
 
@@ -3200,4 +3530,5 @@ extension PrinterManager {
         OneShotPrinter.send(host: host, port: port, data: job, tag: dk, dedupeKey: dk)
     }
 }
+
 */

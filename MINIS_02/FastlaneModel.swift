@@ -7,6 +7,37 @@ import Combine
 
 let primariesFontName = "PrimariesMLAAA-DemiBold"
 
+enum DeviceKeys {
+    static let apnsToken = "apns.token.v1"
+}
+
+func loadApnsToken() -> String {
+    // Prefer App Group if available
+    if let suite = UserDefaults(suiteName: "group.minis") {
+        let t = (suite.string(forKey: DeviceKeys.apnsToken) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !t.isEmpty { return t }
+    }
+
+    // Fallback standard
+    return (UserDefaults.standard.string(forKey: DeviceKeys.apnsToken) ?? "")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+func saveApnsToken(_ token: String) {
+    let t = token.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !t.isEmpty else { return }
+
+    UserDefaults.standard.set(t, forKey: DeviceKeys.apnsToken)
+
+    if let suite = UserDefaults(suiteName: "group.minis") {
+        suite.set(t, forKey: DeviceKeys.apnsToken)
+        suite.synchronize()
+    }
+
+    UserDefaults.standard.synchronize()
+}
+
 @MainActor
 final class MenuApiModel: ObservableObject {
     @Published var items: [ShellMenuItem] = []
@@ -17,12 +48,44 @@ final class MenuApiModel: ObservableObject {
     @Published private var nowTick: Int = 0
     private var clockTimer: AnyCancellable?
     @Published private var allItems: [ShellMenuItem] = []
+    @Published var isOpen: Bool = true
+    
+    // ✅ ADD
+      private var isOpenDebugCancellable: AnyCancellable?
+      private var lastIsOpenDebug: Bool?
+    
+    init() {
+          // prime the last value so we can print old → new
+          lastIsOpenDebug = isOpen
+
+          isOpenDebugCancellable = $isOpen
+              .removeDuplicates()
+              .sink { [weak self] newValue in
+                  guard let self else { return }
+                  let oldValue = self.lastIsOpenDebug
+                  self.lastIsOpenDebug = newValue
+
+                  if let oldValue, oldValue != newValue {
+                      print("🟣 MenuApiModel.isOpen changed:", oldValue, "→", newValue)
+                  } else if oldValue == nil {
+                      print("🟣 MenuApiModel.isOpen initial:", newValue)
+                  }
+              }
+      }
     
     
+    private struct ProductsLastUpdateProbe: Decodable {
+        struct Mini: Decodable {
+            let productsLastUpdate: String?
+            let isOpen: Bool?
+        }
+        let mini: Mini?
+    }
     
     func load(shopId explicit: String? = nil, skipCache: Bool = false) {
-        let miniAppIdFromDefaults = UserDefaults.standard.integer(forKey: "miniAppId")
-        let storedShopId = UserDefaults.standard.string(forKey: "shopId")
+        let defaults = UserDefaults.standard
+        let miniAppIdFromDefaults = defaults.integer(forKey: "miniAppId")
+        let storedShopId = defaults.string(forKey: "shopId")
 
         let shopId: String
         if let explicit = explicit, !explicit.isEmpty {
@@ -32,68 +95,198 @@ final class MenuApiModel: ObservableObject {
         } else if let storedShopId, !storedShopId.isEmpty {
             shopId = storedShopId
         } else {
-            //print("❌ MenuApiModel.load → no explicit, no miniAppId, no stored shopId → aborting load")
             errorMessage = "No shop selected"
             return
         }
 
-       // print("🛒 MenuApiModel.load → using shopId=\(shopId) (explicit=\(explicit ?? "nil"), miniAppId=\(miniAppIdFromDefaults), storedShopId=\(storedShopId ?? "nil"))")
-
+        let baseURL = "https://minis.studio/json/\(shopId).json"
         let t = Int(Date().timeIntervalSince1970)
-        guard let url = URL(string: "https://minis.studio/json/\(shopId).json?\(t)") else {
+        guard let url = URL(string: "\(baseURL)?\(t)") else {
             errorMessage = "Invalid URL"
             return
         }
 
-        
         let cacheKey = "MenuJSON_\(shopId)"
+        let cacheTsKey = "MenuJSON_TS_\(shopId)"          // productsLastUpdate string
         let cacheURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
             .appendingPathComponent("shop_\(shopId).json")
 
         isLoading = true
         errorMessage = nil
 
+        // --------------------------------------------
+        // 1) FAST PATH: show cache immediately (if allowed)
+        // --------------------------------------------
+        var cachedData: Data? = nil
+
         if !skipCache, items.isEmpty {
-            if let cachedData = UserDefaults.standard.data(forKey: cacheKey) {
-                Task { await parseAndApply(data: cachedData) }
-            } else if let cachedFile = try? Data(contentsOf: cacheURL) {
-                Task { await parseAndApply(data: cachedFile) }
+            if let d = defaults.data(forKey: cacheKey) {
+                cachedData = d
+                Task { await parseAndApply(data: d) }
+            } else if let f = try? Data(contentsOf: cacheURL) {
+                cachedData = f
+                Task { await parseAndApply(data: f) }
             }
         }
 
-        URLSession.shared.dataTask(with: url) { [weak self] data, _, err in
+        // --------------------------------------------
+        // 2) Cache helpers
+        // --------------------------------------------
+        func decodeProductsLastUpdate(_ data: Data) -> String? {
+            let dec = JSONDecoder()
+            if let probe = try? dec.decode(ProductsLastUpdateProbe.self, from: data) {
+                return probe.mini?.productsLastUpdate
+            }
+            return nil
+        }
+
+        func decodeIsOpen(_ data: Data) -> Bool? {
+            let dec = JSONDecoder()
+            return (try? dec.decode(ProductsLastUpdateProbe.self, from: data))?.mini?.isOpen
+        }
+
+        let cachedTs = defaults.string(forKey: cacheTsKey) ?? (cachedData.flatMap(decodeProductsLastUpdate) ?? "")
+
+        // --------------------------------------------
+        // 3) Full fetch (always updates cache + parses)
+        // --------------------------------------------
+        func fetchFullJSON() {
+            var req = URLRequest(url: url, timeoutInterval: 15)
+            req.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+
+            URLSession.shared.dataTask(with: req) { [weak self] data, resp, err in
+                guard let self else { return }
+
+                if let err = err {
+                    Task { @MainActor in
+                        self.isLoading = false
+                        if self.items.isEmpty { self.errorMessage = err.localizedDescription }
+                    }
+                    return
+                }
+
+                guard let http = resp as? HTTPURLResponse else {
+                    Task { @MainActor in
+                        self.isLoading = false
+                        if self.items.isEmpty { self.errorMessage = "No HTTP response" }
+                    }
+                    return
+                }
+
+                guard let data else {
+                    Task { @MainActor in
+                        self.isLoading = false
+                        if self.items.isEmpty { self.errorMessage = "No data received" }
+                    }
+                    return
+                }
+
+                // ✅ Reject non-2xx
+                guard (200...299).contains(http.statusCode) else {
+                    let text = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
+                    Task { @MainActor in
+                        self.isLoading = false
+                        if self.items.isEmpty { self.errorMessage = "HTTP \(http.statusCode)" }
+                    }
+                    print("❌ MenuApiModel.load HTTP \(http.statusCode) body:", String(text.prefix(300)))
+                    return
+                }
+
+                // ✅ Validate JSON BEFORE caching (prevents cache poisoning)
+                let dec = JSONDecoder()
+                let isValid =
+                    (try? dec.decode(ShopPayload.self, from: data)) != nil
+                    || (try? dec.decode([ProductPayload].self, from: data)) != nil
+
+                guard isValid else {
+                    let text = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
+                    Task { @MainActor in
+                        self.isLoading = false
+                        if self.items.isEmpty { self.errorMessage = "Bad JSON" }
+                    }
+                    print("❌ MenuApiModel.load: invalid JSON, NOT caching. First 300:", String(text.prefix(300)))
+                    return
+                }
+
+                // ✅ Cache only valid JSON
+                defaults.set(data, forKey: cacheKey)
+                try? data.write(to: cacheURL, options: [.atomic])
+
+                // ✅ Cache productsLastUpdate for quick future comparisons
+                if let ts = decodeProductsLastUpdate(data), !ts.isEmpty {
+                    defaults.set(ts, forKey: cacheTsKey)
+                }
+
+                Task { await self.parseAndApply(data: data) }
+            }.resume()
+        }
+
+        // If skipping cache, always fetch full (network)
+        if skipCache {
+            fetchFullJSON()
+            return
+        }
+
+        // If we have no cache at all, fetch full
+        if cachedData == nil {
+            fetchFullJSON()
+            return
+        }
+
+        // --------------------------------------------
+        // 4) Probe server quickly: keep products caching logic,
+        //    BUT ALWAYS update isOpen from probe (fixes NightView)
+        // --------------------------------------------
+        guard let probeURL = URL(string: "\(baseURL)?probe=\(t)") else {
+            fetchFullJSON()
+            return
+        }
+
+        var probeReq = URLRequest(url: probeURL, timeoutInterval: 8)
+        probeReq.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+
+        URLSession.shared.dataTask(with: probeReq) { [weak self] data, resp, err in
             guard let self else { return }
 
-            if let err = err {
+            // If probe fails, still fetch full (best effort)
+            guard err == nil, let data = data else {
+                fetchFullJSON()
+                return
+            }
+
+            // ✅ NEW: update isOpen even if productsLastUpdate didn't change
+            if let open = decodeIsOpen(data) {
+                Task { @MainActor in
+                    let old = self.isOpen
+                    if old != open {
+                        self.isOpen = open
+                        print("🟡 PROBE mini.isOpen changed:", old, "→", open)
+                    }
+                }
+            } else {
+                print("⚠️ PROBE mini.isOpen missing / failed decode")
+            }
+
+            let serverTs = decodeProductsLastUpdate(data) ?? ""
+
+            // If server doesn't provide timestamp, safest: fetch full
+            if serverTs.isEmpty {
+                fetchFullJSON()
+                return
+            }
+
+            // ✅ Cache is fresh -> stop loading (but isOpen already updated above)
+            if !cachedTs.isEmpty, cachedTs == serverTs {
                 Task { @MainActor in
                     self.isLoading = false
-                    if self.items.isEmpty {
-                        self.errorMessage = err.localizedDescription
-                    }
                 }
                 return
             }
 
-            guard let data else {
-                Task { @MainActor in
-                    self.isLoading = false
-                    if self.items.isEmpty {
-                        self.errorMessage = "No data received"
-                    }
-                }
-                return
-            }
-
-           
-
-            UserDefaults.standard.set(data, forKey: cacheKey)
-            try? data.write(to: cacheURL)
-
-            Task { await self.parseAndApply(data: data) }
+            // Cache is stale -> fetch full + update cache
+            fetchFullJSON()
         }.resume()
     }
-
-   
     
     private func applyCategoryOrder(_ items: [ShellMenuItem], order: [String]?) -> [ShellMenuItem] {
         // ✅ If no category order, return as-is (preserve server order)
@@ -126,16 +319,110 @@ final class MenuApiModel: ObservableObject {
             return ia < ib
         }
     }
+    
+ 
+    private func persistPrinters(_ printers: ShopPrintersPayload) {
+        let rawShopId = UserDefaults.standard.string(forKey: "shopId")
+        let miniAppId = UserDefaults.standard.integer(forKey: "miniAppId")
 
+        let resolvedShopId: String = {
+            if let s = rawShopId, !s.isEmpty { return s }
+            if miniAppId > 0 { return String(miniAppId) }
+            return "0"
+        }()
+
+        let key = "printers.config.shop\(resolvedShopId)"
+
+        if let data = try? JSONEncoder().encode(printers) {
+            UserDefaults.standard.set(data, forKey: key)
+        }
+
+        print("""
+        🖨️ printers SAVED
+          raw shopId = \(rawShopId ?? "nil")
+          miniAppId  = \(miniAppId)
+          key        = \(key)
+          prefix     = \(printers.netPrefix ?? "nil")
+          stations   = \(printers.stations?.count ?? 0)
+        """)
+    }
+
+    private struct MiniOpenProbe: Decodable {
+        struct Mini: Decodable {
+            let isOpen: Bool?
+
+            enum CodingKeys: String, CodingKey {
+                case isOpen  = "isOpen"
+                case isOpenC = "IsOpen"
+            }
+
+            init(from decoder: Decoder) throws {
+                let c = try decoder.container(keyedBy: CodingKeys.self)
+
+                // Bool
+                if let b = try? c.decodeIfPresent(Bool.self, forKey: .isOpen) { isOpen = b; return }
+                if let b = try? c.decodeIfPresent(Bool.self, forKey: .isOpenC) { isOpen = b; return }
+
+                // Int 1/0
+                if let i = try? c.decodeIfPresent(Int.self, forKey: .isOpen) { isOpen = (i != 0); return }
+                if let i = try? c.decodeIfPresent(Int.self, forKey: .isOpenC) { isOpen = (i != 0); return }
+
+                // String
+                func parse(_ s: String?) -> Bool? {
+                    guard let s else { return nil }
+                    let t = s.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                    if t == "true" || t == "1" || t == "yes" { return true }
+                    if t == "false" || t == "0" || t == "no" { return false }
+                    return nil
+                }
+                if let s = try? c.decodeIfPresent(String.self, forKey: .isOpen), let v = parse(s) { isOpen = v; return }
+                if let s = try? c.decodeIfPresent(String.self, forKey: .isOpenC), let v = parse(s) { isOpen = v; return }
+
+                isOpen = nil
+            }
+        }
+
+        let mini: Mini?
+    }
+    
     private func parseAndApply(data: Data) async {
+
         // 0️⃣ First, extract customization (title, subtitle, image, font, direction, currency)
         applyMiniCustomization(from: data)
+
+        // ✅ Mini open probe (keep your existing behavior)
+        do {
+            let probe = try JSONDecoder().decode(MiniOpenProbe.self, from: data)
+            if let open = probe.mini?.isOpen {
+                await MainActor.run {
+                    let old = self.isOpen
+                    self.isOpen = open
+                    print("✅ MINI OPEN probe:", old, "→", open)
+                }
+            } else {
+                print("⚠️ MINI OPEN probe: missing in JSON")
+            }
+        } catch {
+            print("❌ MINI OPEN probe decode failed:", error.localizedDescription)
+        }
 
         do {
             let decoder = JSONDecoder()
 
-            // 1️⃣ Try wrapper: { theme: {...}, products: [...] }
+            // 1️⃣ Try wrapper: full shop payload
             if let wrapper = try? decoder.decode(ShopPayload.self, from: data) {
+
+                // ✅ isOpen (again, if present)
+                if let open = wrapper.mini?.isOpen {
+                    await MainActor.run {
+                        self.isOpen = open
+                        print("✅ decoded mini.isOpen =", open)
+                    }
+                } else {
+                    print("⚠️ mini.isOpen missing / failed decode")
+                }
+
+                // ✅ category order
                 if let order = wrapper.categoryOrder, !order.isEmpty {
                     await MainActor.run {
                         self.categoryOrder = order
@@ -144,19 +431,48 @@ final class MenuApiModel: ObservableObject {
                     }
                 }
 
+                // ✅ PRINTERS: support BOTH shapes:
+                // - top-level: printers
+                // - new: admin.printers  (your mini 13 JSON)
+                let printersPayload = wrapper.printers ?? wrapper.admin?.printers
+                print("🧪 JSON printers decoded:")
+                print("   wrapper.printers?.netPrefix =", wrapper.printers?.netPrefix ?? "nil")
+                print("   wrapper.admin?.printers?.netPrefix =", wrapper.admin?.printers?.netPrefix ?? "nil")
+
+                if let raw = String(data: data, encoding: .utf8) {
+                    if let r = raw.range(of: "\"netPrefix\"") {
+                        let start = raw.index(r.lowerBound, offsetBy: -50, limitedBy: raw.startIndex) ?? raw.startIndex
+                        let end   = raw.index(r.lowerBound, offsetBy: 80, limitedBy: raw.endIndex) ?? raw.endIndex
+                        print("🧾 RAW around netPrefix:", raw[start..<end])
+                    } else {
+                        print("🧾 RAW has no netPrefix text")
+                    }
+                }
+                if let printers = printersPayload {
+                    await MainActor.run {
+                        persistPrinters(printers)
+                    }
+                } else {
+                    // Helpful debug so you KNOW why it fell back to LAN prefix
+                    #if DEBUG
+                    print("⚠️ printers missing in JSON at both wrapper.printers and wrapper.admin?.printers")
+                    #endif
+                }
+
+                // ✅ products
                 if let products = wrapper.products {
-                    let mapped = mapProducts(products)
-                    
+                    let mapped  = mapProducts(products)
                     let ordered = applyCategoryOrder(mapped, order: wrapper.categoryOrder)
                     await apply(ordered)
                     saveReferralForCurrentShop(kind: .fastlane)
                     return
                 }
+
             } else {
                 print("📦 parseAndApply → ShopPayload decode FAILED, trying plain array")
             }
 
-            // 2️⃣ Fallback: plain [ProductPayload] (old simple format)
+            // 2️⃣ Fallback: plain [ProductPayload]
             let products = try decoder.decode([ProductPayload].self, from: data)
             print("📦 parseAndApply → decoded plain [ProductPayload] with \(products.count) products")
 
@@ -205,51 +521,155 @@ final class MenuApiModel: ObservableObject {
                 status: $0.status,
                 stockQuantity: $0.stockQuantity,
                 printer: $0.printer,
-                activeFrom: $0.activeFrom,     // ✅ NEW
-                activeTo: $0.activeTo          // ✅ NEW
+                printers: $0.printers,
+                activeFrom: $0.activeFrom,
+                activeTo: $0.activeTo,
+
+                // ✅ NEW
+                isPhone: $0.isPhone
             )
         }
     }
-
+    
     private func mapModifiers(from apiGroups: [ApiModifierGroup]?) -> [ModifierGroup]? {
         guard let apiGroups, !apiGroups.isEmpty else { return nil }
 
         let groups = apiGroups.compactMap { g -> ModifierGroup? in
-            let items = (g.items ?? []).map {
-                ModifierItem(name: $0.optionName ?? "", extraPrice: $0.extraPrice ?? 0)
-            }
+            let items = (g.items ?? [])
+                .map { ModifierItem(name: $0.optionName ?? "", extraPrice: $0.extraPrice ?? 0) }
+                .filter { !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
+            guard !items.isEmpty else { return nil } // ✅ critical
 
             let rawType       = g.type?.lowercased()
             let selectionMode = g.selection?.mode?.lowercased()
 
             let type: ModifierGroup.GroupType
-            if rawType == "additions" {
-                type = .additions
-            } else if rawType == "options" {
-                type = .options
-            } else if selectionMode == "multi" {
-                type = .additions
-            } else {
-                type = .options
-            }
+            if rawType == "additions" { type = .additions }
+            else if rawType == "options" { type = .options }
+            else if selectionMode == "multi" { type = .additions }
+            else { type = .options }
 
-           
-            return ModifierGroup(type: type, title: g.title ?? "בחירה", items: items)
+            return ModifierGroup(type: type, title: g.title ?? "Choose", items: items)
         }
 
         return groups.isEmpty ? nil : groups
     }
 }
+private struct JsonModifierGroupPayload: Encodable {
+    let GroupId: String
+    let Title: String
+    let Selection: JsonSelectionPayload
+    let Items: [JsonModifierItemPayload]
+}
 
+private struct JsonSelectionPayload: Encodable {
+    let mode: String
+    let min: Int
+    let max: Int
+}
+
+private struct JsonModifierItemPayload: Encodable {
+    let OptionName: String
+    let ExtraPrice: Double
+}
 struct ShopPayload: Decodable {
     struct Theme: Decodable {
         let direction: String?
         let currency: String?
     }
 
+    struct Mini: Decodable {
+        let isOpen: Bool?
+
+        enum CodingKeys: String, CodingKey {
+            case isOpen  = "isOpen"
+            case isOpenC = "IsOpen"
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+
+            if let b = try? c.decodeIfPresent(Bool.self, forKey: .isOpen) { isOpen = b; return }
+            if let b = try? c.decodeIfPresent(Bool.self, forKey: .isOpenC) { isOpen = b; return }
+
+            if let i = try? c.decodeIfPresent(Int.self, forKey: .isOpen) { isOpen = (i != 0); return }
+            if let i = try? c.decodeIfPresent(Int.self, forKey: .isOpenC) { isOpen = (i != 0); return }
+
+            if let s = try? c.decodeIfPresent(String.self, forKey: .isOpen) {
+                let t = s.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                if t == "true" || t == "1" { isOpen = true; return }
+                if t == "false" || t == "0" { isOpen = false; return }
+            }
+            if let s = try? c.decodeIfPresent(String.self, forKey: .isOpenC) {
+                let t = s.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                if t == "true" || t == "1" { isOpen = true; return }
+                if t == "false" || t == "0" { isOpen = false; return }
+            }
+
+            isOpen = nil
+        }
+    }
+
+    // ✅ NEW: admin wrapper (because JSON is admin.printers)
+    struct Admin: Decodable {
+        let printers: ShopPrintersPayload?
+    }
+
+    let mini: Mini?
     let theme: Theme?
     let products: [ProductPayload]?
-    let categoryOrder: [String]?   // ✅ NEW
+    let categoryOrder: [String]?
+
+    // ✅ keep top-level printers for backward compat
+    let printers: ShopPrintersPayload?
+
+    // ✅ NEW
+    let admin: Admin?
+}
+// MARK: - Printers payload (from /json/{id}.json)
+// IMPORTANT: names are unique to avoid collisions with your existing types.
+
+struct ShopPrintersPayload: Codable {
+    let netPrefix: String?
+    let stations: [ShopPrinterStationPayload]?
+    let backup: [ShopPrinterStationPayload]?
+}
+
+func loadSavedPrinters(shopId: String) -> ShopPrintersPayload? {
+    let key = "printers.config.shop\(shopId)"
+
+    guard let data = UserDefaults.standard.data(forKey: key) else {
+        print("❌ printers LOAD: no data for key:", key)
+        return nil
+    }
+
+    print("🧾 printers LOAD: found data bytes =", data.count, "key:", key)
+
+    // Optional: print raw JSON once (great for debugging)
+    if let raw = String(data: data, encoding: .utf8) {
+        print("🧾 printers LOAD RAW (first 400):", String(raw.prefix(400)))
+    } else {
+        print("⚠️ printers LOAD: data not utf8")
+    }
+
+    do {
+        let decoded = try JSONDecoder().decode(ShopPrintersPayload.self, from: data)
+        print("✅ printers LOAD decoded. prefix =", decoded.netPrefix ?? "nil",
+              "stations =", decoded.stations?.count ?? 0)
+        return decoded
+    } catch {
+        print("❌ printers LOAD decode error:", error)
+        return nil
+    }
+}
+
+struct ShopPrinterStationPayload: Codable, Identifiable {
+    let id: String
+    let label: String
+    let octet: Int
+    let set: String?
+    let status: Int?
 }
 
 struct ProductPayload: Decodable {
@@ -264,9 +684,15 @@ struct ProductPayload: Decodable {
     let modifiers: [ApiModifierGroup]?
     let printer: String?
 
+    // ✅ NEW: multi printers from JSON
+    let printers: [String]?
+
     // ✅ NEW
     let activeFrom: Int?
     let activeTo: Int?
+
+    // ✅ NEW: ask phone (from published JSON "isPhone")
+    let isPhone: Bool?
 
     enum CodingKeys: String, CodingKey {
         case productId       = "ProductId"
@@ -281,14 +707,33 @@ struct ProductPayload: Decodable {
         case printer         = "Printer"
         case printerLower    = "printer"
 
-        // ✅ NEW (support both cases)
+        // ✅ NEW: array in published JSON
+        case printers        = "Printers"
+        case printerIdsAlt   = "PrinterIds"   // (optional compatibility)
+
         case activeFrom      = "ActiveFrom"
         case activeFromLower = "activeFrom"
         case activeTo        = "ActiveTo"
         case activeToLower   = "activeTo"
 
+        // ✅ NEW: ask phone (published by C# as "isPhone")
+        case isPhoneP        = "isPhone"
+        case isPhoneC        = "IsPhone"      // tolerate
+
         case modifierGroups  = "ModifierGroups"
         case legacyModifiers = "Modifiers"
+    }
+
+    // ✅ robust bool reader: supports Bool / Int 1/0 / String "1"/"true"/"yes"
+    private static func decodeBoolFlex(_ c: KeyedDecodingContainer<CodingKeys>, _ key: CodingKeys) -> Bool? {
+        if let b = try? c.decodeIfPresent(Bool.self, forKey: key) { return b }
+        if let i = try? c.decodeIfPresent(Int.self, forKey: key) { return i != 0 }
+        if let s = try? c.decodeIfPresent(String.self, forKey: key) {
+            let t = s.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if t == "true" || t == "1" || t == "yes" { return true }
+            if t == "false" || t == "0" || t == "no" { return false }
+        }
+        return nil
     }
 
     init(from decoder: Decoder) throws {
@@ -303,17 +748,29 @@ struct ProductPayload: Decodable {
         image          = try c.decodeIfPresent(String.self, forKey: .image)
         description    = try c.decodeIfPresent(String.self, forKey: .description)
 
-        // ✅ accept both spellings
+        // ✅ legacy single printer (keep)
         let p =
             (try? c.decodeIfPresent(String.self, forKey: .printer)) ??
             (try? c.decodeIfPresent(String.self, forKey: .printerLower))
 
-        // ✅ normalize now (critical)
         printer = p?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
 
-        // ✅ NEW: ActiveFrom / ActiveTo (Int, tolerate both key-cases)
+        // ✅ NEW: decode printers[] from JSON and normalize
+        let rawPrinters =
+            (try? c.decodeIfPresent([String].self, forKey: .printers)) ??
+            (try? c.decodeIfPresent([String].self, forKey: .printerIdsAlt))
+
+        if let rawPrinters {
+            let cleaned = rawPrinters
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            self.printers = cleaned.isEmpty ? nil : cleaned
+        } else {
+            self.printers = nil
+        }
+
         activeFrom =
             (try? c.decodeIfPresent(Int.self, forKey: .activeFrom)) ??
             (try? c.decodeIfPresent(Int.self, forKey: .activeFromLower))
@@ -321,6 +778,11 @@ struct ProductPayload: Decodable {
         activeTo =
             (try? c.decodeIfPresent(Int.self, forKey: .activeTo)) ??
             (try? c.decodeIfPresent(Int.self, forKey: .activeToLower))
+
+        // ✅ NEW: isPhone (flex)
+        isPhone =
+            Self.decodeBoolFlex(c, .isPhoneP) ??
+            Self.decodeBoolFlex(c, .isPhoneC)
 
         if let groups = try c.decodeIfPresent([ApiModifierGroup].self, forKey: .modifierGroups) {
             modifiers = groups
@@ -340,13 +802,40 @@ struct ApiModifierGroup: Decodable {
     let type: String?
     let title: String?
     let items: [ApiModifierItem]?
-    let selection: ApiSelection?      // 👈 NEW
+    let selection: ApiSelection?
 
     enum CodingKeys: String, CodingKey {
-        case type      = "Type"
-        case title     = "Title"
-        case items     = "Items"
-        case selection = "Selection"
+        case typeP = "Type"
+        case typeC = "type"
+
+        case titleP = "Title"
+        case titleC = "title"
+
+        case itemsP = "Items"
+        case itemsC = "items"
+
+        case selectionP = "Selection"
+        case selectionC = "selection"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+
+        type =
+            (try? c.decodeIfPresent(String.self, forKey: .typeP)) ??
+            (try? c.decodeIfPresent(String.self, forKey: .typeC))
+
+        title =
+            (try? c.decodeIfPresent(String.self, forKey: .titleP)) ??
+            (try? c.decodeIfPresent(String.self, forKey: .titleC))
+
+        items =
+            (try? c.decodeIfPresent([ApiModifierItem].self, forKey: .itemsP)) ??
+            (try? c.decodeIfPresent([ApiModifierItem].self, forKey: .itemsC))
+
+        selection =
+            (try? c.decodeIfPresent(ApiSelection.self, forKey: .selectionP)) ??
+            (try? c.decodeIfPresent(ApiSelection.self, forKey: .selectionC))
     }
 }
 
@@ -360,6 +849,7 @@ struct ApiModifierItem: Decodable {
     }
 }
 
+
 struct ShellMenuItem: Identifiable {
     let id: Int
     let name: String
@@ -370,11 +860,21 @@ struct ShellMenuItem: Identifiable {
     let description: String?
     let status: Int?
     let stockQuantity: Int?
+
+    // ✅ OLD (keep for safety / backward compat)
+    // - still used by current printing + routing
     let printer: String?
 
-    // ✅ NEW
+    // ✅ NEW (multi route) — dynamic printers (station ids)
+    // - optional, because old JSON won’t have it yet
+    let printers: [String]?
+
+    // ✅ Active window
     let activeFrom: Int?
     let activeTo: Int?
+
+    // ✅ NEW: ask phone (from JSON isPhone)
+    let isPhone: Bool?
 
     var img: URL? {
         if let s = imageURL, !s.isEmpty { return URL(string: s) }
@@ -382,6 +882,22 @@ struct ShellMenuItem: Identifiable {
     }
 
     var priceLabel: String { String(format: "%.2f", price) }
+
+    /// ✅ Convenience: “effective” printer id to use when you want ONE route:
+    /// - prefer `printer` (old field)
+    /// - else fall back to first of `printers`
+    var effectivePrinterId: String? {
+        if let list = printers, let first = list.first?.trimmingCharacters(in: .whitespacesAndNewlines), !first.isEmpty {
+            return first
+        }
+        if let p = printer?.trimmingCharacters(in: .whitespacesAndNewlines), !p.isEmpty {
+            return p
+        }
+        return nil
+    }
+
+    /// ✅ Convenience: treat nil as false
+    var requiresPhone: Bool { (isPhone ?? false) }
 
     init(
         id: Int,
@@ -393,9 +909,18 @@ struct ShellMenuItem: Identifiable {
         description: String?,
         status: Int? = nil,
         stockQuantity: Int? = nil,
+
+        // ✅ old
         printer: String? = nil,
-        activeFrom: Int? = nil,     // ✅ NEW
-        activeTo: Int? = nil        // ✅ NEW
+
+        // ✅ new
+        printers: [String]? = nil,
+
+        activeFrom: Int? = nil,
+        activeTo: Int? = nil,
+
+        // ✅ NEW
+        isPhone: Bool? = nil
     ) {
         self.id = id
         self.name = name
@@ -406,9 +931,25 @@ struct ShellMenuItem: Identifiable {
         self.description = description
         self.status = status
         self.stockQuantity = stockQuantity
-        self.printer = printer
+
+        // Normalize stored values a bit (keeps JSON clean too)
+        let p1 = printer?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.printer = (p1?.isEmpty ?? true) ? nil : p1
+
+        if let printers {
+            let cleaned = printers
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            self.printers = cleaned.isEmpty ? nil : cleaned
+        } else {
+            self.printers = nil
+        }
+
         self.activeFrom = activeFrom
         self.activeTo = activeTo
+
+        // ✅ NEW
+        self.isPhone = isPhone
     }
 }
 
@@ -419,7 +960,7 @@ extension ShellMenuItem {
             return false
         }
         // Optional: also hide if stockQuantity is known and <= 0
-        if let stock = stockQuantity, stock <= 0 {
+        if let stock = stockQuantity, stock <= 1 {
             return false
         }
         return true
@@ -574,428 +1115,431 @@ enum OrderAPI {
     
    
    
+  
     static func submitOrder(
-        orderId: Int? = nil,
-        entries: [BasketEntry],
-        total: Double,
-        diningMode: DiningMode,
-        source: String,
-        customerName: String? = nil,
-        customerPhone: String? = nil,
-        payment: PaymentSummary? = nil,
-        zcreditMeta: [String: Any]? = nil,
-        ticketNumber: Int? = nil,
-        othLineIds: Set<Int>? = nil,
+            orderId: Int? = nil,
+            entries: [BasketEntry],
+            total: Double,
+            diningMode: DiningMode,
+            source: String,
+            customerName: String? = nil,
+            customerPhone: String? = nil,
+            payment: PaymentSummary? = nil,
+            zcreditMeta: [String: Any]? = nil,
+            ticketNumber: Int? = nil,
+            othLineIds: Set<Int>? = nil,
 
-        // ✅ NEW (team tabs / special order types)
-        orderType: String? = nil,
-        tabKey: String? = nil,
+            // ✅ NEW (team tabs / special order types)
+            orderType: String? = nil,
+            tabKey: String? = nil,
 
-        // ✅ NEW: totals breakdown (basket, discount, excluded, final total, etc.)
-        totals: [String: Any]? = nil,
+            // ✅ NEW: totals breakdown (basket, discount, excluded, final total, etc.)
+            totals: [String: Any]? = nil,
 
-        completion: @escaping (Result<Int, Error>) -> Void
-    ) {
-        let isPad = UIDevice.current.userInterfaceIdiom == .pad
-        let cashPointMode = UserDefaults.standard.bool(forKey: "cashPointMode")
-        let defaults = UserDefaults.standard
+            completion: @escaping (Result<Int, Error>) -> Void
+        ) {
+            let isPad = UIDevice.current.userInterfaceIdiom == .pad
+            let cashPointMode = UserDefaults.standard.bool(forKey: "cashPointMode")
+            let defaults = UserDefaults.standard
 
-        func r2(_ x: Double) -> Double { (x * 100).rounded() / 100 }
-        func closeEnough(_ a: Double, _ b: Double, tol: Double = 0.01) -> Bool { abs(a - b) <= tol }
+            func r2(_ x: Double) -> Double { (x * 100).rounded() / 100 }
+            func closeEnough(_ a: Double, _ b: Double, tol: Double = 0.01) -> Bool { abs(a - b) <= tol }
 
-        func normalizeLoc(_ s: String) -> String {
-            s.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        }
-
-        func resolveWaPhone(miniAppId: Int, customerPhone: String?) -> String {
-            // Prefer passed phone
-            let p1 = (customerPhone ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            if !p1.isEmpty { return p1 }
-
-            // fallback to stored
-            let p2 = (defaults.string(forKey: "userPhone") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            if !p2.isEmpty { return p2 }
-
-            // last resort (your debug number)
-            if miniAppId == 3 { return "+447522552608" }
-
-            return ""
-        }
-
-        func resolveDeliveryLoc(miniAppId: Int) -> String {
-            if miniAppId != 3 { return "" }
-
-            let saved = normalizeLoc(defaults.string(forKey: "deliveryLoc") ?? "")
-            if !saved.isEmpty { return saved }
-
-            // ✅ HARD FALLBACK like you asked (debug / default bar)
-            return "mikkeller"
-        }
-
-        
-        func flexDouble(_ any: Any?) -> Double? {
-            if let d = any as? Double { return d }
-            if let i = any as? Int { return Double(i) }
-            if let s = any as? String {
-                let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
-                    .replacingOccurrences(of: ",", with: ".")
-                return Double(t)
-            }
-            return nil
-        }
-
-        // 🔥 Resolve miniAppId / shopId dynamically
-        let miniAppIdFromDefaults = defaults.integer(forKey: "miniAppId")
-        let storedShopIdString    = defaults.string(forKey: "shopId")
-
-        let miniAppId: Int
-        if miniAppIdFromDefaults > 0 {
-            miniAppId = miniAppIdFromDefaults
-        } else if let s = storedShopIdString, let v = Int(s) {
-            miniAppId = v
-        } else {
-            completion(.failure(SubmitError(message: "No miniAppId / shopId selected for this order")))
-            return
-        }
-
-        let uuid         = defaults.string(forKey: "anonUUID")    ?? UUID().uuidString
-        let defaultEmail = defaults.string(forKey: "userEmail")   ?? "customer@example.com"
-        let defaultName  = defaults.string(forKey: "userName")    ?? "Customer"
-
-        let effectiveName: String = {
-            let trimmed = customerName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            return trimmed.isEmpty ? defaultName : trimmed
-        }()
-
-        let othSet = othLineIds ?? []
-
-        let basketPayload: [[String: Any]] = entries.map { entry in
-            let qty = max(entry.quantity, 0)
-            let unitCandidate = (entry.unitPrice > 0) ? entry.unitPrice : entry.item.price
-            let unit = unitCandidate
-            let isOth = othSet.contains(entry.id)
-
-            return [
-                "lineId":    entry.id,
-                "productId": entry.item.id,
-                "name":      entry.item.name,
-                "quantity":  qty,
-                "unitPrice": unit,
-                "lineTotal": unit * Double(qty),
-                "modifiers": entry.subtitle ?? "",
-                "isOth":     isOth
-            ]
-        }
-
-        let apnsToken = defaults.string(forKey: "apnsToken") ?? ""
-
-        let serviceValue: String = {
-            switch diningMode {
-            case .dineIn:   return "sit"
-            case .takeAway: return "ta"
-            }
-        }()
-
-        // ------------------------------------------------------------
-        // ✅ SOURCE: normalize ONCE (used for payload + headers)
-        // ------------------------------------------------------------
-        var normalizedSource = source
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-
-        // ✅ SIMPLE RULE
-        if !cashPointMode && isPad {
-            normalizedSource = "self-cashpoint"
-        }
-        // ---------- totals ----------
-        var finalTotals: [String: Any] = totals ?? [:]
-
-        let dueFromTotals = flexDouble(finalTotals["total"])
-        let due = r2(max(dueFromTotals ?? total, 0))
-
-        if finalTotals["currency"] == nil {
-            // ✅ match the working curl for mini 3
-            if miniAppId == 3 {
-                finalTotals["currency"] = "GBP"
-            } else {
-                finalTotals["currency"] = defaults.string(forKey: "currency") ?? "ILS"
-            }
-        }
-        finalTotals["total"] = due
-
-        if finalTotals["subtotal"] == nil {
-            let subtotalGuess = r2(entries.reduce(0.0) { acc, e in acc + (Double(e.quantity) * e.unitPrice) })
-            finalTotals["subtotal"] = subtotalGuess
-        }
-        if finalTotals["discount"] == nil {
-            if let sub = flexDouble(finalTotals["subtotal"]) {
-                finalTotals["discount"] = r2(max(0, sub - due))
-            }
-        }
-
-        // ---------- payload ----------
-        var payload: [String: Any] = [
-            "uuid": uuid,
-            "email": defaultEmail,
-            "name": effectiveName,
-            "miniAppId": miniAppId,
-            "total": due,
-            "basket": basketPayload,
-            "diningMode": diningMode.rawValue,
-            "service": serviceValue,
-            "device": [
-                "platform": "ios",
-                "token": apnsToken
-            ],
-            "totals": finalTotals,
-
-            // ✅ IMPORTANT: include source IN JSON (backend might ignore headers)
-            "source": normalizedSource,
-            "orderSource": normalizedSource
-        ]
-        
-        if let pickupLoc = pickupLocationIfEnabled(miniAppId: miniAppId, defaults: defaults) {
-            payload["pickupLocation"] = pickupLoc
-        }
-        // ------------------------------------------------------------
-        // ✅ DELIVERY (Fastlane / miniAppId == 3 via loc key)
-        // ------------------------------------------------------------
-        // ------------------------------------------------------------
-        // ------------------------------------------------------------
-        // ✅ DELIVERY (Fastlane / miniAppId == 3)
-        // Always send a loc. If none exists -> fallback to "mikkeller".
-        // Backend requires delivery.loc to resolve address.
-        // ------------------------------------------------------------
-        if miniAppId == 3 {
-
-            // ✅ 1) Read from app group first (recommended), then standard defaults
-            let appGroupId = "group.minis"
-            let suite = UserDefaults(suiteName: appGroupId)
-
-            func clean(_ s: String?) -> String {
-                (s ?? "")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                    .lowercased()
+            func normalizeLoc(_ s: String) -> String {
+                s.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             }
 
-            let locFromSuite = clean(suite?.string(forKey: "deliveryLoc"))
-            let locFromStd   = clean(defaults.string(forKey: "deliveryLoc"))
+            func resolveWaPhone(miniAppId: Int, customerPhone: String?) -> String {
+                // Prefer passed phone
+                let p1 = (customerPhone ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if !p1.isEmpty { return p1 }
 
-            // ✅ 2) Final loc: suite -> std -> fallback
-            let fallbackLoc = "mikkeller"
-            let loc = !locFromSuite.isEmpty ? locFromSuite
-                    : (!locFromStd.isEmpty ? locFromStd : fallbackLoc)
+                // fallback to stored
+                let p2 = (defaults.string(forKey: "userPhone") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if !p2.isEmpty { return p2 }
 
-            // ✅ 3) Persist fallback so future requests are consistent (both stores)
-            if locFromSuite.isEmpty && locFromStd.isEmpty {
-                defaults.set(loc, forKey: "deliveryLoc")
-                suite?.set(loc, forKey: "deliveryLoc")
-                suite?.synchronize()
+                // last resort (your debug number)
+                if miniAppId == 3 { return "+447522552608" }
+
+                return ""
             }
 
-            // ✅ 4) Send delivery payload in the exact shape backend expects
-            payload["delivery"] = [
-                "isDelivery": true,
-                "loc": loc
-            ]
+            func resolveDeliveryLoc(miniAppId: Int) -> String {
+                if miniAppId != 3 { return "" }
 
-            // ✅ 5) Delivery forces takeaway (backend expects this)
-            payload["service"] = "ta"
-        }
+                let saved = normalizeLoc(defaults.string(forKey: "deliveryLoc") ?? "")
+                if !saved.isEmpty { return saved }
 
-        if let zcreditMeta, !zcreditMeta.isEmpty {
-            payload["zcredit"] = zcreditMeta           // ✅ best: namespaced
-            // or: payload["paymentMeta"] = zcreditMeta // alternative
-        }
-        
-        if let orderId { payload["orderId"] = orderId }
-        if let ticketNumber { payload["ticketNumber"] = ticketNumber }
-
-        if let orderType, !orderType.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            payload["orderType"] = orderType
-        }
-        if let tabKey, !tabKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            payload["tabKey"] = tabKey
-        }
-
-        // ------------------------------------------------------------
-        // Payment: normalize
-        // ------------------------------------------------------------
-        var dueVar = due
-
-        if let payment {
-            var cash = r2(max(payment.cashAmount, 0))
-            var card = r2(max(payment.cardAmount, 0))
-            let sum  = r2(cash + card)
-
-            if sum > 0.01, !closeEnough(sum, dueVar) {
-                dueVar = sum
-                finalTotals["total"] = dueVar
+                // ✅ HARD FALLBACK like you asked (debug / default bar)
+                return "mikkeller"
             }
 
-            let method: String
-            if sum <= 0.01 {
-                cash = 0
-                card = 0
-                method = PaymentMethod.unpaid.rawValue
-            } else if cash > 0.01 && card > 0.01 {
-                method = PaymentMethod.mixed.rawValue
-            } else if card > 0.01 {
-                method = PaymentMethod.card.rawValue
-            } else {
-                method = PaymentMethod.cash.rawValue
-            }
-
-            payload["payment"] = [
-                "provider": "minis",
-                "method": method,
-                "cardAmount": card,
-                "cashAmount": cash
-            ]
-        }
-
-        // ✅ If ApplePay succeeded but you forgot to pass PaymentSummary,
-        // still mark the order as CARD so DB won't show unpaid.
-        if payload["payment"] == nil, zcreditMeta != nil, dueVar > 0.01 {
-            payload["payment"] = [
-                "provider": "zcredit",
-                "method": PaymentMethod.card.rawValue,
-                "cardAmount": dueVar,
-                "cashAmount": 0
-            ]
-        }
-
-        // ensure final totals use dueVar
-        payload["total"] = dueVar
-        var totalsOut = finalTotals
-        totalsOut["total"] = dueVar
-        payload["totals"] = totalsOut
-
-        if let phone = customerPhone?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !phone.isEmpty {
-            payload["notifications"] = [
-                "wa": [
-                    "phone": phone,
-                    "consent": 1
-                ]
-            ]
-        }
-
-        guard let url = URL(string: "https://minis.studio/submitOrder") else {
-            completion(.failure(SubmitError(message: "Bad URL")))
-            return
-        }
-
-        // ✅ Idempotency key (persisted by outbox)
-        let idempotencyKey = UUID().uuidString.replacingOccurrences(of: "-", with: "")
-        payload["idempotencyKey"] = idempotencyKey
-
-        Task { @MainActor in
-            OutboxLog.shared.queued(
-                id: idempotencyKey,
-                miniAppId: miniAppId,
-                ticketNumber: ticketNumber,
-                msg: "queued for /submitOrder"
-            )
-        }
-
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
-
-        // ✅ still send header version too
-        req.setValue(normalizedSource, forHTTPHeaderField: "X-Order-Source")
-
-        // ✅ send idempotency in headers too (your backend reads these)
-        req.setValue(idempotencyKey, forHTTPHeaderField: "Idempotency-Key")
-        req.setValue(idempotencyKey, forHTTPHeaderField: "X-Request-Id")
-
-        if !apnsToken.isEmpty {
-            req.setValue("ios", forHTTPHeaderField: "X-Device-Platform")
-            req.setValue(apnsToken, forHTTPHeaderField: "X-Device-Token")
-
-            #if APPCLIP
-            let topic = "minis.co.uk.Clip"
-            #else
-            let topic = Bundle.main.bundleIdentifier ?? "minis.studio.app"
-            #endif
-            req.setValue(topic, forHTTPHeaderField: "X-APNs-Topic")
-
-            #if DEBUG
-            req.setValue("sandbox", forHTTPHeaderField: "X-APNs-Env")
-            #else
-            req.setValue("production", forHTTPHeaderField: "X-APNs-Env")
-            #endif
-        }
-
-        // ✅ Enqueue BEFORE sending (durability)
-        let env = OutboxEnvelope(
-            id: idempotencyKey,
-            createdAt: Date(),
-            state: .pending,
-            attemptCount: 0,
-            lastAttemptAt: nil,
-            endpoint: url.absoluteString,
-            body: req.httpBody ?? Data(),
-            headers: req.allHTTPHeaderFields ?? [:]
-        )
-
-        Task { @MainActor in
-            OrderOutbox.shared.enqueue(env)
-            OrderOutbox.shared.drainNow()   // try immediately
-        }
-
-        print("curl:", req.curlDebug)
-
-        Task { @MainActor in
-            NotificationCenter.default.post(name: .resetModifiers, object: nil)
-        }
-
-        Task { @MainActor in
-            OutboxLog.shared.sending(id: idempotencyKey, msg: "sending…")
-        }
-
-        // ✅ Fire normal request too (fast path). Outbox will retry if this fails.
-        URLSession.shared.dataTask(with: req) { data, resp, err in
-            if let err = err {
-                Task { @MainActor in
-                    OutboxLog.shared.failed(id: idempotencyKey, msg: err.localizedDescription)
+            
+            func flexDouble(_ any: Any?) -> Double? {
+                if let d = any as? Double { return d }
+                if let i = any as? Int { return Double(i) }
+                if let s = any as? String {
+                    let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                        .replacingOccurrences(of: ",", with: ".")
+                    return Double(t)
                 }
-                completion(.failure(err))
+                return nil
+            }
+
+            // 🔥 Resolve miniAppId / shopId dynamically
+            let miniAppIdFromDefaults = defaults.integer(forKey: "miniAppId")
+            let storedShopIdString    = defaults.string(forKey: "shopId")
+
+            let miniAppId: Int
+            if miniAppIdFromDefaults > 0 {
+                miniAppId = miniAppIdFromDefaults
+            } else if let s = storedShopIdString, let v = Int(s) {
+                miniAppId = v
+            } else {
+                completion(.failure(SubmitError(message: "No miniAppId / shopId selected for this order")))
                 return
             }
 
-            guard
-                let http = resp as? HTTPURLResponse,
-                (200...299).contains(http.statusCode),
-                let data = data,
-                let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-            else {
-                completion(.failure(SubmitError(message: "Server error")))
+            let uuid         = defaults.string(forKey: "anonUUID")    ?? UUID().uuidString
+            let defaultEmail = defaults.string(forKey: "userEmail")   ?? "customer@example.com"
+            let defaultName  = defaults.string(forKey: "userName")    ?? "Customer"
+
+            let effectiveName: String = {
+                let trimmed = customerName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                return trimmed.isEmpty ? defaultName : trimmed
+            }()
+
+            let othSet = othLineIds ?? []
+
+            let basketPayload: [[String: Any]] = entries.map { entry in
+                let qty = max(entry.quantity, 0)
+                let unitCandidate = (entry.unitPrice > 0) ? entry.unitPrice : entry.item.price
+                let unit = unitCandidate
+                let isOth = othSet.contains(entry.id)
+
+                return [
+                    "lineId":    entry.id,
+                    "productId": entry.item.id,
+                    "name":      entry.item.name,
+                    "quantity":  qty,
+                    "unitPrice": unit,
+                    "lineTotal": unit * Double(qty),
+                    "modifiers": entry.subtitle ?? "",
+                    "isOth":     isOth
+                ]
+            }
+
+            let apnsToken = loadApnsToken()
+
+            let serviceValue: String = {
+                switch diningMode {
+                case .dineIn:   return "sit"
+                case .takeAway: return "ta"
+                }
+            }()
+
+            // ------------------------------------------------------------
+            // ✅ SOURCE: normalize ONCE (used for payload + headers)
+            // ------------------------------------------------------------
+            var normalizedSource = source
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+
+            // ✅ SIMPLE RULE
+            if !cashPointMode && isPad {
+                normalizedSource = "self-cashpoint"
+            }
+            // ---------- totals ----------
+            var finalTotals: [String: Any] = totals ?? [:]
+
+            let dueFromTotals = flexDouble(finalTotals["total"])
+            let due = r2(max(dueFromTotals ?? total, 0))
+
+            if finalTotals["currency"] == nil {
+                // ✅ match the working curl for mini 3
+                if miniAppId == 3 {
+                    finalTotals["currency"] = "GBP"
+                } else {
+                    finalTotals["currency"] = defaults.string(forKey: "currency") ?? "ILS"
+                }
+            }
+            finalTotals["total"] = due
+
+            if finalTotals["subtotal"] == nil {
+                let subtotalGuess = r2(entries.reduce(0.0) { acc, e in acc + (Double(e.quantity) * e.unitPrice) })
+                finalTotals["subtotal"] = subtotalGuess
+            }
+            if finalTotals["discount"] == nil {
+                if let sub = flexDouble(finalTotals["subtotal"]) {
+                    finalTotals["discount"] = r2(max(0, sub - due))
+                }
+            }
+
+            // ---------- payload ----------
+            var payload: [String: Any] = [
+                "uuid": uuid,
+                "email": defaultEmail,
+                "name": effectiveName,
+                "miniAppId": miniAppId,
+                "total": due,
+                "basket": basketPayload,
+                "diningMode": diningMode.rawValue,
+                "service": serviceValue,
+                "device": [
+                    "platform": "ios",
+                    "token": apnsToken
+                ],
+                "totals": finalTotals,
+
+                // ✅ IMPORTANT: include source IN JSON (backend might ignore headers)
+                "source": normalizedSource,
+                "orderSource": normalizedSource
+            ]
+            
+            if let pickupLoc = pickupLocationIfEnabled(miniAppId: miniAppId, defaults: defaults) {
+                payload["pickupLocation"] = pickupLoc
+            }
+            // ------------------------------------------------------------
+            // ✅ DELIVERY (Fastlane / miniAppId == 3 via loc key)
+            // ------------------------------------------------------------
+            // ------------------------------------------------------------
+            // ------------------------------------------------------------
+            // ✅ DELIVERY (Fastlane / miniAppId == 3)
+            // Always send a loc. If none exists -> fallback to "mikkeller".
+            // Backend requires delivery.loc to resolve address.
+            // ------------------------------------------------------------
+            if miniAppId == 3 {
+
+                // ✅ 1) Read from app group first (recommended), then standard defaults
+                let appGroupId = "group.minis"
+                let suite = UserDefaults(suiteName: appGroupId)
+
+                func clean(_ s: String?) -> String {
+                    (s ?? "")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        .lowercased()
+                }
+
+                let locFromSuite = clean(suite?.string(forKey: "deliveryLoc"))
+                let locFromStd   = clean(defaults.string(forKey: "deliveryLoc"))
+
+                // ✅ 2) Final loc: suite -> std -> fallback
+                let fallbackLoc = "mikkeller"
+                let loc = !locFromSuite.isEmpty ? locFromSuite
+                        : (!locFromStd.isEmpty ? locFromStd : fallbackLoc)
+
+                // ✅ 3) Persist fallback so future requests are consistent (both stores)
+                if locFromSuite.isEmpty && locFromStd.isEmpty {
+                    defaults.set(loc, forKey: "deliveryLoc")
+                    suite?.set(loc, forKey: "deliveryLoc")
+                    suite?.synchronize()
+                }
+
+                // ✅ 4) Send delivery payload in the exact shape backend expects
+                payload["delivery"] = [
+                    "isDelivery": true,
+                    "loc": loc
+                ]
+
+                // ✅ 5) Delivery forces takeaway (backend expects this)
+                payload["service"] = "ta"
+            }
+
+            if let zcreditMeta, !zcreditMeta.isEmpty {
+                payload["zcredit"] = zcreditMeta           // ✅ best: namespaced
+                // or: payload["paymentMeta"] = zcreditMeta // alternative
+            }
+            
+            if let orderId { payload["orderId"] = orderId }
+            if let ticketNumber { payload["ticketNumber"] = ticketNumber }
+
+            if let orderType, !orderType.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                payload["orderType"] = orderType
+            }
+            if let tabKey, !tabKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                payload["tabKey"] = tabKey
+            }
+
+            // ------------------------------------------------------------
+            // Payment: normalize
+            // ------------------------------------------------------------
+            var dueVar = due
+
+            if let payment {
+                var cash = r2(max(payment.cashAmount, 0))
+                var card = r2(max(payment.cardAmount, 0))
+                let sum  = r2(cash + card)
+
+                if sum > 0.01, !closeEnough(sum, dueVar) {
+                    dueVar = sum
+                    finalTotals["total"] = dueVar
+                }
+
+                let method: String
+                if sum <= 0.01 {
+                    cash = 0
+                    card = 0
+                    method = PaymentMethod.unpaid.rawValue
+                } else if cash > 0.01 && card > 0.01 {
+                    method = PaymentMethod.mixed.rawValue
+                } else if card > 0.01 {
+                    method = PaymentMethod.card.rawValue
+                } else {
+                    method = PaymentMethod.cash.rawValue
+                }
+
+                payload["payment"] = [
+                    "provider": "minis",
+                    "method": method,
+                    "cardAmount": card,
+                    "cashAmount": cash
+                ]
+            }
+
+            // ✅ If ApplePay succeeded but you forgot to pass PaymentSummary,
+            // still mark the order as CARD so DB won't show unpaid.
+            if payload["payment"] == nil, zcreditMeta != nil, dueVar > 0.01 {
+                payload["payment"] = [
+                    "provider": "zcredit",
+                    "method": PaymentMethod.card.rawValue,
+                    "cardAmount": dueVar,
+                    "cashAmount": 0
+                ]
+            }
+
+            // ensure final totals use dueVar
+            payload["total"] = dueVar
+            var totalsOut = finalTotals
+            totalsOut["total"] = dueVar
+            payload["totals"] = totalsOut
+
+            if let phone = customerPhone?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !phone.isEmpty {
+                payload["notifications"] = [
+                    "wa": [
+                        "phone": phone,
+                        "consent": 1
+                    ]
+                ]
+            }
+
+            guard let url = URL(string: "https://minis.studio/submitOrder") else {
+                completion(.failure(SubmitError(message: "Bad URL")))
                 return
             }
 
-            let oid = obj["orderId"] as? Int ?? 0
-            let replay = (obj["replay"] as? Bool) ?? false
+            // ✅ Idempotency key (persisted by outbox)
+            let idempotencyKey = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+            payload["idempotencyKey"] = idempotencyKey
 
             Task { @MainActor in
-                OutboxLog.shared.acked(
+                OutboxLog.shared.queued(
                     id: idempotencyKey,
-                    orderId: oid,
-                    replay: replay,
-                    msg: replay ? "server replay" : "server ack"
+                    miniAppId: miniAppId,
+                    ticketNumber: ticketNumber,
+                    msg: "queued for /submitOrder"
                 )
             }
 
-            if oid > 0 {
-                Task { @MainActor in OrderOutbox.shared.drainNow() }
-                completion(.success(oid))
-            } else {
-                completion(.failure(SubmitError(message: "Server did not return orderId")))
+            var req = URLRequest(url: url)
+            req.httpMethod = "POST"
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+
+            // ✅ still send header version too
+            req.setValue(normalizedSource, forHTTPHeaderField: "X-Order-Source")
+
+            // ✅ send idempotency in headers too (your backend reads these)
+            req.setValue(idempotencyKey, forHTTPHeaderField: "Idempotency-Key")
+            req.setValue(idempotencyKey, forHTTPHeaderField: "X-Request-Id")
+
+            if !apnsToken.isEmpty {
+                req.setValue("ios", forHTTPHeaderField: "X-Device-Platform")
+                req.setValue(apnsToken, forHTTPHeaderField: "X-Device-Token")
+
+                #if APPCLIP
+                let topic = "minis.co.uk.Clip"
+                #else
+                let topic = Bundle.main.bundleIdentifier ?? "minis.studio.app"
+                #endif
+                req.setValue(topic, forHTTPHeaderField: "X-APNs-Topic")
+
+                #if DEBUG
+                req.setValue("sandbox", forHTTPHeaderField: "X-APNs-Env")
+                #else
+                req.setValue("production", forHTTPHeaderField: "X-APNs-Env")
+                #endif
             }
-        }.resume()
-    }
+
+            // ✅ Enqueue BEFORE sending (durability)
+            let env = OutboxEnvelope(
+                id: idempotencyKey,
+                createdAt: Date(),
+                state: .pending,
+                attemptCount: 0,
+                lastAttemptAt: nil,
+                endpoint: url.absoluteString,
+                body: req.httpBody ?? Data(),
+                headers: req.allHTTPHeaderFields ?? [:]
+            )
+
+            Task { @MainActor in
+                OrderOutbox.shared.enqueue(env)
+                OrderOutbox.shared.drainNow()   // try immediately
+            }
+
+            print("curl:", req.curlDebug)
+
+            Task { @MainActor in
+                NotificationCenter.default.post(name: .resetModifiers, object: nil)
+            }
+
+            Task { @MainActor in
+                OutboxLog.shared.sending(id: idempotencyKey, msg: "sending…")
+            }
+
+            // ✅ Fire normal request too (fast path). Outbox will retry if this fails.
+            URLSession.shared.dataTask(with: req) { data, resp, err in
+                if let err = err {
+                    Task { @MainActor in
+                        OutboxLog.shared.failed(id: idempotencyKey, msg: err.localizedDescription)
+                    }
+                    completion(.failure(err))
+                    return
+                }
+
+                guard
+                    let http = resp as? HTTPURLResponse,
+                    (200...299).contains(http.statusCode),
+                    let data = data,
+                    let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                else {
+                    completion(.failure(SubmitError(message: "Server error")))
+                    return
+                }
+
+                let oid = obj["orderId"] as? Int ?? 0
+                let replay = (obj["replay"] as? Bool) ?? false
+
+                Task { @MainActor in
+                    OutboxLog.shared.acked(
+                        id: idempotencyKey,
+                        orderId: oid,
+                        replay: replay,
+                        msg: replay ? "server replay" : "server ack"
+                    )
+                }
+
+                if oid > 0 {
+                    Task { @MainActor in OrderOutbox.shared.drainNow() }
+                    completion(.success(oid))
+                } else {
+                    completion(.failure(SubmitError(message: "Server did not return orderId")))
+                }
+            }.resume()
+        }
+    
+    
 }
 
 extension URLRequest {
@@ -1205,7 +1749,7 @@ final class ZCreditPaymentHandler {
         let _ = CashpointID(rawValue: UserDefaults.standard.integer(forKey: "cashpointID")) ?? .one
 
         let safeAmount    = max(0, amount)
-        let pinpadId      = UserDefaults.standard.string(forKey: "pinpadId") ?? "48796294"
+        let pinpadId      = UserDefaults.standard.string(forKey: "pinpadId") ?? "111111"
         let correlationId = UUID().uuidString
 
         currentCorrelationId = correlationId
@@ -1344,7 +1888,8 @@ final class ZCreditApplePayHandler: NSObject, PKPaymentAuthorizationControllerDe
     private let countryCode: String
     private let currencyCode: String
     private var committedAmountMinor: Int = 0
-
+    let miniAppId = UserDefaults.standard.integer(forKey: "miniAppId")
+    
     init(countryCode: String = "IL", currencyCode: String = "ILS") {
         self.countryCode = countryCode
         self.currencyCode = currencyCode
@@ -1484,6 +2029,7 @@ final class ZCreditApplePayHandler: NSObject, PKPaymentAuthorizationControllerDe
         let orderId = "apple-\(Int(Date().timeIntervalSince1970))"
 
         let body: [String: Any] = [
+            "miniAppId": miniAppId,
             "amountMinor": amountMinor,
             "currency": currencyCode,
             "orderId": orderId,
@@ -1723,7 +2269,7 @@ final class MenuCatalog {
     }
 
     func printer(for productId: Int?) -> String? {
-        item(for: productId)?.printer
+        item(for: productId)?.effectivePrinterId   // <-- prefers printers[0] then printer
     }
 
     // ✅ ADD THIS
@@ -1732,13 +2278,22 @@ final class MenuCatalog {
     }
 }
 // GLOBAL helper – accessible from anywhere
+func stationIds(from any: String?) -> [String] {
+    let t = (any ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if t.hasPrefix("s") { return [t] }
+    if t.contains("kitchen") || t.contains("מטבח") { return ["s1"] }
+    if t.contains("bakery")  || t.contains("מאפ")  || t.contains("ויטר") { return ["s3"] }
+    if t.contains("bar")     || t.contains("בר")   { return ["s2"] }
+    return []
+}
+
 func makeShellMenuItem(from line: AdminOrderLineItem) -> ShellMenuItem {
-    // ✅ If we have the menu item, use it (includes printer)
     if let menuItem = MenuCatalog.shared.item(for: line.productId) {
         return menuItem
     }
 
-    // ✅ fallback uses line.printer (from server or catalog)
+    let sids = stationIds(from: line.printer)
+
     return ShellMenuItem(
         id: line.productId ?? line.id,
         name: line.name,
@@ -1749,9 +2304,10 @@ func makeShellMenuItem(from line: AdminOrderLineItem) -> ShellMenuItem {
         description: nil,
         status: nil,
         stockQuantity: nil,
-        printer: line.printer ?? "Bar",
-        activeFrom: nil,
-        activeTo: nil
+
+        // ✅ force station ids when we can
+        printer: sids.first,      // could be "s3"
+        printers: sids.isEmpty ? nil : sids
     )
 }
 
@@ -2843,14 +3399,21 @@ final class OrderOutbox: ObservableObject {
         req.httpBody = env.body
         for (k, v) in env.headers { req.setValue(v, forHTTPHeaderField: k) }
 
+        func parseOrderId(_ any: Any?) -> Int? {
+            if let i = any as? Int { return i }
+            if let d = any as? Double { return Int(d) }
+            if let s = any as? String { return Int(s.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            return nil
+        }
+
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
             let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
             guard (200...299).contains(code) else { return false }
 
-            // require orderId in response (ACK)
             if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let oid = obj["orderId"] as? Int, oid > 0 {
+               let oid = parseOrderId(obj["orderId"]),
+               oid > 0 {
                 return true
             }
             return false
@@ -3251,6 +3814,7 @@ struct AdminOrderLineItem: Identifiable, Hashable {
 
 struct AdminOrderItem: Identifiable, Hashable {
     let id: Int
+
     var orderId: String
     var customerName: String
     var subtitle: String
@@ -3263,7 +3827,14 @@ struct AdminOrderItem: Identifiable, Hashable {
     var isUnpaid: Bool
     var paymentMethod: String?
 
-    var customerPhone: String?    // ✅ ADD THIS
+    // ✅ already added
+    var customerPhone: String?
+
+    // ✅ NEW — used by row badge + printer
+    var diningMode: DiningMode
+
+    // ✅ OPTIONAL but VERY useful for debugging / future DEL badge
+    var isDelivery: Bool
 }
 
 // MARK: - API DTOs
@@ -3284,7 +3855,7 @@ struct AdminOrderItem: Identifiable, Hashable {
     let lineTotal: Double?
 }
 
- struct OrderDTO: Decodable {
+struct OrderDTO: Decodable {
     let id: Int
     let ticketNumber: Int?        // local slip number from DB (if present)
     let source: String
@@ -3303,11 +3874,14 @@ struct AdminOrderItem: Identifiable, Hashable {
     let status: Int?
     let paymentMethod: String?
 
+    let service: String?          // ✅ NEW ("ta" / "sit" etc.)
+
     enum CodingKeys: String, CodingKey {
         case id, source, bucket, stage, placedAt, scheduledFor,
-             customerName, customerDisplayName, customerPhone, // ✅ NEW
+             customerName, customerDisplayName, customerPhone,
              totalGBP, itemSummary,
-             isDelivery, shortCode, lines, status, paymentMethod, ticketNumber
+             isDelivery, shortCode, lines, status, paymentMethod, ticketNumber,
+             service                      // ✅ NEW
         case Status = "Status"
     }
 
@@ -3325,7 +3899,7 @@ struct AdminOrderItem: Identifiable, Hashable {
 
         customerName        = try c.decode(String.self, forKey: .customerName)
         customerDisplayName = try? c.decodeIfPresent(String.self, forKey: .customerDisplayName)
-        customerPhone       = try? c.decodeIfPresent(String.self, forKey: .customerPhone) // ✅ NEW
+        customerPhone       = try? c.decodeIfPresent(String.self, forKey: .customerPhone)
 
         totalGBP     = try c.decode(Double.self, forKey: .totalGBP)
         itemSummary  = try c.decode(String.self, forKey: .itemSummary)
@@ -3333,6 +3907,8 @@ struct AdminOrderItem: Identifiable, Hashable {
         shortCode    = try? c.decodeIfPresent(String.self, forKey: .shortCode)
         lines        = try c.decode([LineDTO].self, forKey: .lines)
         paymentMethod = try? c.decodeIfPresent(String.self, forKey: .paymentMethod)
+
+        service      = try? c.decodeIfPresent(String.self, forKey: .service)   // ✅ NEW
 
         // robust status decoding as before
         if let s = try? c.decodeIfPresent(Int.self, forKey: .status) {
@@ -3418,4 +3994,24 @@ extension ShellMenuItem {
     }
 
   
+}
+
+
+extension Array where Element == BasketEntry {
+    var requiresPhone: Bool {
+        self.contains { ($0.item.isPhone ?? false) == true }
+    }
+}
+
+func loadPendingCheckoutKey() -> String {
+    (UserDefaults.standard.string(forKey: CheckoutRecoveryKeys.pendingCheckoutKey) ?? "")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+}
+func savePendingCheckoutKey(_ key: String, miniAppId: Int) {
+    UserDefaults.standard.set(key, forKey: CheckoutRecoveryKeys.pendingCheckoutKey)
+    UserDefaults.standard.set(miniAppId, forKey: CheckoutRecoveryKeys.pendingMiniAppId)
+}
+func clearPendingCheckoutKey() {
+    UserDefaults.standard.removeObject(forKey: CheckoutRecoveryKeys.pendingCheckoutKey)
+    UserDefaults.standard.removeObject(forKey: CheckoutRecoveryKeys.pendingMiniAppId)
 }

@@ -9,6 +9,25 @@ import StripePayments
 import Combine
 import UIKit
 
+// MARK: - Pending order draft (for launch recovery banner)
+
+enum PendingOrderDraftKeys {
+    static let draft = "menu.pendingOrderDraft.v1"
+}
+
+struct PendingOrderDraft: Codable {
+    struct Line: Codable {
+        let name: String
+        let quantity: Int
+        let unitPrice: Double
+        let subtitle: String?
+    }
+
+    let totalPrice: Double
+    let diningModeRaw: String
+    let lines: [Line]
+    let createdAt: Date
+}
 
 enum PickupLocation: String, CaseIterable, Identifiable {
     case cafeteria
@@ -23,6 +42,22 @@ enum PickupLocation: String, CaseIterable, Identifiable {
         }
     }
 }
+enum CheckoutRecoveryKeys {
+    static let pendingCheckoutKey = "checkout.pendingKey.v1"   // idempotency key
+    static let pendingMiniAppId   = "checkout.pendingMiniId.v1"
+}
+enum ILHours {
+    static let tz = TimeZone(identifier: "Asia/Jerusalem")!
+
+    /// Open 08:00–16:59 Jerusalem time (closed at 17:00)
+    static func isOpenNowIL(_ now: Date = Date()) -> Bool {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = tz
+        let hour = cal.component(.hour, from: now)
+        return hour >= 4 && hour < 17
+    }
+}
+
 extension UIColor {
     convenience init(hex: String) {
         var hex = hex.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -57,6 +92,31 @@ extension UIColor {
             blue: CGFloat(b) / 255,
             alpha: CGFloat(a) / 255
         )
+    }
+}
+
+extension MenuTheme {
+    /// Instagram-ish dark background (not pure black)
+    static var igBackground: Color {
+        Color(UIColor { trait in
+            if trait.userInterfaceStyle == .dark {
+                // a tiny lift from pure black
+                return UIColor(red: 0.06, green: 0.06, blue: 0.07, alpha: 1.0)
+            } else {
+                return UIColor.systemBackground
+            }
+        })
+    }
+
+    /// Optional: a subtle surface color for cards in dark mode
+    static var igSurface: Color {
+        Color(UIColor { trait in
+            if trait.userInterfaceStyle == .dark {
+                return UIColor(red: 0.11, green: 0.11, blue: 0.12, alpha: 1.0)
+            } else {
+                return UIColor.secondarySystemBackground
+            }
+        })
     }
 }
 enum MenuTheme {
@@ -218,6 +278,7 @@ struct ServiceSegment: View {
     @Environment(\.isRtl) private var isRtl
     @Environment(\.colorScheme) private var scheme
     @Binding var intent: ServiceIntent
+    var onEnterCashpoint: (() -> Void)? = nil   // ✅ ADD
 
     var body: some View {
         ZStack {
@@ -251,12 +312,12 @@ struct ServiceSegment: View {
         .frame(height: 46)
         .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous)) // important
         .highPriorityGesture(
-            LongPressGesture(minimumDuration: 1.2)
-                .onEnded { _ in
-                    UserDefaults.standard.set(true, forKey: "cashPointMode")
-                    UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
-                }
-        )
+            LongPressGesture(minimumDuration: 0.7)
+                        .onEnded { _ in
+                            UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
+                            onEnterCashpoint?()        // ✅
+                        }
+                )
     }
 
     private func segButton(_ value: ServiceIntent) -> some View {
@@ -308,7 +369,7 @@ enum OrderPhase: String, Codable {
 
 fileprivate func menuFontScale() -> CGFloat {
     let miniId = UserDefaults.standard.integer(forKey: "miniAppId")
-    return miniId == 13 ? 1.1 : 0.9
+    return miniId == 13 ? 1.1 : 1.0
 }
 
 func menuFontName() -> String {
@@ -370,12 +431,13 @@ struct menuView: View {
     @State private var myItemsPreset: (options: [String:String], additions: Set<String>)? = nil
     @State private var productSheetNonce: Int = 0
     @AppStorage("checkout.intent") private var checkoutIntentRaw: String = ""
-    @State private var serviceIntent: ServiceIntent = .ta
-    @AppStorage(CheckoutKeys.didShowWelcome) private var didShowWelcome: Bool = false
+    @State private var serviceIntent: ServiceIntent = .sit
+    @AppStorage(CheckoutKeys.didShowWelcome) private var didShowWelcome: Bool = true
     @State private var showWelcome: Bool = false
     @State private var showMembers = false
     @State private var showCardSheet = false
     @AppStorage(MembersKeys.didPrompt) private var didPromptMembers: Bool = false
+    @AppStorage("ui.dismissToHome") private var dismissToHome: Bool = false
     @State private var showMembersSheet = false
     @State private var showMemberCard = false
     @State private var showJoinMembers = false
@@ -384,13 +446,13 @@ struct menuView: View {
     @State private var showOrderFlow = false
     @State private var orderFlowEntries: [BasketEntry] = []
     @State private var orderFlowTotal: Double = 0
-    @State private var orderFlowDiningMode: DiningMode = .takeAway
+    @State private var orderFlowDiningMode: DiningMode = .dineIn
     @State private var orderFlowIsSubmitting = false
     @State private var orderFlowShowProgress = false
     @State private var orderFlowSubmitError: String? = nil
     @State private var isManualCategoryScroll = false
     @State private var manualScrollToken: UUID = UUID()
-    
+    @State private var showNightScreen: Bool = false
     @State private var scrollToTopToken: Int = 0
     @StateObject private var scrollVM = MenuScrollCoordinator()
     // MARK: - Idle reset (customer mode only)
@@ -406,8 +468,7 @@ struct menuView: View {
     private let kPendingStudentClaim  = "pendingStudentClaim.v1"
     @AppStorage("members.updatedAt") private var membersUpdatedAt: Double = 0
     @AppStorage("admin") private var isAdmin: Bool = false
-    @State private var now: Date = Date()
-    private let clock = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
+   
     private let idleClock = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     @AppStorage("pickup.location")
     private var pickupLocationRaw: String = PickupLocation.cafeteria.rawValue
@@ -415,12 +476,230 @@ struct menuView: View {
     @State private var lastMenuFetchAt: Date = .distantPast
     @State private var stampsClaim: StampsClaim? = nil
     private let kPendingStampsClaim = "pendingStampsClaim.v1"
-
+    @Environment(\.scenePhase) private var scenePhase
     private struct StampsClaim: Identifiable, Codable, Equatable {
         var id: String { "\(miniAppId)-\(stamps)" }
         let miniAppId: Int
         let stamps: Int
     }
+    @State private var pendingNight: Bool = false
+   
+    
+    func nukePendingCheckoutState() {
+        UserDefaults.standard.removeObject(forKey: CheckoutRecoveryKeys.pendingCheckoutKey)
+        UserDefaults.standard.removeObject(forKey: CheckoutRecoveryKeys.pendingMiniAppId)
+        
+        print("🧨 nuked pending checkout state")
+    }
+    
+   
+    private func loadPendingOrderDraft() -> PendingOrderDraft? {
+        guard let data = UserDefaults.standard.data(forKey: PendingOrderDraftKeys.draft) else { return nil }
+        return try? JSONDecoder().decode(PendingOrderDraft.self, from: data)
+    }
+
+    private func clearPendingOrderDraft() {
+        UserDefaults.standard.removeObject(forKey: PendingOrderDraftKeys.draft)
+    }
+    // MARK: - Checkout Recovery (launch)
+    @State private var didRunLaunchCheckoutRecovery = false
+
+    private struct CheckoutStatusResp: Decodable {
+        let ok: Bool
+        let orderId: Int
+        let status: Int
+        let paymentMethod: String
+    }
+
+    private func isPaidStatus(_ st: CheckoutStatusResp) -> Bool {
+        if st.status == 1 { return true }
+        let pm = st.paymentMethod.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return pm == "card" || pm == "cash" || pm == "mixed" || pm == "tip"
+    }
+
+    private func fetchCheckoutStatus(miniAppId: Int, key: String, completion: @escaping (Result<CheckoutStatusResp, Error>) -> Void) {
+        var comps = URLComponents(string: "https://minis.studio/checkout/status")!
+        comps.queryItems = [
+            .init(name: "miniAppId", value: "\(miniAppId)"),
+            .init(name: "key", value: key)
+        ]
+        let url = comps.url!
+
+        URLSession.shared.dataTask(with: url) { data, resp, err in
+            if let err = err { completion(.failure(err)); return }
+            guard let http = resp as? HTTPURLResponse, let data = data else {
+                completion(.failure(NSError(domain: "checkout", code: -1, userInfo: [NSLocalizedDescriptionKey: "No response"])))
+                return
+            }
+            guard (200...299).contains(http.statusCode) else {
+                let body = String(data: data, encoding: .utf8) ?? "HTTP \(http.statusCode)"
+                completion(.failure(NSError(domain: "checkout", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: body])))
+                return
+            }
+            do {
+                let decoded = try JSONDecoder().decode(CheckoutStatusResp.self, from: data)
+                completion(.success(decoded))
+            } catch {
+                completion(.failure(error))
+            }
+        }.resume()
+    }
+   
+   
+    private func runLaunchCheckoutRecoveryIfNeeded() {
+        guard !didRunLaunchCheckoutRecovery else { return }
+        didRunLaunchCheckoutRecovery = true
+
+        let key = loadPendingCheckoutKey()
+        let mid = UserDefaults.standard.integer(forKey: CheckoutRecoveryKeys.pendingMiniAppId)
+
+        guard !key.isEmpty, mid > 0 else {
+            clearPendingCheckoutKey()
+            clearPendingOrderDraft()
+            return
+        }
+
+        print("🧭 launchRecovery: checking status key=\(key) miniAppId=\(mid)")
+
+        fetchCheckoutStatus(miniAppId: mid, key: key) { res in
+            DispatchQueue.main.async {
+
+                // ✅ ALWAYS clear key after one check (your rule)
+                self.clearPendingCheckoutKey()
+
+                switch res {
+                case .success(let st):
+                    let pm = st.paymentMethod.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                    let isPaid = st.ok && st.orderId > 0 && (st.status == 1 || pm == "card" || pm == "paid")
+
+                    print("🧭 launchRecovery: ok=\(st.ok) orderId=\(st.orderId) status=\(st.status) pm=\(pm) paid=\(isPaid)")
+
+                    guard isPaid else {
+                        self.clearPendingOrderDraft()
+                        return
+                    }
+
+                    // ✅ Load draft ONCE
+                    let draft = self.loadPendingOrderDraft()
+                    let draftLinesCount = draft?.lines.count ?? 0
+                    print("🧾 launchRecovery: draft exists=\(draft != nil) lines=\(draftLinesCount)")
+
+                    // ✅ If draft is missing/empty -> DO NOT wipe existing persisted last order
+                    // Load persisted banner (if any) BEFORE building the final snapshot
+                    self.loadLastOrderPersistedIfValid()
+                    let persisted = self.lastOrder
+                    let persistedCount = persisted?.entries.count ?? 0
+                    print("🧾 launchRecovery: persisted lastOrder entries=\(persistedCount)")
+
+                    // dining mode: draft > persisted > intent
+                    let dm: DiningMode = {
+                        if let d = draft, let parsed = DiningMode(rawValue: d.diningModeRaw) { return parsed }
+                        if let p = persisted { return p.diningMode }
+                        let intent = ServiceIntent(rawValue: self.checkoutIntentRaw) ?? .sit
+                        return (intent == .ta) ? .takeAway : .dineIn
+                    }()
+
+                    // entries + total: draft first, else persisted (don’t wipe)
+                    let entriesForBanner: [BasketEntry] = {
+                        if let d = draft, !d.lines.isEmpty {
+                            return d.lines.enumerated().map { (idx, l) in
+                                let shell = ShellMenuItem(
+                                    id: idx,
+                                    name: l.name,
+                                    price: l.unitPrice,
+                                    category: "",
+                                    modifiers: nil,
+                                    imageURL: nil,
+                                    description: nil
+                                )
+                                return BasketEntry(
+                                    id: idx,
+                                    item: shell,
+                                    quantity: l.quantity,
+                                    subtitle: l.subtitle,
+                                    unitPrice: l.unitPrice
+                                )
+                            }
+                        }
+                        // fallback to persisted entries if draft missing/empty
+                        return persisted?.entries ?? []
+                    }()
+
+                    let totalForBanner: Double = {
+                        if let d = draft, !d.lines.isEmpty { return d.totalPrice }
+                        return persisted?.totalPrice ?? 0
+                    }()
+
+                    // ✅ Final snapshot uses recovered orderId, but keeps lines from draft/persisted
+                    let snap = OrderSnapshot(
+                        orderNumber: st.orderId,
+                        entries: entriesForBanner,
+                        totalPrice: totalForBanner,
+                        diningMode: dm,
+                        phase: .inProgress
+                    )
+
+                    self.lastOrder = snap
+
+                    // ✅ Only persist if we have something meaningful
+                    // (prevents overwriting a good persisted order with empty)
+                    if !entriesForBanner.isEmpty || totalForBanner > 0.0001 {
+                        self.saveLastOrderPersisted(snap)
+                        print("✅ launchRecovery: saved persisted banner entries=\(entriesForBanner.count) total=\(totalForBanner)")
+                    } else {
+                        print("⚠️ launchRecovery: NOT persisting because entries+total empty (avoid wiping)")
+                    }
+
+                    // ✅ Clear draft only after we’re done using it
+                    self.clearPendingOrderDraft()
+
+                case .failure(let err):
+                    print("🧭 launchRecovery: status check failed -> \(err.localizedDescription)")
+                    self.clearPendingOrderDraft()
+                }
+            }
+        }
+    }
+    private func shouldPollMenu() -> Bool {
+        // Don’t hammer while payment / basket / product sheet are open
+        if showOrderFlow { return false }
+        if showBasketSheet { return false }
+        if selectedItem != nil { return false }
+        if showIdleSheet { return false }
+
+        // ✅ IMPORTANT: allow polling during WelcomeView
+        // if showWelcome { return false }
+
+        return true
+    }
+    
+    private var anyOtherModalPresented: Bool {
+        showWelcome
+        || showOrderFlow
+        || showBasketSheet
+        || showMembers
+        || showMembersSheet
+        || showCardSheet
+        || (selectedItem != nil)
+        || (studentClaim != nil)
+    }
+   
+    
+    func loadPendingCheckoutKey() -> String {
+        (UserDefaults.standard.string(forKey: CheckoutRecoveryKeys.pendingCheckoutKey) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    func savePendingCheckoutKey(_ key: String, miniAppId: Int) {
+        UserDefaults.standard.set(key, forKey: CheckoutRecoveryKeys.pendingCheckoutKey)
+        UserDefaults.standard.set(miniAppId, forKey: CheckoutRecoveryKeys.pendingMiniAppId)
+    }
+    func clearPendingCheckoutKey() {
+        UserDefaults.standard.removeObject(forKey: CheckoutRecoveryKeys.pendingCheckoutKey)
+        UserDefaults.standard.removeObject(forKey: CheckoutRecoveryKeys.pendingMiniAppId)
+    }
+    
+   
+   
     private var serviceIntentBinding: Binding<ServiceIntent> {
         Binding(
             get: { ServiceIntent(rawValue: checkoutIntentRaw) ?? .sit },
@@ -446,38 +725,43 @@ struct menuView: View {
         return nil
     }
 
-    private func shouldPollMenu() -> Bool {
-        // Don’t hammer while sheets / flows are open (optional but recommended)
-        if showOrderFlow { return false }
-        if showBasketSheet { return false }
-        if selectedItem != nil { return false }   // product sheet open
-        if showWelcome { return false }           // kiosk welcome open
-        if showIdleSheet { return false }
-        return true
+    private var shouldShowNight: Bool {
+        (api.isOpen == false) || (ILHours.isOpenNowIL() == false)
     }
+    private func presentNightIfPossible() {
+        guard pendingNight else { return }
 
+        // ✅ Only present when nothing else is being presented
+        if anyOtherModalPresented {
+            // try again shortly (this is what your 3s polling was effectively doing)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                presentNightIfPossible()
+            }
+            return
+        }
+
+        if !showNightScreen {
+            showNightScreen = true
+        }
+    }
     private func startMenuPolling() {
         menuPollTask?.cancel()
+
+        let pollSeconds: Double = 30
 
         menuPollTask = Task {
             while !Task.isCancelled {
 
                 if shouldPollMenu() {
-                    // Optional throttle so we never reload more often than every 30s
-                    let elapsed = Date().timeIntervalSince(lastMenuFetchAt)
-                    if elapsed >= 30 {
-                        await MainActor.run {
-                            // ✅ FORCE network + re-parse
-                            // Use whichever signature you have:
-                            // api.load(skipCache: true)
-                            api.load(skipCache: true)
-
-                            lastMenuFetchAt = Date()
-                        }
+                    await MainActor.run {
+                        // ✅ keep serverClock fresh even during night
+                        
+                        api.load(skipCache: true)
+                        lastMenuFetchAt = Date()
                     }
                 }
 
-                try? await Task.sleep(nanoseconds: 30_000_000_000)
+                try? await Task.sleep(nanoseconds: UInt64(pollSeconds * 1_000_000_000))
             }
         }
     }
@@ -740,7 +1024,8 @@ struct menuView: View {
         return Array(repeating: GridItem(.flexible(), spacing: 12), count: count)
     }
     private var items: [ShellMenuItem] {
-        api.items.filter { $0.isAvailable && $0.isWithinActiveHours(now: now) }
+        let d = Date()
+        return api.items.filter { $0.isAvailable && $0.isWithinActiveHours(now: d) }
     }
     private var basketTotalQuantity: Int { basket.values.reduce(0) { $0 + $1.quantity } }
     private var basketTotalPrice: Double { basket.values.reduce(0) { $0 + Double($1.quantity) * $1.unitPrice } }
@@ -977,43 +1262,41 @@ struct menuView: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                Color(.systemBackground).ignoresSafeArea()
+                MenuTheme.igBackground.ignoresSafeArea()
                 ScrollViewReader { proxy in
                     
                     if isPad {
                         // ✅ iPad layout: content + right rail
                         HStack(spacing: 0) {
-                            
                             CategoryRail(
                                 categories: availableCategories,
                                 selected: selectedCategory,
                                 onTap: { cat in
                                     // ✅ freeze detector for exactly ~1.3s
                                     isManualCategoryScroll = true
-                                    manualScrollToken = UUID()          // new token for this tap
+                                    manualScrollToken = UUID()
                                     let token = manualScrollToken
 
                                     categorySyncResumeAt = Date().addingTimeInterval(1.3)
                                     selectedCategory = cat
 
-                                    // scroll (next runloop is more reliable)
                                     DispatchQueue.main.async {
                                         withAnimation(.easeInOut(duration: 0.55)) {
                                             proxy.scrollTo(anchorId(for: cat), anchor: .top)
                                         }
                                     }
 
-                                    // ✅ unfreeze exactly once (not extended by any other updates)
                                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.3) {
                                         guard token == manualScrollToken else { return }
                                         isManualCategoryScroll = false
                                     }
                                 },
                                 intent: serviceIntentBinding,
-                                onServiceLongPress: {
-                                    guard isAdmin else { return }
-                                    print("✅ LONG PRESS on ServiceSegment → cashPointMode true")
+                                onEnterCashpoint: {
+                                   
+                                    print("✅ LONG PRESS → cashPointMode true")
                                     cashPointMode = true
+                                    
                                 }
                             )
                             // MAIN CONTENT
@@ -1223,7 +1506,14 @@ if miniAppId == 12  || miniAppId == 13 {
                                     .padding(.bottom, 20)
 
                                 } else if miniAppId == 12 {
-                                    ServiceSegment(intent: serviceIntentBinding)
+                                    ServiceSegment(
+                                        intent: serviceIntentBinding,
+                                        onEnterCashpoint: {
+                                            guard isAdmin else { return }
+                                            cashPointMode = true
+                                            dismiss()   // ✅ close menu cover
+                                        }
+                                    )
                                         .padding(.horizontal, 16)
                                         .padding(.top, 8)
                                         .padding(.bottom, 20)
@@ -1406,23 +1696,72 @@ if miniAppId == 12  || miniAppId == 13 {
         }
         
         .foregroundColor(MenuTheme.textColor)
-        .onReceive(NotificationCenter.default.publisher(for: .myItemsChanged)) { _ in
-            reloadMyItems()
+        .onChange(of: api.isOpen) { _ in
+            if !shouldShowNight {
+                pendingNight = false
+                showNightScreen = false
+            }
         }
-        
+        .onChange(of: dismissToHome) { goHome in
+            guard goHome else { return }
+
+            // close anything inside menu first (safe)
+            pendingNight = false
+            showNightScreen = false
+            selectedItem = nil
+            showBasketSheet = false
+            showOrderFlow = false
+            showMembersSheet = false
+            showCardSheet = false
+            showMembers = false
+            showWelcome = false
+
+            // ✅ dismiss the Menu fullScreenCover -> returns to HomeView
+            dismiss()
+
+            // reset flag so it can be triggered again later
+            dismissToHome = false
+        }
         .onChange(of: checkoutIntentRaw) { newValue in
-            serviceIntent = ServiceIntent(rawValue: newValue) ?? .ta
+            serviceIntent = ServiceIntent(rawValue: newValue) ?? .sit
+        }
+        .onChange(of: shouldShowNight) { shouldNight in
+            print("🌙 shouldShowNight changed ->", shouldNight)
+
+            if shouldNight {
+                pendingNight = true
+
+                // close other modals first
+                selectedItem = nil
+                showBasketSheet = false
+                showOrderFlow = false
+                showMembersSheet = false
+                showCardSheet = false
+                showMembers = false
+                showWelcome = false
+
+                // ✅ keep trying until sheets actually dismissed
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    presentNightIfPossible()
+                }
+
+            } else {
+                pendingNight = false
+                showNightScreen = false
+            }
+        }
+        .onChange(of: anyOtherModalPresented) { _ in
+            if pendingNight { presentNightIfPossible() }
         }
         .onChange(of: api.items.count) { count in
-            guard count > 0 else { return }   // ✅ menu finished loading
+            guard count > 0 else { return }
+            guard !showNightScreen else { return }   // ✅ ADD THIS
 
             if !didShowWelcome &&
                checkoutIntentRaw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
 
-                
-                // ensure it's not during layout pass
                 DispatchQueue.main.async {
-                    if isPad{
+                    if isPad {
                         showWelcome = true
                     }
                 }
@@ -1440,6 +1779,7 @@ if miniAppId == 12  || miniAppId == 13 {
     .interactiveDismissDisabled(true)
 }
 #else
+        
 .sheet(item: $studentClaim) { claim in
     StudentDiscountView(
         miniAppId: claim.miniAppId,
@@ -1451,6 +1791,15 @@ if miniAppId == 12  || miniAppId == 13 {
     .presentationDragIndicator(.visible)
 }
 #endif
+.fullScreenCover(isPresented: $showNightScreen) {
+    NightClosedView(
+        shopName: (miniAppId == 13 ? "vitamin" : (isRtl ? "בית העם" : "Beigel Bake"))
+      
+    )
+    .interactiveDismissDisabled(true) // optional: prevent swipe down
+    .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
+    .environment(\.locale, Locale(identifier: "he_IL"))
+}
         .onReceive(
             NotificationCenter.default.publisher(for: Notification.Name.studentClaimArrived)
                 .receive(on: RunLoop.main)
@@ -1459,12 +1808,19 @@ if miniAppId == 12  || miniAppId == 13 {
             loadPendingStudentClaimIfAny()
         }
         .onAppear {
-            
+          
+            runLaunchCheckoutRecoveryIfNeeded()
+           
+            pendingNight = shouldShowNight
+            if pendingNight { presentNightIfPossible() }
+
+            print("pendingNight \(pendingNight)")
+
            // loadPendingStudentClaimIfAny()   // ✅ cold start / app clip handoff
 
 
            
-            serviceIntent = ServiceIntent(rawValue: checkoutIntentRaw) ?? .ta
+            serviceIntent = ServiceIntent(rawValue: checkoutIntentRaw) ?? .sit
                if !api.items.isEmpty {
                    let first = api.items[0]
                    print("🧭 menuView.onAppear → first item: \(first.name) [\(first.category)] (total \(api.items.count))")
@@ -1475,7 +1831,7 @@ if miniAppId == 12  || miniAppId == 13 {
             saveReferralForCurrentShop(kind: .fastlane)
             api.load(skipCache: false)
             lastMenuFetchAt = Date()
-            now = Date()
+           
             reloadMyItems()
             startMenuPolling()
             //loadLastOrderPersistedIfValid()
@@ -1500,12 +1856,20 @@ if miniAppId == 12  || miniAppId == 13 {
 
            
         }
-        .onDisappear {
-            stopMenuPolling()            // ✅ stop polling
+        .onChange(of: scenePhase) { phase in
+            if phase == .active {
+                startMenuPolling()
+            } else {
+                stopMenuPolling()
+            }
         }
-        .onReceive(clock) { _ in
-            now = Date()
+        .onChange(of: showNightScreen) { isShown in
+            // ✅ If night opens, keep polling alive (and restart if it was cancelled)
+            if isShown {
+                startMenuPolling()
+            }
         }
+        
         .onReceive(NotificationCenter.default.publisher(for: .orderReady)) { note in
             guard let userInfo = note.userInfo else { return }
 
@@ -1541,8 +1905,8 @@ if miniAppId == 12  || miniAppId == 13 {
         // ✅ any tap/drag anywhere counts as interaction (without breaking scroll)
         .contentShape(Rectangle())
         .simultaneousGesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { _ in
+            DragGesture(minimumDistance: 12)
+                .onEnded { _ in
                     guard !cashPointMode else { return }
                     registerInteraction()
                 }
@@ -1778,6 +2142,7 @@ if miniAppId == 12  || miniAppId == 13 {
                 .environment(\.locale, Locale(identifier: "he_IL"))
         }
         .onAppear {
+            /*
 #if !APPCLIP
 guard !UserDefaults.standard.bool(forKey: "didShowMembersOnce") else { return }
 
@@ -1786,6 +2151,7 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
     UserDefaults.standard.set(true, forKey: "didShowMembersOnce")   // ✅ move here
 }
 #endif
+             */
         }
         .sheet(isPresented: $showMembersSheet) {
             MembersClubView(
@@ -1807,7 +2173,7 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
         }
         .overlay(alignment: .top) {
             GeometryReader { geo in
-                Color(.systemBackground)
+                MenuTheme.igBackground
                     .frame(height: geo.safeAreaInsets.top)
                     .ignoresSafeArea(edges: .top)
             }
@@ -1828,7 +2194,9 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
                             BasketBar(
                                 totalQuantity: basketTotalQuantity,
                                 totalPrice: basketTotalPrice,
-                                onTap: { showBasketSheet = true },
+                                onTap: {
+                                    guard !showNightScreen else { return }
+                                    showBasketSheet = true },
                                 isPad: isPad,
                                 onNewOrder: {
                                     basket.removeAll()
@@ -1843,7 +2211,9 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
                         BasketBar(
                             totalQuantity: basketTotalQuantity,
                             totalPrice: basketTotalPrice,
-                            onTap: { showBasketSheet = true },
+                            onTap: {
+                                guard !showNightScreen else { return }
+                                showBasketSheet = true },
                             isPad: isPad,
                             onNewOrder: {
                                 basket.removeAll()
@@ -2055,7 +2425,7 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
                                 onDecrement: { decrementEntry($0) },
                                 onContinue: { payable in
                                     let dm: DiningMode = {
-                                        let intent = ServiceIntent(rawValue: checkoutIntentRaw) ?? .ta
+                                        let intent = ServiceIntent(rawValue: checkoutIntentRaw) ?? .sit
                                         return (intent == .sit) ? .dineIn : .takeAway
                                     }()
 
@@ -2184,16 +2554,35 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
                         .font(.menuRegular(18).weight(.semibold))
                     }
 
-                    Button {
-                        onContinue(payableTotal)
-                    } label: {
-                        Text(isRtl ? "המשך להזמנה" : "Continue")
-                            .font(.menuRegular(17).weight(.semibold))
-                            .foregroundColor(.white)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 56)
-                            .background(MenuTheme.buttonBackground)
-                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    HStack(spacing: 12) {
+
+                        // ✅ Back to order
+                        Button {
+                            onClose()
+                        } label: {
+                            Text(isRtl ? "חזרה להזמנה" : "Back")
+                                .font(.menuRegular(17).weight(.semibold))
+                                .foregroundColor(.primary)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 56)
+                                .background(Color(.systemGray5))
+                                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+
+                        // ✅ Go to payment
+                        Button {
+                            onContinue(payableTotal)
+                        } label: {
+                            Text(isRtl ? "מעבר לתשלום" : "Checkout")
+                                .font(.menuRegular(17).weight(.semibold))
+                                .foregroundColor(.white)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 56)
+                                .background(MenuTheme.buttonBackground)
+                                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
                 .padding(.horizontal, sidePad)
@@ -2949,7 +3338,11 @@ struct CategoryBar: View {
         }
         .background(
             VStack(spacing: 0) {
-                Color(.systemBackground)
+                Color(UIColor { trait in
+                    trait.userInterfaceStyle == .dark
+                        ? UIColor(red: 0.06, green: 0.06, blue: 0.07, alpha: 1.0) // IG dark
+                        : UIColor.systemBackground
+                })
 
                 // 👇 bottom-only shadow
                 LinearGradient(
@@ -3251,7 +3644,7 @@ struct ModifierListView: View {
             .background(isSelected ? MenuTheme.accent : Color(.systemGray5))
             .foregroundColor(
                 isSelected
-                ? (colorScheme == .dark ? .white : .white)
+                ? ((MenuTheme.miniId == 13 && colorScheme == .dark) ? .black : .white)
                 : (colorScheme == .dark ? .white : .black)
             )
             .clipShape(Capsule())
@@ -3776,7 +4169,7 @@ struct BasketBar: View {
                             .background(Color.white)
                             .clipShape(Circle())
 
-                        Text(isRtl ? "המשך להזמנה" : "View order")
+                        Text(isRtl ? "צפה בהזמנה" : "View order")
                             .font(.primariesDemi(18))
                             .foregroundColor(.white)
                     }
@@ -3844,7 +4237,107 @@ struct BasketSheet: View {
     @AppStorage("miniAppId") private var miniAppId: Int = 0
     @State private var stripeController: PKPaymentAuthorizationController? = nil
     @State private var birthdayVoucherApplied: Bool = UserDefaults.standard.bool(forKey: "birthdayVoucherApplied")
-  
+    @Environment(\.scenePhase) private var scenePhase
+    private let freeDeliveryThresholdGBP: Double = 20.0
+    private let deliveryFeeGBP: Double = 5.0
+
+    private var deliveryFee: Double {
+        guard miniAppId == 3 else { return 0 }
+
+        // Use items total AFTER discounts (your discountedTotal) to decide free delivery
+        return discountedTotal >= freeDeliveryThresholdGBP ? 0 : deliveryFeeGBP
+    }
+
+    private var payableTotal: Double {
+        discountedTotal + deliveryFee
+    }
+    @State private var applePaySheetVisible = false   // Apple Pay UI is presented
+    @State private var applePayDidAuthorize = false   // user already FaceID/TouchID approved
+    private func savePendingOrderDraftForBanner() {
+        let dm: DiningMode = {
+            let intent = ServiceIntent(rawValue: checkoutIntentRaw) ?? .sit
+            return (intent == .ta) ? .takeAway : .dineIn
+        }()
+
+        let draft = PendingOrderDraft(
+            totalPrice: discountedTotal,
+            diningModeRaw: dm.rawValue,
+            lines: entries.map {
+                PendingOrderDraft.Line(
+                    name: $0.item.name,
+                    quantity: max(1, $0.quantity),
+                    unitPrice: $0.unitPrice,
+                    subtitle: $0.subtitle
+                )
+            },
+            createdAt: Date()
+        )
+
+        if let data = try? JSONEncoder().encode(draft) {
+            UserDefaults.standard.set(data, forKey: PendingOrderDraftKeys.draft)
+            print("🧾 saved PendingOrderDraft (lines=\(draft.lines.count))")
+        }
+    }
+ 
+    private func submitCheckoutRetry3MoreTimesIfNoResponse(
+        idempotencyKey: String,
+        amountMinor: Int,
+        currency: String,
+        appleFullTokenJson: String,
+        applePayload: [String: Any],
+        completion: @escaping (Result<Int, Error>) -> Void
+    ) {
+        var finished = false
+        func finish(_ r: Result<Int, Error>) {
+            guard !finished else { return }
+            finished = true
+            completion(r)
+        }
+
+        func isNoResponse(_ err: Error) -> Bool {
+            let ns = err as NSError
+            if ns.domain == NSURLErrorDomain { return true }
+            if ns.domain == "checkout", ns.code == -1 { return true }   // your "No response"
+            if ns.domain == "checkout", ns.code == 202 { return true }  // pending
+            return false
+        }
+
+        func attempt(_ idx: Int) {
+            print("🔁 checkout attempt \(idx)/4 key=\(idempotencyKey)")
+
+            submitCheckoutZcreditApplePay(
+                idempotencyKey: idempotencyKey,
+                amountMinor: amountMinor,
+                currency: currency,
+                appleFullTokenJson: appleFullTokenJson,
+                applePayload: applePayload
+            ) { result in
+                switch result {
+                case .success:
+                    finish(result)
+
+                case .failure(let err):
+                    guard isNoResponse(err) else {
+                        finish(.failure(err))
+                        return
+                    }
+
+                    if idx >= 4 {
+                        print("🟥 checkout: giving up after 4 attempts key=\(idempotencyKey) err=\(err.localizedDescription)")
+                        finish(.failure(err))
+                        return
+                    }
+
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
+                        attempt(idx + 1)
+                    }
+                }
+            }
+        }
+
+        attempt(1)
+    }
+    
     private let appGroupId = "group.minis"
     private let membersUpdatedAtKey = "members.updatedAt"
     
@@ -3865,6 +4358,133 @@ struct BasketSheet: View {
         guard discountPercent > 0 else { return 0 }
         return (baseTotalForDiscounts * Double(discountPercent) / 100.0)
     }
+    
+  
+    
+    
+    private func cancelCheckoutAndDismiss() {
+        // stop UI lock
+        isSubmitting = false
+        showOrderProgress = false
+
+      
+        // optional: clear any error so next open is clean
+        submitError = nil
+
+        // close the basket sheet
+        dismiss()
+    }
+    private func submitCheckoutZcreditApplePay(
+        idempotencyKey: String,
+        amountMinor: Int,
+        currency: String,
+        appleFullTokenJson: String,
+        applePayload: [String: Any],
+        completion: @escaping (Result<Int, Error>) -> Void
+    ) {
+        let url = URL(string: "https://minis.studio/checkout/zcredit/applepay")!
+
+        // ✅ Build basketPayload HERE (you were missing this)
+        let basketPayload: [[String: Any]] = entries.map { e in
+            [
+                "lineId": e.id,
+                "productId": e.item.id,
+                "name": e.item.name,
+                "quantity": max(e.quantity, 1),
+                "price": e.unitPrice,
+                "modifiers": e.subtitle ?? ""
+            ]
+        }
+
+        let uuid  = UserDefaults.standard.string(forKey: "anonUUID") ?? UUID().uuidString
+        let email = UserDefaults.standard.string(forKey: "userEmail") ?? "customer@example.com"
+        let name  = UserDefaults.standard.string(forKey: "userName") ?? "Customer"
+        let apns  = loadApnsToken()
+
+        // ✅ discountedTotal must be in scope -> this function MUST be inside BasketSheet
+        let orderPayload: [String: Any] = [
+            "miniAppId": miniAppId,
+            "uuid": uuid,
+            "email": email,
+            "name": name,
+            "service": (ServiceIntent(rawValue: checkoutIntentRaw) == .ta) ? "ta" : "sit",
+            "basket": basketPayload,
+            "totals": [
+                "total": discountedTotal + deliveryFee,
+                "currency": (miniAppId == 3
+                    ? "GBP"
+                    : (UserDefaults.standard.string(forKey: "currency") ?? "ILS")
+                ),
+                // optional but very useful for backend / receipts / debugging
+                "deliveryFee": deliveryFee
+            ],
+            "source": "mini-applepay-zcredit",
+            "idempotencyKey": idempotencyKey,
+            "ticketNumber": 0,
+            "device": [
+                "platform": "ios",
+                "token": apns
+            ]
+        ]
+
+        let root: [String: Any] = [
+            "miniAppId": miniAppId,
+            "amountMinor": amountMinor,
+            "currency": currency,
+            "appleFullTokenJson": appleFullTokenJson,
+            "applePayload": applePayload,
+            "order": orderPayload
+        ]
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue(idempotencyKey, forHTTPHeaderField: "Idempotency-Key")
+        req.setValue(idempotencyKey, forHTTPHeaderField: "X-Request-Id")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: root)
+
+        print("🧾 /checkout/zcredit/applepay curl:", req.curlDebug)
+
+        URLSession.shared.dataTask(with: req) { data, resp, err in
+            if let err = err { completion(.failure(err)); return }
+            guard let http = resp as? HTTPURLResponse, let data = data else {
+                completion(.failure(NSError(domain: "checkout", code: -1, userInfo: [NSLocalizedDescriptionKey: "No response"])))
+                return
+            }
+
+            let bodyText = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
+            print("🧾 /checkout/zcredit/applepay HTTP", http.statusCode)
+            if let rid = http.value(forHTTPHeaderField: "x-request-id") { print("   x-request-id:", rid) }
+            if let cf  = http.value(forHTTPHeaderField: "cf-ray") { print("   cf-ray:", cf) }
+            print("📦 body:", bodyText)
+
+            if http.statusCode == 402 {
+                let body = String(data: data, encoding: .utf8) ?? "Declined"
+                completion(.failure(NSError(domain: "checkout", code: 402, userInfo: [NSLocalizedDescriptionKey: body])))
+                return
+            }
+
+            if http.statusCode == 202 {
+                completion(.failure(NSError(domain: "checkout", code: 202, userInfo: [NSLocalizedDescriptionKey: "Pending confirmation"])))
+                return
+            }
+
+            guard (200...299).contains(http.statusCode) else {
+                let body = String(data: data, encoding: .utf8) ?? "Server error"
+                completion(.failure(NSError(domain: "checkout", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: body])))
+                return
+            }
+
+            let obj = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+            let orderId = obj["orderId"] as? Int ?? 0
+            if orderId > 0 {
+                completion(.success(orderId))
+            } else {
+                completion(.failure(NSError(domain: "checkout", code: -2, userInfo: [NSLocalizedDescriptionKey: "Missing orderId"])))
+            }
+        }.resume()
+    }
+    
     
     private func markBirthdayVoucherRedeemedThisYear() {
         var cal = Calendar.current
@@ -3933,13 +4553,15 @@ struct BasketSheet: View {
     }
 
     private func roundTotal(_ value: Double) -> Double {
-        // ✅ Vitamin: no rounding
-        if miniAppId == 13 { return value }
+        // ✅ ONLY miniAppId == 12 rounds to whole units
+        if miniAppId == 12 {
+            let floorValue = floor(value)
+            let fraction = value - floorValue
+            return fraction >= 0.5 ? ceil(value) : floorValue
+        }
 
-        // existing behavior for others
-        let floorValue = floor(value)
-        let fraction = value - floorValue
-        return fraction >= 0.5 ? ceil(value) : floorValue
+        // ✅ everyone else: keep decimals (clean to 2dp to avoid 12.0000003)
+        return (value * 100).rounded() / 100
     }
 
  
@@ -3950,38 +4572,41 @@ struct BasketSheet: View {
         return UserDefaults.standard.bool(forKey: "debugSkipApplePay")
         
     }
+    
+    private var bottomAreaEstimatedH: CGFloat {
+        // Base for totals stack + ApplePay button area
+        // (tighter than before)
+        let base: CGFloat = 150
+
+        // Delivery adds 1 row + hint
+        let deliveryExtra: CGFloat = (miniAppId == 3) ? (deliveryFee > 0.0001 ? 44 : 28) : 0
+
+        let discountExtra: CGFloat = (discountPercent > 0) ? 44 : 0
+        let coffeeExtra: CGFloat = canRedeemCoffeeNow ? 56 : 0
+        let birthdayButtonExtra: CGFloat = (birthdayVoucherAvailableNow && !birthdayVoucherApplied) ? 56 : 0
+        let birthdayLineExtra: CGFloat = birthdayVoucherApplied ? 28 : 0
+
+        return base + deliveryExtra + discountExtra + coffeeExtra + birthdayButtonExtra + birthdayLineExtra
+    }
 
     private var detents: Set<PresentationDetent> {
         let screenH = UIScreen.main.bounds.height
         let maxCustom = screenH * 0.9
 
-        let discountExtra: CGFloat = (discountPercent > 0) ? 60 : 0
-
-        let coffeeRedeemExtra: CGFloat = canRedeemCoffeeNow ? 60 : 0
-
-        // ✅ birthday button OR birthday discount row
-        let birthdayExtra: CGFloat = (birthdayVoucherAvailableNow && !birthdayVoucherApplied) ? 60 : 0
-        let birthdayLineExtra: CGFloat = birthdayVoucherApplied ? 34 : 0
-
+        // contentHeight is the ScrollView content (rows)
+        // Add bottomAreaEstimatedH so rows never hide behind it
         let fitted = min(
-            contentHeight
-            + 160
-            + discountExtra
-            + coffeeRedeemExtra
-            + birthdayExtra
-            + birthdayLineExtra,
+            max(contentHeight + bottomAreaEstimatedH, 360),
             maxCustom
         )
 
-        return fitted < maxCustom
-            ? [.height(fitted), .large]
-            : [.large]
+        return fitted < maxCustom ? [.height(fitted), .large] : [.large]
     }
 
     private enum ServiceIntent: String { case sit, ta }
 
     private var serviceLabel: String {
-        let intent = ServiceIntent(rawValue: checkoutIntentRaw) ?? .ta
+        let intent = ServiceIntent(rawValue: checkoutIntentRaw) ?? .sit
         if isRtl {
             return intent == .sit ? "לשבת" : "לקחת"
         } else {
@@ -3990,7 +4615,7 @@ struct BasketSheet: View {
     }
 
     private func syncDiningModeFromIntent() {
-        let intent = ServiceIntent(rawValue: checkoutIntentRaw) ?? .ta
+        let intent = ServiceIntent(rawValue: checkoutIntentRaw) ?? .sit
         diningMode = (intent == .sit) ? .dineIn : .takeAway
     }
 
@@ -4011,7 +4636,8 @@ struct BasketSheet: View {
                         Spacer(minLength: 0)
                     }
                     .padding(.top, 8)
-                    .padding(.bottom, isPad ? 100 : 15)
+                    
+                    .padding(.bottom, isPad ? 100 : 0) // ✅ reserve space for bottomArea (totals + ApplePay)
                     .background(
                         GeometryReader { geo in
                             Color.clear.preference(key: BasketContentHeightKey.self, value: geo.size.height)
@@ -4025,15 +4651,27 @@ struct BasketSheet: View {
                             .font(.menuRegular(24).weight(.semibold))
                             .foregroundColor(MenuTheme.textColor)
                     }
-                    ToolbarItem(placement: .topBarLeading) {
-                        Button { dismiss() } label: {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button {
+                            // ✅ DO NOT dismiss BasketSheet while Apple Pay UI is visible
+                            if applePaySheetVisible {
+                                Haptics.error()
+                                print("⛔️ BasketSheet dismiss blocked: Apple Pay sheet is visible")
+                                return
+                            }
+
+                            // normal behavior
+                            dismiss()
+                        } label: {
                             Image(systemName: "xmark")
                                 .font(.system(size: 15, weight: .bold))
                                 .foregroundColor(.primary)
                                 .frame(width: 32, height: 32)
                                 .background(.ultraThinMaterial)
                                 .clipShape(Circle())
+                                .opacity(applePaySheetVisible ? 0.35 : 1.0)
                         }
+                        .disabled(applePaySheetVisible)
                     }
                 }
                 .onPreferenceChange(BasketContentHeightKey.self) { contentHeight = $0 }
@@ -4041,7 +4679,7 @@ struct BasketSheet: View {
                     UserDefaults.standard.removeObject(forKey: "member.freeCoffeeLineId")
                 }
                 .onAppear {
-                   
+                  
                     UserDefaults.standard.removeObject(forKey: "member.freeCoffeeLineId")
                     activeDiscount = MinisShared.loadActiveDiscount()
 
@@ -4067,15 +4705,21 @@ struct BasketSheet: View {
                     // ✅ always derive diningMode from the shared intent
                     syncDiningModeFromIntent()
                 }
+               
                 .onChange(of: checkoutIntentRaw) { _ in
                     // ✅ if header changed while basket is open, keep this in sync
                     syncDiningModeFromIntent()
                 }
             }
+            .interactiveDismissDisabled(applePaySheetVisible || applePayDidAuthorize)
             .font(.menuRegular(15))
             .presentationDetents(detents)
             .safeAreaInset(edge: .bottom) { bottomArea }
            
+            .onDisappear {
+               
+                UserDefaults.standard.removeObject(forKey: "member.freeCoffeeLineId")
+            }
             .overlay(
                 Group {
                     if showOrderProgress {
@@ -4233,12 +4877,35 @@ struct BasketSheet: View {
                     }
                     .foregroundColor(.secondary)
                 }
+                
+                if miniAppId == 3 {
+                    HStack {
+                        Text(isRtl ? "משלוח" : "Delivery")
+                            .font(.menuRegular(17).weight(.semibold))
+                        Spacer()
 
+                        if deliveryFee <= 0.0001 {
+                            Text(isRtl ? "חינם" : "Free")
+                                .font(.menuRegular(17).weight(.semibold))
+                        } else {
+                            Text(isRtl ? formatPrice(deliveryFee) : "£\(formatPrice(deliveryFee))")
+                                .font(.menuRegular(17).weight(.semibold))
+                        }
+                    }
+                    .foregroundColor(.secondary)
+                }
+
+                if miniAppId == 3 && deliveryFee > 0.0001 {
+                    Text(isRtl ? "משלוח חינם מעל £20" : "Free delivery over £20")
+                        .font(.menuRegular(14).weight(.semibold))
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, alignment: isRtl ? .trailing : .leading) // ✅
+                }
                 HStack {
                     Text(isRtl ? "סה\"כ" : "Total")
                         .font(.menuRegular(18).weight(.semibold))
                     Spacer()
-                    Text(formatPrice(discountedTotal))
+                    Text(isRtl ? formatPrice(payableTotal) : "£\(formatPrice(payableTotal))")
                         .font(.menuRegular(18).weight(.semibold))
                 }
                 if birthdayVoucherAvailableNow && !birthdayVoucherApplied {
@@ -4334,15 +5001,19 @@ struct BasketSheet: View {
                             .onTapGesture {
                                 guard !isSubmitting else { return }
 
+                                let pendingKey = loadPendingCheckoutKey()
+                                if !pendingKey.isEmpty {
+                                    recoverPendingCheckoutIfNeeded()
+                                    return
+                                }
+
                                 let storedName = (UserDefaults.standard.string(forKey: "userName") ?? "")
                                     .trimmingCharacters(in: .whitespacesAndNewlines)
-
                                 let storedPhone = (UserDefaults.standard.string(forKey: "userPhone") ?? "")
                                     .trimmingCharacters(in: .whitespacesAndNewlines)
 
                                 let needsPhone = (miniAppId == 3)
                                 let missing = storedName.isEmpty || (needsPhone && storedPhone.isEmpty)
-
                                 if missing {
                                     tempName = storedName
                                     tempPhone = storedPhone
@@ -4350,6 +5021,7 @@ struct BasketSheet: View {
                                     return
                                 }
 
+                                // ✅ exactly once
                                 if miniAppId == 3 {
                                     startStripeApplePay()
                                 } else {
@@ -4383,7 +5055,8 @@ struct BasketSheet: View {
             return
         }
 
-        let amountMinor = Int((discountedTotal * 100).rounded())
+        let amountMinor = Int((payableTotal * 100).rounded())
+
         let currency = "gbp"
         let label = "Beigel Bake"
 
@@ -4391,8 +5064,8 @@ struct BasketSheet: View {
             merchantId: stripeMerchantId,
             countryCode: "GB",
             currencyCode: "GBP",
-            label: label,
-            total: discountedTotal
+            label: "Beigel Bake",
+            total: payableTotal
         ) { result in
             DispatchQueue.main.async {
                 switch result {
@@ -4404,7 +5077,7 @@ struct BasketSheet: View {
                     UINotificationFeedbackGenerator().notificationOccurred(.error)
 
                 case .success(let pkPayment):
-                    self.showOrderProgress = true
+                   
                     STPAPIClient.shared.createPaymentMethod(with: pkPayment) { pm, error in
                         DispatchQueue.main.async {
                             if let error = error {
@@ -4499,51 +5172,459 @@ struct BasketSheet: View {
             }
         }.resume()
     }
+    enum CheckoutRecoveryKeys {
+        static let pendingCheckoutKey    = "checkout.pendingKey.v1"
+        static let pendingMiniAppId      = "checkout.pendingMiniId.v1"
 
-    private func startZCreditApplePay() {
-        isSubmitting = true
-        submitError = nil
+        // ✅ NEW (shared): did user already FaceID/TouchID authorize?
+        static let pendingDidAuthorize   = "checkout.pendingDidAuthorize.v1"
+    }
 
-        if skipApplePay {
-            startSubmitOrder()
-            return
+    private func loadPendingDidAuthorize() -> Bool {
+        UserDefaults.standard.bool(forKey: CheckoutRecoveryKeys.pendingDidAuthorize)
+    }
+
+    private func setPendingDidAuthorize(_ v: Bool) {
+        UserDefaults.standard.set(v, forKey: CheckoutRecoveryKeys.pendingDidAuthorize)
+    }
+
+    private func clearPendingDidAuthorize() {
+        UserDefaults.standard.removeObject(forKey: CheckoutRecoveryKeys.pendingDidAuthorize)
+    }
+    
+   
+  
+    func loadPendingCheckoutKey() -> String {
+        (UserDefaults.standard.string(forKey: CheckoutRecoveryKeys.pendingCheckoutKey) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func savePendingCheckoutKey(_ key: String, miniAppId: Int) {
+        UserDefaults.standard.set(key, forKey: CheckoutRecoveryKeys.pendingCheckoutKey)
+        UserDefaults.standard.set(miniAppId, forKey: CheckoutRecoveryKeys.pendingMiniAppId)
+    }
+
+    func clearPendingCheckoutKey() {
+        UserDefaults.standard.removeObject(forKey: CheckoutRecoveryKeys.pendingCheckoutKey)
+        UserDefaults.standard.removeObject(forKey: CheckoutRecoveryKeys.pendingMiniAppId)
+    }
+    struct CheckoutStatusResp: Decodable {
+        let ok: Bool
+        let orderId: Int
+        let status: Int
+        let paymentMethod: String
+    }
+
+    func fetchCheckoutStatus(miniAppId: Int, key: String, completion: @escaping (Result<CheckoutStatusResp, Error>) -> Void) {
+        var comps = URLComponents(string: "https://minis.studio/checkout/status")!
+        comps.queryItems = [
+            .init(name: "miniAppId", value: "\(miniAppId)"),
+            .init(name: "key", value: key)
+        ]
+        let url = comps.url!
+
+        URLSession.shared.dataTask(with: url) { data, resp, err in
+            if let err = err { completion(.failure(err)); return }
+            guard let http = resp as? HTTPURLResponse, let data = data else {
+                completion(.failure(NSError(domain: "checkout", code: -1, userInfo: [NSLocalizedDescriptionKey: "No response"])))
+                return
+            }
+            guard (200...299).contains(http.statusCode) else {
+                let body = String(data: data, encoding: .utf8) ?? "HTTP \(http.statusCode)"
+                completion(.failure(NSError(domain: "checkout", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: body])))
+                return
+            }
+            do {
+                let decoded = try JSONDecoder().decode(CheckoutStatusResp.self, from: data)
+                completion(.success(decoded))
+            } catch {
+                completion(.failure(error))
+            }
+        }.resume()
+    }
+ 
+
+    final class ZCreditApplePayCheckoutHandler: NSObject, PKPaymentAuthorizationControllerDelegate {
+
+        private var selfPin: ZCreditApplePayCheckoutHandler?
+        private var completionHandler: ((Result<Int, Error>) -> Void)?
+        private var pendingResult: Result<Int, Error>? = nil
+
+        private let countryCode: String
+        private let currencyCode: String
+        private let total: Decimal
+        private let merchantId: String
+
+        // ✅ call server checkout here
+        private let checkout3TriesAfterAuthorize: (
+            _ appleFullTokenJson: String,
+            _ applePayload: [String: Any],
+            _ completion: @escaping (Result<Int, Error>) -> Void
+        ) -> Void
+
+        // ✅ NEW: hooks
+        private let onAuthorized: () -> Void
+        private let onCancelled: () -> Void
+        private let onPresented: () -> Void
+
+        init(
+            total: Decimal,
+            merchantId: String,
+            countryCode: String = "IL",
+            currencyCode: String = "ILS",
+            checkout3TriesAfterAuthorize: @escaping (
+                _ appleFullTokenJson: String,
+                _ applePayload: [String: Any],
+                _ completion: @escaping (Result<Int, Error>) -> Void
+            ) -> Void,
+            onPresented: @escaping () -> Void,
+            onAuthorized: @escaping () -> Void,
+            onCancelled: @escaping () -> Void,
+            onComplete: @escaping (Result<Int, Error>) -> Void
+        ) {
+            self.total = total
+            self.merchantId = merchantId
+            self.countryCode = countryCode
+            self.currencyCode = currencyCode
+
+            self.checkout3TriesAfterAuthorize = checkout3TriesAfterAuthorize
+
+            self.onPresented = onPresented
+            self.onAuthorized = onAuthorized
+            self.onCancelled = onCancelled
+            self.completionHandler = onComplete
+
+            super.init()
+            self.selfPin = self
         }
 
-        let totalDecimal = Decimal(discountedTotal)
-        let merchantId = UserDefaults.standard.string(forKey: "zcreditMerchantId")
-            ?? "merchant.minis.zcredit"
+        enum CheckoutRecoveryKeys {
+            static let pendingCheckoutKey = "checkout.pendingKey.v1"
+            static let pendingMiniAppId   = "checkout.pendingMiniId.v1"
 
-        let handler = ZCreditApplePayHandler(countryCode: "IL", currencyCode: "ILS")
-        applePayHandler = handler
+            // ✅ NEW: did user already FaceID/TouchID authorize?
+            static let pendingDidAuthorize = "checkout.pendingDidAuthorize.v1"
+        }
 
-        handler.present(total: totalDecimal, merchantId: merchantId) { result in
-            DispatchQueue.main.async {
-                switch result {
-                case .failure(let err):
-                    self.applePayHandler = nil
-                    self.isSubmitting = false
-                    self.submitError = err.localizedDescription
-                    Haptics.error()
-                    UINotificationFeedbackGenerator().notificationOccurred(.error)
+        func markPendingDidAuthorize() {
+            UserDefaults.standard.set(true, forKey: "checkout.pendingDidAuthorize.v1")
+        }
+        func clearPendingDidAuthorize() {
+            UserDefaults.standard.removeObject(forKey: "checkout.pendingDidAuthorize.v1")
+        }
 
-                case .success(let payObj):
-                    var meta = payObj
+        func loadPendingDidAuthorize() -> Bool {
+            UserDefaults.standard.bool(forKey: CheckoutRecoveryKeys.pendingDidAuthorize)
+        }
 
-                    if let d = self.activeDiscount, d.percent > 0 {
-                        meta["discountPercent"] = d.percent
-                        meta["discountCampaignId"] = d.campaignId
-                        meta["discountedTotal"] = self.discountedTotal
-                        meta["originalTotal"] = self.totalPrice
-                    }
-                    
+       
+        
+        func present() {
+            guard PKPaymentAuthorizationController.canMakePayments(usingNetworks: [.visa, .masterCard, .amex]) else {
+                completionHandler?(.failure(NSError(domain: "applepay.capability", code: -1, userInfo: [
+                    NSLocalizedDescriptionKey: "Apple Pay not available on this device."
+                ])))
+                cleanup()
+                return
+            }
 
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.0) {
-                        self.applePayHandler = nil
-                        self.startSubmitOrder(zcreditMeta: meta)
+            let req = PKPaymentRequest()
+            req.merchantIdentifier   = merchantId
+            req.countryCode          = countryCode
+            req.currencyCode         = currencyCode
+            req.merchantCapabilities = [.capability3DS]
+            req.supportedNetworks    = [.visa, .masterCard, .amex]
+            req.paymentSummaryItems  = [
+                PKPaymentSummaryItem(label: "MINIS", amount: NSDecimalNumber(decimal: total), type: .final)
+            ]
+
+            let ctrl = PKPaymentAuthorizationController(paymentRequest: req)
+            ctrl.delegate = self
+
+            ctrl.present { ok in
+                if ok {
+                    self.onPresented()   // ✅ mark Apple Pay visible
+                } else {
+                    self.completionHandler?(.failure(NSError(domain: "applepay.ui", code: -2, userInfo: [
+                        NSLocalizedDescriptionKey: "Failed to present Apple Pay sheet."
+                    ])))
+                    self.cleanup()
+                }
+            }
+        }
+
+        func paymentAuthorizationController(
+            _ controller: PKPaymentAuthorizationController,
+            didAuthorizePayment payment: PKPayment,
+            handler completion: @escaping (PKPaymentAuthorizationResult) -> Void
+        ) {
+            // ✅ user authorized (FaceID/TouchID done) -> lock UI + show progress
+            onAuthorized()
+
+            // ✅ IMPORTANT: persist that authorization happened
+            // (so if app dies / network dies you will NOT allow a second charge)
+            markPendingDidAuthorize()
+
+            // Build apple payload
+            let tokenData = payment.token.paymentData
+
+            guard let paymentDataJSON = try? JSONSerialization.jsonObject(with: tokenData) as? [String: Any] else {
+                let err = NSError(domain: "applepay.token", code: -10, userInfo: [
+                    NSLocalizedDescriptionKey: "Invalid Apple Pay token"
+                ])
+                pendingResult = .failure(err)
+                completion(.init(status: .failure, errors: [err]))
+                return
+            }
+
+            let pm = payment.token.paymentMethod
+            var paymentMethodDict: [String: Any] = [:]
+            paymentMethodDict["type"] = pm.type.rawValue
+            if let net = pm.network?.rawValue { paymentMethodDict["network"] = net }
+            if let name = pm.displayName { paymentMethodDict["displayName"] = name }
+
+            let applePayload: [String: Any] = [
+                "paymentData": paymentDataJSON,
+                "paymentMethod": paymentMethodDict,
+                "transactionIdentifier": payment.token.transactionIdentifier
+            ]
+
+            guard let fullData = try? JSONSerialization.data(withJSONObject: applePayload, options: []),
+                  let appleFullTokenJson = String(data: fullData, encoding: .utf8)
+            else {
+                let err = NSError(domain: "applepay.token", code: -11, userInfo: [
+                    NSLocalizedDescriptionKey: "Failed to serialize Apple token"
+                ])
+                pendingResult = .failure(err)
+                completion(.init(status: .failure, errors: [err]))
+                return
+            }
+
+            // ✅ ONLY NOW do the server checkout, with max 3 tries
+            checkout3TriesAfterAuthorize(appleFullTokenJson, applePayload) { result in
+                DispatchQueue.main.async {
+                    self.pendingResult = result
+                    switch result {
+                    case .success:
+                        completion(.init(status: .success, errors: nil))
+                    case .failure(let err):
+                        completion(.init(status: .failure, errors: [err]))
                     }
                 }
             }
         }
+        
+
+        func paymentAuthorizationControllerDidFinish(_ controller: PKPaymentAuthorizationController) {
+            controller.dismiss { [weak self] in
+                guard let self else { return }
+
+                // ✅ Apple Pay UI is definitely gone now
+                // (We will toggle flags in BasketSheet via closures.)
+
+                if let r = self.pendingResult {
+                    self.completionHandler?(r)
+                } else {
+                    self.onCancelled()
+                    self.completionHandler?(.failure(NSError(domain: "applepay.user", code: -999, userInfo: [
+                        NSLocalizedDescriptionKey: "Cancelled"
+                    ])))
+                }
+                self.cleanup()
+            }
+        }
+
+        private func cleanup() {
+            completionHandler = nil
+            pendingResult = nil
+            selfPin = nil
+        }
+    }
+    private func recoverPendingCheckoutIfNeeded() {
+        let key = loadPendingCheckoutKey()
+        guard !key.isEmpty else { return }
+
+        let mid = UserDefaults.standard.integer(forKey: CheckoutRecoveryKeys.pendingMiniAppId)
+        guard mid > 0 else { return }
+
+        fetchCheckoutStatus(miniAppId: mid, key: key) { res in
+            DispatchQueue.main.async {
+                switch res {
+                case .success(let st):
+                    let pm = st.paymentMethod.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+                    if st.status == 1 || pm == "card" {
+                        print("🟢 recovery: PAID -> clear key + confirm orderId=\(st.orderId)")
+                        self.clearPendingCheckoutKey()
+                        self.showOrderProgress = false
+                        self.isSubmitting = false
+                     
+                        self.onConfirm(st.orderId, self.diningMode)
+                        return
+                    }
+
+                    // ❌ not paid yet -> keep key
+                    print("🟡 recovery: not paid yet (status=\(st.status) pm=\(pm)) keep key")
+
+                case .failure(let err):
+                    // keep key
+                    print("🔴 recovery: status check failed -> keep key. err=\(err.localizedDescription)")
+                }
+            }
+        }
+    }
+  
+    func newIdempotencyKey() -> String {
+        UUID().uuidString.replacingOccurrences(of: "-", with: "").uppercased()
+    }
+    
+    private func clearPendingOrderDraft() {
+       UserDefaults.standard.removeObject(forKey: PendingOrderDraftKeys.draft)
+   }
+    private func startZCreditApplePay() {
+        guard !isSubmitting else { return }
+
+        if UserDefaults.standard.bool(forKey: "debugSkipApplePay") {
+            Haptics.light()
+            print("🧪 DEBUG: skipping Apple Pay → submitting order directly")
+            startSubmitOrder(zcreditMeta: ["debugSkipApplePay": true, "debugBuild": true])
+            return
+        }
+        
+        let pendingKey = loadPendingCheckoutKey()
+        if !pendingKey.isEmpty {
+
+            // ✅ If user already authorized (FaceID/TouchID) on a previous try:
+            // NEVER start a new Apple Pay sheet — only recover/check status.
+            if loadPendingDidAuthorize() {
+                showOrderProgress = true
+                recoverPendingCheckoutIfNeeded()
+                return
+            }
+
+            // ✅ Otherwise it was a pre-auth failure / cancel / UI fail:
+            // clear and allow a fresh Apple Pay start.
+            clearPendingCheckoutKey()
+            clearPendingOrderDraft()
+            clearPendingDidAuthorize()
+        }
+
+        isSubmitting = true
+        submitError = nil
+       
+
+        let idemKey = newIdempotencyKey()   // ✅ 32-hex, like 7B1C...
+        savePendingCheckoutKey(idemKey, miniAppId: miniAppId)
+        savePendingOrderDraftForBanner()
+        
+        let totalDecimal = Decimal(discountedTotal)
+        let amountMinor = Int((discountedTotal * 100).rounded())
+        let merchantId = UserDefaults.standard.string(forKey: "zcreditMerchantId") ?? "merchant.minis.zcredit"
+
+        let handler = ZCreditApplePayCheckoutHandler(
+            total: totalDecimal,
+            merchantId: merchantId,
+            checkout3TriesAfterAuthorize: { appleFullTokenJson, applePayload, cb in
+                // ✅ Runs in BasketSheet scope, safe to touch self here
+                let key = self.loadPendingCheckoutKey().trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !key.isEmpty else {
+                    cb(.failure(NSError(domain: "checkout", code: -900, userInfo: [
+                        NSLocalizedDescriptionKey: "Missing pending idempotency key"
+                    ])))
+                    return
+                }
+
+                let amountMinor = Int((self.discountedTotal * 100).rounded())
+
+                // ✅ 1 initial try + 3 more tries, 5 seconds apart (only on no-response)
+                self.submitCheckoutRetry3MoreTimesIfNoResponse(
+                    idempotencyKey: key,
+                    amountMinor: amountMinor,
+                    currency: "ILS",
+                    appleFullTokenJson: appleFullTokenJson,
+                    applePayload: applePayload,
+                    completion: cb
+                )
+            },
+            onPresented: {
+                DispatchQueue.main.async {
+                    self.applePaySheetVisible = true
+                    self.applePayDidAuthorize = false
+                    print("🍎 ApplePay presented")
+                }
+            },
+            onAuthorized: {
+                DispatchQueue.main.async {
+                    self.applePayDidAuthorize = true
+                    self.setPendingDidAuthorize(true)     // ✅ NEW shared persist
+                    print("🍎 ApplePay authorized (FaceID/TouchID done)")
+                }
+            },
+            onCancelled: {
+                DispatchQueue.main.async {
+                    self.applePaySheetVisible = false
+                    self.showOrderProgress = false
+                    self.isSubmitting = false
+
+                    // ✅ cancel BEFORE auth -> safe to clear key
+                    if self.applePayDidAuthorize == false {
+                        self.clearPendingCheckoutKey()
+                        self.clearPendingOrderDraft()
+                    }
+
+                    self.applePayDidAuthorize = false
+                    self.clearPendingDidAuthorize()   // ✅ NEW
+                }
+            },
+            onComplete: { result in
+                DispatchQueue.main.async {
+                    self.applePaySheetVisible = false
+                    self.applePayDidAuthorize = false
+                    self.isSubmitting = false
+                    self.showOrderProgress = false
+
+                    switch result {
+                    case .success(let orderId):
+                        self.clearPendingCheckoutKey()
+                        self.clearPendingOrderDraft()
+                        self.clearPendingDidAuthorize()   // ✅ NEW
+                        Haptics.success()
+                        self.onConfirm(orderId, self.diningMode)
+                        
+
+                    case .failure(let err):
+                        self.submitError = err.localizedDescription
+                        Haptics.error()
+
+                        let ns = err as NSError
+                        let isNoResponse =
+                            (ns.domain == NSURLErrorDomain)
+                            || (ns.domain == "checkout" && (ns.code == -1 || ns.code == 202))
+
+                        let isDeclined =
+                            (ns.domain == "checkout" && ns.code == 402)
+
+                        // ✅ If it’s a “no response / pending” situation, DO NOT clear.
+                        // User already authorized; keep key + didAuthorize to avoid double-charge.
+                        if isNoResponse {
+                            self.showOrderProgress = false
+                            self.isSubmitting = false
+                            // keep pending key + didAuthorize, so next tap triggers recovery polling
+                            return
+                        }
+
+                        // ✅ For decline / UI errors / cancellations / token errors:
+                        // clear so user can try again immediately.
+                        self.clearPendingCheckoutKey()
+                        self.clearPendingOrderDraft()
+                        self.clearPendingDidAuthorize()
+
+                       
+                    }
+                }
+            }
+        )
+        handler.present()
     }
 
     private let coffeeStampNames: Set<String> = [
@@ -4671,7 +5752,7 @@ struct BasketSheet: View {
     
     private func startSubmitOrder(zcreditMeta: [String: Any]? = nil) {
         isSubmitting = true
-        showOrderProgress = true
+       
         submitError = nil
 
         #if APPCLIP
@@ -4688,9 +5769,16 @@ struct BasketSheet: View {
             finalMeta["originalTotal"] = totalPrice
         }
 
+        if miniAppId == 3 {
+            finalMeta["deliveryFee"] = deliveryFee
+            finalMeta["freeDeliveryThreshold"] = freeDeliveryThresholdGBP
+            finalMeta["payableTotal"] = payableTotal
+            finalMeta["itemsTotalAfterDiscount"] = discountedTotal
+        }
+        
         OrderAPI.submitOrder(
             entries: entries,
-            total: discountedTotal,
+            total: payableTotal,
             diningMode: diningMode,
             source: source,
             customerName: UserDefaults.standard.string(forKey: "userName"),
@@ -4751,8 +5839,7 @@ struct BasketSheet: View {
     }
 
     private var isZeroPayableTotal: Bool {
-        // discountedTotal is already rounded in your logic
-        return discountedTotal <= 0.0001
+        return payableTotal <= 0.0001
     }
     private func submitFreeOrderFlow() {
         guard !isSubmitting else { return }
@@ -4973,6 +6060,7 @@ struct NameSheetView: View {
         
         // ✅ THIS IS THE KEY PART
         .onAppear {
+         
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                 focusedField = .name
             }
@@ -4989,6 +6077,7 @@ struct OrderConfirmationView: View {
     @Environment(\.isRtl) private var isRtl
     @State private var email: String = ""
     @State private var didSendInvoice = false
+    @State private var showPushPrePrompt = false
 #if APPCLIP
 @State private var showStoreSheet = false
 #endif
@@ -5218,7 +6307,64 @@ struct OrderConfirmationView: View {
             }
         }
 
+        .onAppear {
+        #if !APPCLIP
+            UNUserNotificationCenter.current().getNotificationSettings { s in
+                DispatchQueue.main.async {
+                    // Show every time if not enabled (notDetermined or denied)
+                    if s.authorizationStatus == .notDetermined || s.authorizationStatus == .denied {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                            showPushPrePrompt = true
+                        }
+                    }
+                }
+            }
+        #endif
+        }
+        .sheet(isPresented: $showPushPrePrompt) {
+            PushPrePromptSheet(
+                onAllow: {
+                    showPushPrePrompt = false
 
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        let center = UNUserNotificationCenter.current()
+
+                        center.getNotificationSettings { s in
+                            DispatchQueue.main.async {
+                                print("🔔 status before request =", s.authorizationStatus.rawValue)
+
+                                switch s.authorizationStatus {
+                                case .notDetermined:
+                                    center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, err in
+                                        print("🔔 requestAuthorization granted=\(granted) err=\(err?.localizedDescription ?? "nil")")
+                                        DispatchQueue.main.async {
+                                            if granted {
+                                                UIApplication.shared.registerForRemoteNotifications()
+                                            }
+                                        }
+                                    }
+
+                                case .denied:
+                                    // iOS will NEVER show the popup again → open Settings
+                                    if let url = URL(string: UIApplication.openSettingsURLString) {
+                                        UIApplication.shared.open(url)
+                                    }
+
+                                case .authorized, .provisional, .ephemeral:
+                                    UIApplication.shared.registerForRemoteNotifications()
+
+                                @unknown default:
+                                    break
+                                }
+                            }
+                        }
+                    }
+                },
+                onLater: {
+                    showPushPrePrompt = false
+                }
+            )
+        }
         .navigationTitle(isRtl ? "אישור" : "Confirmation")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -5358,6 +6504,7 @@ struct OrderProgressView: View {
             .padding(24)
         }
         .onAppear {
+            
             spin = true
             pulse = true
 
@@ -5777,8 +6924,8 @@ struct CategoryRail: View {
     // ✅ NEW
     var showServiceSegment: Bool = true
 
-    // ✅ existing
-    var onServiceLongPress: (() -> Void)? = nil
+    // ✅ callback for long press → handled by parent (menuView)
+    var onEnterCashpoint: (() -> Void)? = nil
 
     @Environment(\.colorScheme) private var scheme
     @Environment(\.isRtl) private var isRtl
@@ -5786,28 +6933,27 @@ struct CategoryRail: View {
     var body: some View {
         VStack(spacing: 10) {
 
-            
             if MenuTheme.miniId == 12 {
-                ServiceSegment(intent: $intent)
-                    .frame(height: 46)
-                    .padding(.horizontal, 10)
-                    .padding(.top, 10)
-            } else {
+                ServiceSegment(intent: $intent, onEnterCashpoint: {
+                    onEnterCashpoint?()
+                })
+                .frame(height: 46)
+                .padding(.horizontal, 10)
+                .padding(.top, 10)
+            }else {
                 Color.clear
                     .frame(height: 40)
-                    .contentShape(Rectangle()) // ✅ makes the whole area tappable
+                    .contentShape(Rectangle())
                     .onLongPressGesture(minimumDuration: 1.2) {
-                        UserDefaults.standard.set(true, forKey: "cashPointMode")
                         UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
+                        onEnterCashpoint?()   // ✅
                     }
             }
-            
+
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(spacing: 10) {
                     ForEach(categories, id: \.self) { cat in
                         Button { onTap(cat) } label: {
-
-                            // ✅ Full-width hit area
                             HStack(spacing: 0) {
                                 Text(cat)
                                     .font(.menuRegular(16).weight(.semibold))
@@ -5823,8 +6969,7 @@ struct CategoryRail: View {
                                 RoundedRectangle(cornerRadius: 14, style: .continuous)
                                     .fill(cat == selected ? MenuTheme.buttonBackground : Color.clear)
                             )
-                            .contentShape(Rectangle()) // ✅ THIS is the key
-
+                            .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                     }
@@ -5874,3 +7019,84 @@ extension Notification.Name {
     static let studentClaimArrived = Notification.Name("studentClaimArrived")
 }
 
+
+
+struct PushPrePromptSheet: View {
+    let onAllow: () -> Void
+    let onLater: () -> Void
+
+    @State private var status: UNAuthorizationStatus = .notDetermined
+    @Environment(\.isRtl) private var isRtl
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Spacer()
+
+            Image(systemName: "bell.badge.fill")
+                .font(.system(size: 40, weight: .bold))
+
+            Text(isRtl
+                 ? "רוצים התראות כשההזמנה מוכנה?"
+                 : "Want to be notified when your order is ready?")
+                .font(.system(size: 22, weight: .bold))
+                .multilineTextAlignment(.center)
+
+            Text(isRtl
+                 ? "נשלח רק עדכון על ההזמנה שלך — בלי פרסומות."
+                 : "We’ll only send updates about your order — no promotions.")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 24)
+
+            Spacer()
+
+            Button {
+                onAllow()
+            } label: {
+                Text(primaryButtonTitle)
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 52)
+                    .background(Color.black)
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+
+            Button {
+                onLater()
+            } label: {
+                Text(isRtl ? "אולי אחר כך" : "Maybe later")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 44)
+            }
+
+            Spacer().frame(height: 10)
+        }
+        .padding(.horizontal, 20)
+        .presentationDetents([.height(340)])
+        .presentationDragIndicator(.hidden)
+        .onAppear { refreshStatus() }
+    }
+
+    private var primaryButtonTitle: String {
+        switch status {
+        case .denied:
+            return isRtl ? "פתח הגדרות" : "Open Settings"
+        case .authorized, .provisional, .ephemeral:
+            return isRtl ? "הכול מוכן" : "All set"
+        default:
+            return isRtl ? "קבל התראות" : "Enable notifications"
+        }
+    }
+
+    private func refreshStatus() {
+        UNUserNotificationCenter.current().getNotificationSettings { s in
+            DispatchQueue.main.async {
+                status = s.authorizationStatus
+            }
+        }
+    }
+}

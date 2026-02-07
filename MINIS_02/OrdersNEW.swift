@@ -11,8 +11,23 @@ struct AdminOrdersApiResponse: Decodable {
     let orders: [OrderDTO]
 }
 
+private struct DiningModeBadge: View {
+    let mode: DiningMode
 
-
+    var body: some View {
+        // ✅ Show badge ONLY for TA
+        if mode == .takeAway {
+            Text("TA")
+                .font(.system(size: 11, weight: .bold, design: .rounded))
+                .padding(.horizontal, 7)
+                .padding(.vertical, 4)
+                .foregroundColor(.black)      // ✅ black text
+                .background(Color.white)      // ✅ white chip
+                .clipShape(Capsule())
+                .shadow(color: .black.opacity(0.12), radius: 2, y: 1) // optional but nice
+        }
+    }
+}
 struct AdminOrdersView: View {
     @State private var searchText: String = ""
     @State private var showOpenOnly: Bool = false
@@ -66,6 +81,45 @@ struct AdminOrdersView: View {
         // only when you're in the team-table step (or your eodFilter == .teamTablesOnly)
         let remaining = visibleOrders.filter { isTeamTableOrder($0) && $0.isUnpaid }.count
         onRemainingChanged?(remaining)
+    }
+    
+    
+    private func diningTag(_ mode: DiningMode, isRtl: Bool) -> String {
+        switch mode {
+        case .takeAway: return isRtl ? "TA (לקחת)" : "TA (TAKEAWAY)"
+        case .dineIn:   return isRtl ? "SIT (במקום)" : "SIT (DINE-IN)"
+        }
+    }
+    
+    private func resolveDiningMode(from dto: OrderDTO) -> DiningMode {
+
+        // ✅ 0) strongest: explicit server field
+        let s = (dto.service ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        if s == "ta" || s == "takeaway" || s == "take_away" { return .takeAway }
+        if s == "sit" || s == "dinein"  || s == "dine_in"  { return .dineIn }
+
+        // ✅ 1) delivery behaves like takeaway (for now)
+        if dto.isDelivery { return .takeAway }
+
+        // ✅ 2) fallback: backend strings
+        let backend = [dto.bucket, dto.stage, dto.source]
+            .joined(separator: " ")
+            .lowercased()
+
+        if backend.contains("ta")
+            || backend.contains("take")
+            || backend.contains("away")
+            || backend.contains("pickup")
+            || backend.contains("to-go")
+            || backend.contains("לקחת")
+            || backend.contains("טייק") {
+            return .takeAway
+        }
+
+        return .dineIn
     }
     // MARK: - Decoding helper (shared by cache + network)
     private func decodeAdminOrders(from data: Data) -> [AdminOrderItem]? {
@@ -133,40 +187,72 @@ struct AdminOrdersView: View {
                     }
                 }()
 
-                let lineItems: [AdminOrderLineItem] = dto.lines.enumerated().map { idx, l in
-                    let quantity = max(l.qty, 1)
+                let lineItems: [AdminOrderLineItem] = {
+                    // 1) Build raw lines (same as you already do)
+                    let rawLines: [AdminOrderLineItem] = dto.lines.enumerated().map { idx, l in
+                        let quantity = max(l.qty, 1)
 
-                    let effectiveUnit: Double = {
-                        if let explicitUnit = l.unitPrice, explicitUnit > 0 {
-                            return explicitUnit
+                        let effectiveUnit: Double = {
+                            if let explicitUnit = l.unitPrice, explicitUnit > 0 { return explicitUnit }
+                            if let row = l.lineTotal, row > 0, quantity > 0 { return row / Double(quantity) }
+                            if let pid = l.productId {
+                                let p = MenuCatalog.shared.price(for: pid)
+                                if p > 0 { return p }
+                            }
+                            return 0
+                        }()
+
+                        let resolvedPrinter = l.station ?? MenuCatalog.shared.printer(for: l.productId)
+
+                        return AdminOrderLineItem(
+                            id: l.itemId ?? (l.productId ?? idx),   // UI identity only
+                            productId: l.productId,
+                            basketLineId: l.basketLineId,
+                            name: l.name,
+                            quantity: quantity,
+                            unitPrice: effectiveUnit,
+                            category: l.category,
+                            modifiersText: l.modifiers,
+                            updatedAt: l.updatedAt,
+                            printer: resolvedPrinter
+                        )
+                    }
+
+                    // 2) Merge duplicates by a stable key
+                    struct Key: Hashable {
+                        let basketLineId: Int?
+                        let productId: Int?
+                        let name: String
+                        let mods: String
+                        let unitPrice: Double
+                    }
+
+                    var firstIndex: [Key: Int] = [:]
+                    var merged: [Key: AdminOrderLineItem] = [:]
+
+                    for (i, li) in rawLines.enumerated() {
+                        let key = Key(
+                            basketLineId: li.basketLineId,
+                            productId: li.productId,
+                            name: li.name,
+                            mods: (li.modifiersText ?? ""),
+                            unitPrice: li.unitPrice
+                        )
+
+                        if var existing = merged[key] {
+                            existing.quantity += max(1, li.quantity)
+                            merged[key] = existing
+                        } else {
+                            firstIndex[key] = i
+                            merged[key] = li
                         }
-                        if let row = l.lineTotal, row > 0, quantity > 0 {
-                            return row / Double(quantity)
-                        }
-                        if let pid = l.productId {
-                            let p = MenuCatalog.shared.price(for: pid)
-                            if p > 0 { return p }
-                        }
-                        return 0
-                    }()
+                    }
 
-                    let resolvedPrinter = l.station ?? MenuCatalog.shared.printer(for: l.productId)
-
-                    let cancelId = l.basketLineId ?? l.itemId ?? (idx + 1)   // idx fallback only if you must
-
-                    return AdminOrderLineItem(
-                        id: l.itemId ?? (l.productId ?? idx),   // stable UI id
-                        productId: l.productId,
-                        basketLineId: l.basketLineId,               // ✅ used for cancel endpoint
-                        name: l.name,
-                        quantity: quantity,
-                        unitPrice: effectiveUnit,
-                        category: l.category,
-                        modifiersText: l.modifiers,
-                        updatedAt: l.updatedAt,
-                        printer: resolvedPrinter
-                    )
-                }
+                    // 3) Preserve original order (first appearance)
+                    return merged
+                        .sorted { (firstIndex[$0.key] ?? 0) < (firstIndex[$1.key] ?? 0) }
+                        .map(\.value)
+                }()
 
                 let stationSet = Set(dto.lines.map { line in
                     classifyAdminStation(fromPrinter: line.station ?? MenuCatalog.shared.printer(for: line.productId))
@@ -192,19 +278,22 @@ struct AdminOrdersView: View {
                 // If server sends Status reliably (0=open, 1=closed), trust it.
                 // Only fallback to paymentMethod/bucket if status is missing (nil).
                 let isUnpaid: Bool = {
-                    if dto.status != nil { return statusIsOpen }
+                    let paymentIsUnpaid = (dto.paymentMethod ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "unpaid"
 
-                    let paymentIsUnpaid = (dto.paymentMethod ?? "").lowercased() == "unpaid"
-                    let bucketLower = dto.bucket.lowercased()
-                    let stageLower  = dto.stage.lowercased()
+                    let bucketLower = (dto.bucket).lowercased()
+                    let stageLower  = (dto.stage).lowercased()
+
                     let legacyUnpaid =
                         bucketLower.contains("unpaid")
                         || bucketLower.contains("open")
                         || bucketLower.contains("tab")
                         || stageLower.contains("unpaid")
 
+                    // ✅ If server sends paymentMethod or bucket/stage flags, trust them.
                     return paymentIsUnpaid || legacyUnpaid
                 }()
+                let diningMode = resolveDiningMode(from: dto)
+                print("🍽 dto \(dto.id) service=\(dto.service ?? "nil") isDelivery=\(dto.isDelivery) -> diningMode=\(diningMode)")
                 return AdminOrderItem(
                     id: dto.id,
                     orderId: String(displayOrderNumber),
@@ -218,7 +307,9 @@ struct AdminOrdersView: View {
                     stations: stationSet,
                     isUnpaid: isUnpaid,
                     paymentMethod: dto.paymentMethod,
-                    customerPhone: dto.customerPhone          // ✅ NEW
+                    customerPhone: dto.customerPhone,
+                    diningMode: diningMode,        // ✅ FIX
+                    isDelivery: dto.isDelivery     // ✅ FIX
                 )
             }
 
@@ -251,14 +342,14 @@ struct AdminOrdersView: View {
         }
     }
 
-    private func diningMode(for order: AdminOrderItem) -> DiningMode {
-        if order.subtitle.contains("לקחת") { return .takeAway }
-        return .dineIn
-    }
+ 
 
     @State private var allowAutoPrint = true
-    private let baseURL = "https://minis.studio/api/admin/orders"
+    private let baseURL = "https://minis.studio/api/admin/ordersByLocation"
+
     private let miniAppId = MenuTheme.miniId
+    
+    @AppStorage("admin.pickupLocation") private var adminPickupLocation: String = "cafeteria"
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.isRtl)   private var isRtl
@@ -421,6 +512,9 @@ struct AdminOrdersView: View {
             .onReceive(pollTimer) { _ in
                 Task { await loadOrders(showSpinner: false) }
             }
+        }
+        .onChange(of: adminPickupLocation) { _ in
+            Task { await loadOrders(showSpinner: true) }
         }
         .fullScreenCover(item: $selectedOrder) { order in
             AdminOrderActionScreen(
@@ -874,10 +968,10 @@ struct AdminOrdersView: View {
                     } label: {
                         Text("המשך הזמנה")
                             .font(.system(size: 17, weight: .bold))
-                            .foregroundColor(.white)
+                            .foregroundColor(.black)
                             .frame(maxWidth: .infinity)
                             .frame(height: 52)
-                            .background(Color.black)
+                            .background(Color.white)
                             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                     }
                     .buttonStyle(.plain)
@@ -890,10 +984,10 @@ struct AdminOrdersView: View {
                         Button(action: onContinue) {
                             Text("המשך הזמנה")
                                 .font(.system(size: 17, weight: .bold))
-                                .foregroundColor(.white)
+                                .foregroundColor(.black)
                                 .frame(maxWidth: .infinity)
                                 .frame(height: 52)
-                                .background(Color.black)
+                                .background(Color.white)
                                 .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                         }
                         .buttonStyle(.plain)
@@ -903,20 +997,20 @@ struct AdminOrdersView: View {
                         Button(action: onPrintBon) {
                             Text("בונבון")
                                 .font(.system(size: 16, weight: .bold))
-                                .foregroundColor(.white)
+                                .foregroundColor(.black)
                                 .frame(maxWidth: .infinity)
                                 .frame(height: 50)
-                                .background(Color.black)
+                                .background(Color.white)
                                 .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                         }
 
                         Button(action: onPrintInvoice) {
                             Text("חשבונית")
                                 .font(.system(size: 16, weight: .bold))
-                                .foregroundColor(.white)
+                                .foregroundColor(.black)
                                 .frame(maxWidth: .infinity)
                                 .frame(height: 50)
-                                .background(Color.black)
+                                .background(Color.white)
                                 .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                         }
                     }
@@ -925,7 +1019,9 @@ struct AdminOrdersView: View {
             .padding(.horizontal, 16)
             .padding(.top, 10)
             .padding(.bottom, 10)
+            
         }
+        
     }
     // MARK: - UI building blocks
 
@@ -1125,8 +1221,10 @@ struct AdminOrdersView: View {
 
     private func printOrder(_ order: AdminOrderItem) {
         let entries = toBasketEntries(from: order)
-        let mode = diningMode(for: order)
+        let mode = order.diningMode                 // ✅ USE PARSED MODE
         let ticketNumber = Int(order.orderId) ?? order.id
+
+        print("🧾 PRINT order=\(ticketNumber) service=\(mode) delivery=\(order.isDelivery)") // optional debug
 
         Task {
             let ok = await PrinterManager.shared.printCashPointSplit(
@@ -1142,6 +1240,7 @@ struct AdminOrdersView: View {
                 print("❌ printCashPointSplit failed for order \(ticketNumber)")
             }
         }
+    
     }
 
     private func update(order: AdminOrderItem, to newStatus: AdminOrderStatus) {
@@ -1165,20 +1264,40 @@ struct AdminOrdersView: View {
     }
 
     // MARK: - API Load
+    private func makeOrdersURL() -> URL? {
+        guard miniAppId > 0 else { return nil }
 
+        var comps = URLComponents(string: baseURL)
+        var q: [URLQueryItem] = [
+            .init(name: "miniAppId", value: String(miniAppId))
+        ]
+
+        // ✅ Only include pickupLocation if we actually want filtering
+        // Rule: miniAppId == 13 uses location filter if set, else returns all
+        if miniAppId == 13 {
+            let loc = adminPickupLocation.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !loc.isEmpty {
+                q.append(.init(name: "pickupLocation", value: loc))
+            }
+        }
+
+        comps?.queryItems = q
+        return comps?.url
+    }
+    
     @MainActor
     private func loadOrders(showSpinner: Bool) async {
         guard miniAppId > 0 else { return }
 
-       
-
         if showSpinner { isLoading = true }
         defer { if showSpinner { isLoading = false } }
 
-        guard let url = URL(string: "\(baseURL)?miniAppId=\(miniAppId)") else {
+        guard let url = makeOrdersURL() else {
             print("❌ admin/orders: bad URL")
             return
         }
+
+        print("📡 admin/orders url:", url.absoluteString)
 
         var req = URLRequest(url: url, timeoutInterval: 15)
         req.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -1194,15 +1313,14 @@ struct AdminOrdersView: View {
             }
 
             guard let freshOrders = decodeAdminOrders(from: data) else { return }
-         
+
             self.orders = freshOrders
             await MainActor.run { publishRemaining() }
-            
+
             let remaining = filteredOrders.count
             onRemainingChanged?(remaining)
-            if remaining == 0 {
-                onAllResolved?()
-            }
+            if remaining == 0 { onAllResolved?() }
+
         } catch {
             print("❌ admin/orders network error:", error.localizedDescription)
         }
@@ -1218,6 +1336,10 @@ struct AdminOrderRow: View {
     let onOpenInCashPoint: (() -> Void)?
     let onCloseTeamTable: (() -> Void)?   // ✅ NEW
 
+    private var diningBadge: some View {
+        DiningModeBadge(mode: item.diningMode)
+    }
+    
     private var displayName: String {
         let cleaned = item.customerName
             .replacingOccurrences(of: "Customer", with: "")
@@ -1310,6 +1432,8 @@ struct AdminOrderRow: View {
                         .font(.system(size: 22, weight: .heavy))
                         .foregroundColor(.primary)
 
+                    DiningModeBadge(mode: item.diningMode)   // ✅ DEBUG FLAG
+
                     if item.isUnpaid { openBadge }
 
                     Spacer()
@@ -1373,9 +1497,9 @@ struct AdminOrderRow: View {
                                 Text("המשך הזמנה")
                                     .font(.system(size: 14, weight: .semibold))
                             }
-                            .foregroundColor(.white)
+                            .foregroundColor(.black)
                             .frame(width: 120, height: 34)
-                            .background(Color.black)
+                            .background(Color.white)
                             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                         }
                         .buttonStyle(.plain)
@@ -1391,9 +1515,9 @@ struct AdminOrderRow: View {
                             Text("בונבון")
                                 .font(.system(size: 14, weight: .semibold))
                         }
-                        .foregroundColor(.white)
+                        .foregroundColor(.black)
                         .frame(width: 86, height: 34)
-                        .background(Color.black)
+                        .background(Color.white)
                         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                     }
                     .buttonStyle(.plain)
@@ -1408,9 +1532,9 @@ struct AdminOrderRow: View {
                             Text("חשבונית")
                                 .font(.system(size: 14, weight: .semibold))
                         }
-                        .foregroundColor(.white)
+                        .foregroundColor(.black)
                         .frame(width: 98, height: 34)
-                        .background(Color.black)
+                        .background(Color.white)
                         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                     }
                     .buttonStyle(.plain)
@@ -1671,10 +1795,10 @@ private struct EODStepBusinessDayView<Next: View>: View {
             } label: {
                 Text("הבא")
                     .font(.system(size: 17, weight: .bold))
-                    .foregroundColor(.white)
+                    .foregroundColor(.black)
                     .frame(maxWidth: .infinity)
                     .frame(height: 52)
-                    .background(Color.black)
+                    .background(Color.white)
                     .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             }
             .padding(.bottom, 14)
@@ -1792,10 +1916,10 @@ private struct EODStepOpenOrdersView: View {
             } label: {
                 Text("הבא")
                     .font(.system(size: 17, weight: .bold))
-                    .foregroundColor(.white)
+                    .foregroundColor(.black)
                     .frame(maxWidth: .infinity)
                     .frame(height: 52)
-                    .background(remainingOpenOrders == 0 ? Color.black : Color.gray.opacity(0.35))
+                    .background(remainingOpenOrders == 0 ? Color.white : Color.gray.opacity(0.35))
                     .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             }
             .disabled(remainingOpenOrders != 0)
@@ -1882,10 +2006,10 @@ private struct EODStepTipsView: View {
             } label: {
                 Text(isSubmitting ? "שולח…" : "הבא")
                     .font(.system(size: 17, weight: .bold))
-                    .foregroundColor(.white)
+                    .foregroundColor(.black)
                     .frame(maxWidth: .infinity)
                     .frame(height: 52)
-                    .background(canProceedFromTips && !isSubmitting ? Color.black : Color.gray.opacity(0.35))
+                    .background(canProceedFromTips && !isSubmitting ? Color.white : Color.gray.opacity(0.35))
                     .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             }
             .disabled(!canProceedFromTips || isSubmitting)
@@ -2357,10 +2481,10 @@ private struct EODStepPreviewView: View {
                     Button { printZFromSnapshot() } label: {
                         Text("הדפס")
                             .font(.system(size: 18, weight: .bold))
-                            .foregroundColor(.white)
+                            .foregroundColor(.black)
                             .frame(maxWidth: .infinity)
                             .frame(height: 56)
-                            .background(Color.black)
+                            .background(Color.white)
                             .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                     }
 
@@ -2380,10 +2504,10 @@ private struct EODStepPreviewView: View {
                 } label: {
                     Text(zPrimaryTitle)
                         .font(.system(size: 18, weight: .bold))
-                        .foregroundColor(.white)
+                        .foregroundColor(.black)
                         .frame(maxWidth: .infinity)
                         .frame(height: 56)
-                        .background(Color.black)
+                        .background(Color.white)
                         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                         .opacity(zState == .generating ? 0.5 : 1.0)
                 }
@@ -2426,7 +2550,7 @@ private struct EODStepPreviewView: View {
             return
         }
         let d = salesDataFromSnapshot(x)
-        PrinterManager.shared.printSalesReport(d, type: .z, reportDate: Date(), isRestore: false, generatedAt: Date())
+        PrinterManager.shared.printSalesReport(d, type: .z, reportDate: businessDate, isRestore: false, generatedAt: Date())
         Haptics.success()
     }
 

@@ -1,4 +1,3 @@
-/*
 import Foundation
 import Network
 import UIKit
@@ -714,10 +713,17 @@ fileprivate func stationFromString(_ s: String?) -> Station? {
     else { return nil }
 
     switch raw.lowercased() {
-    case "bar":     return .bar
-    case "kitchen": return .kitchen
-    case "bakery":  return .bakery
-    default:        return nil
+    case "s1", "kitchen", "מטבח":
+        return .kitchen
+
+    case "s2", "bar", "בר":
+        return .bar
+
+    case "s3", "bakery", "ויטרינה", "מאפה":
+        return .bakery
+
+    default:
+        return nil
     }
 }
 
@@ -1576,6 +1582,7 @@ final class PrinterManager {
             Swift.print("🍹 SPLIT-ALL BAR: sending \(job.count) bytes to \(host):\(port)")
             send(job, host: host, dedupeKey: "bone|\(o.id)|bar")
         }
+        markOrderPrintedFireAndForget(orderId: o.id)
     }
 
     // MARK: - Classification helpers (unchanged)
@@ -2648,7 +2655,31 @@ extension PrinterManager {
     private func fmt2(_ v: Double) -> String { String(format: "%.2f", v) }
     
     
-    
+    private func markOrderPrintedFireAndForget(orderId: Int) {
+        let miniAppId = UserDefaults.standard.integer(forKey: "miniAppId")
+        guard miniAppId > 0 else { return }
+
+        var comps = URLComponents(
+            string: "https://minis.studio/api/admin/orders/\(orderId)/printed"
+        )!
+        comps.queryItems = [
+            URLQueryItem(name: "miniAppId", value: String(miniAppId))
+        ]
+
+        guard let url = comps.url else { return }
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 2              // 🔥 VERY short, never block
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        // optional but nice for backend visibility
+        if let clientId = UserDefaults.standard.string(forKey: "printer.clientId") {
+            req.setValue(clientId, forHTTPHeaderField: "X-Printer-ClientId")
+        }
+
+        URLSession.shared.dataTask(with: req).resume()
+    }
     // ✅ STEP: make this return a real ACK so OrdersAutoPrinter can decide markPrinted()
 
     func printCashPointSplit(
@@ -3200,4 +3231,4 @@ extension PrinterManager {
         OneShotPrinter.send(host: host, port: port, data: job, tag: dk, dedupeKey: dk)
     }
 }
-*/
+

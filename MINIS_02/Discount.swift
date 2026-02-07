@@ -297,7 +297,7 @@ struct MembersClubView: View {
     private var shopName: String {
         if miniAppId == 12 { return "בית העם" }
         if miniAppId == 13 { return "Vitamin" }
-
+        
         let s = (UserDefaults.standard.string(forKey: "miniTitle") ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return s.isEmpty ? "החנות" : s
@@ -1070,6 +1070,286 @@ struct LoyaltyInstallView: View {
         }
         .appStoreOverlay(isPresented: $showOverlay) {
             SKOverlay.AppClipConfiguration(position: .bottom)
+        }
+    }
+}
+import SwiftUI
+
+struct NightClosedView: View {
+    let shopName: String
+
+    @AppStorage(AppSettings.Key.cashPointMode)
+    private var cashPointMode: Bool = AppSettings.Defaults.cashPointMode
+
+    // ✅ tell MenuView to dismiss back to HomeView
+    @AppStorage("ui.dismissToHome") private var dismissToHome: Bool = false
+    @Environment(\.dismiss) private var dismiss
+
+    // Cute animation states
+    @State private var moonFloat: Bool = false
+    @State private var starsTwinkle: Bool = false
+    @State private var cloudDrift: Bool = false
+
+    private var isPhone: Bool { UIDevice.current.userInterfaceIdiom == .phone }
+
+    // ✅ Jerusalem time from device, always
+    private var tzIL: TimeZone { TimeZone(identifier: "Asia/Jerusalem") ?? .current }
+
+    private var hourIL: Int {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = tzIL
+        return cal.component(.hour, from: Date())
+    }
+
+    private var minuteIL: Int {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = tzIL
+        return cal.component(.minute, from: Date())
+    }
+
+    private var isBetween8And5: Bool {
+        // ✅ Your new enum
+        ILHours.isOpenNowIL()   // 08:00–16:59
+    }
+
+    private var isBefore8: Bool {
+        hourIL < 8
+    }
+
+    // ✅ Hebrew only
+    private var titleText: String {
+        // optional debug:
+        // print("🕒 Jerusalem hour =", hourIL, "minute =", minuteIL, "| 8–17 =", isBetween8And5, "| before 8 =", isBefore8)
+
+        if isBetween8And5 {
+            return "הקופה פתוחה"
+        } else {
+            return "ערב טוב 🌙"
+        }
+    }
+
+    // ✅ Hebrew only
+    private var mainLine: String {
+        if isBetween8And5 {
+            return "הזמנות מתקבלות עכשיו רק דרך הקופה"
+        }
+        if isBefore8 {
+            return "נפתח להזמנות ב־08:00"
+        }
+        return "נחזור מחר"
+    }
+
+    var body: some View {
+        ZStack {
+            // Night gradient
+            LinearGradient(
+                colors: [
+                    Color(red: 0.05, green: 0.06, blue: 0.14),
+                    Color(red: 0.07, green: 0.10, blue: 0.22),
+                    Color(red: 0.10, green: 0.12, blue: 0.26)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .ignoresSafeArea()
+
+            // Stars layer
+            StarsField(twinkle: starsTwinkle)
+                .opacity(0.95)
+                .ignoresSafeArea()
+
+            // Moon + clouds
+            VStack(spacing: 0) {
+                Spacer().frame(height: 70)
+
+                ZStack {
+                    Circle()
+                        .fill(Color.white.opacity(0.92))
+                        .frame(width: 110, height: 110)
+                        .shadow(color: .white.opacity(0.10), radius: 30, y: 8)
+                        .overlay(
+                            Circle()
+                                .fill(Color.black.opacity(0.08))
+                                .frame(width: 18, height: 18)
+                                .offset(x: -18, y: 10)
+                        )
+                        .overlay(
+                            Circle()
+                                .fill(Color.black.opacity(0.06))
+                                .frame(width: 12, height: 12)
+                                .offset(x: 24, y: -8)
+                        )
+                        .offset(y: moonFloat ? -10 : 10)
+                        .animation(.easeInOut(duration: 2.2).repeatForever(autoreverses: true), value: moonFloat)
+
+                    Circle()
+                        .stroke(Color.white.opacity(0.12), lineWidth: 2)
+                        .frame(width: 160, height: 160)
+                        .blur(radius: 0.5)
+
+                    CloudRow()
+                        .opacity(0.22)
+                        .offset(x: cloudDrift ? 120 : -140, y: 60)
+                        .animation(.linear(duration: 14).repeatForever(autoreverses: false), value: cloudDrift)
+                }
+
+                Spacer()
+            }
+
+            // ✅ CENTERED TEXT
+            VStack(spacing: 14) {
+                Text(titleText)
+                    .font(.menuRegular(36).weight(.heavy))
+                    .foregroundColor(.white)
+                    .multilineTextAlignment(.center)
+
+                Text(mainLine)
+                    .font(.menuRegular(19).weight(.semibold))
+                    .foregroundColor(.white.opacity(0.92))
+                    .multilineTextAlignment(.center)
+                    .padding(.top, 4)
+
+                Text(shopName)
+                    .font(.menuRegular(14).weight(.semibold))
+                    .foregroundColor(.white.opacity(0.55))
+                    .padding(.top, 8)
+            }
+            .padding(.horizontal, 26)
+            .padding(.vertical, 22)
+            .background(.ultraThinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                    .stroke(Color.white.opacity(0.10), lineWidth: 1)
+            )
+            .padding(.horizontal, 18)
+            .onLongPressGesture(minimumDuration: 1.2) {
+                if UIDevice.current.userInterfaceIdiom == .pad {
+                    cashPointMode = true
+                }
+            }
+
+            // ✅ TOP CLOSE BUTTON (iPhone full app only)
+            #if !APPCLIP
+            if isPhone {
+                VStack {
+                    HStack {
+                        Button {
+                            // 1) close Night screen
+                            dismiss()
+
+                            // 2) tell menuView to dismiss back to HomeView
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                                dismissToHome = true
+                            }
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundColor(.white)
+                                .frame(width: 36, height: 36)
+                                .background(Color.white.opacity(0.14))
+                                .clipShape(Circle())
+                                .overlay(
+                                    Circle().stroke(Color.white.opacity(0.18), lineWidth: 1)
+                                )
+                        }
+                        .buttonStyle(.plain)
+
+                        Spacer()
+                    }
+                    .padding(.horizontal, 18)
+                    .padding(.top, 14)
+
+                    Spacer()
+                }
+            }
+            #endif
+        }
+        .onAppear {
+            moonFloat = true
+            starsTwinkle = true
+            cloudDrift = true
+        }
+        .preferredColorScheme(.dark)
+        .environment(\.layoutDirection, .rightToLeft)
+        .environment(\.locale, Locale(identifier: "he_IL"))
+    }
+
+    // MARK: - Stars background
+
+    private struct StarsField: View {
+        let twinkle: Bool
+
+        private let stars: [(x: CGFloat, y: CGFloat, size: CGFloat, alpha: Double)] = {
+            var result: [(CGFloat, CGFloat, CGFloat, Double)] = []
+            var i = 0
+            for y in stride(from: 0.05, through: 0.9, by: 0.12) {
+                for x in stride(from: 0.05, through: 0.95, by: 0.12) {
+                    if i % 3 == 0 {
+                        result.append(
+                            (x, y, i % 5 == 0 ? 2.4 : 1.6, i % 7 == 0 ? 0.9 : 0.6)
+                        )
+                    }
+                    i += 1
+                }
+            }
+            return result
+        }()
+
+        var body: some View {
+            GeometryReader { geo in
+                ZStack {
+                    ForEach(0..<stars.count, id: \.self) { i in
+                        let s = stars[i]
+                        Circle()
+                            .fill(Color.white)
+                            .frame(width: s.size, height: s.size)
+                            .position(x: s.x * geo.size.width, y: s.y * geo.size.height)
+                            .opacity(twinkle ? s.alpha : s.alpha * 0.7)
+                            .animation(
+                                .easeInOut(duration: 1.2 + Double(i % 6) * 0.25)
+                                    .repeatForever(autoreverses: true),
+                                value: twinkle
+                            )
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Soft drifting clouds
+
+    private struct CloudRow: View {
+        var body: some View {
+            HStack(spacing: 22) {
+                cloud
+                cloud.opacity(0.85).scaleEffect(0.85)
+                cloud.opacity(0.7).scaleEffect(0.7)
+            }
+        }
+
+        private var cloud: some View {
+            ZStack {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Color.white)
+                    .frame(width: 120, height: 34)
+
+                Circle()
+                    .fill(Color.white)
+                    .frame(width: 46, height: 46)
+                    .offset(x: -36, y: -8)
+
+                Circle()
+                    .fill(Color.white)
+                    .frame(width: 56, height: 56)
+                    .offset(x: 4, y: -18)
+
+                Circle()
+                    .fill(Color.white)
+                    .frame(width: 42, height: 42)
+                    .offset(x: 40, y: -8)
+            }
+            .blur(radius: 0.4)
         }
     }
 }

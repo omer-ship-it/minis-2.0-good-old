@@ -167,14 +167,41 @@ final class OrdersAutoPrinter {
     static let shared = OrdersAutoPrinter()
     private init() {}
 
-    private let miniAppId = 12
-    private let claimURLBase   = "https://minis.studio/api/admin/orders/claim-to-print"
+    private var miniAppId: Int {
+        let v = UserDefaults.standard.integer(forKey: "miniAppId")
+        return v > 0 ? v : 0
+    }
+    
+    private var adminPickupLocation: String {
+        UserDefaults.standard.string(forKey: "admin.pickupLocation") ?? "cafeteria"
+    }
+    private let claimURLBase   = "https://minis.studio/api/admin/orders/claim-to-print-by-location"
     private let printedURLBase = "https://minis.studio/api/admin/orders"
 
     private var printedOrderIds: Set<Int> = []
     private var pollTask: Task<Void, Never>?
     private var currentInterval: TimeInterval = 5
 
+    private func makeClaimURL() -> URL? {
+        guard miniAppId > 0 else { return nil }
+
+        var comps = URLComponents(string: claimURLBase)
+        var q: [URLQueryItem] = [
+            .init(name: "miniAppId", value: String(miniAppId))
+        ]
+
+        // ✅ Only miniAppId 13 uses location filtering
+        if miniAppId == 13 {
+            let loc = adminPickupLocation.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !loc.isEmpty {
+                q.append(.init(name: "pickupLocation", value: loc))
+            }
+        }
+
+        comps?.queryItems = q
+        return comps?.url
+    }
+    
     private struct SimpleLine {
         let id: Int
         let productId: Int?
@@ -259,10 +286,15 @@ final class OrdersAutoPrinter {
             return
         }
 
-        guard let url = URL(string: "\(claimURLBase)?miniAppId=\(miniAppId)") else {
+        guard let url = makeClaimURL() else {
             print("❌ OrdersAutoPrinter: bad claim URL")
             return
         }
+        print("📡 [OrdersAutoPrinter] claim url:", url.absoluteString)
+        if miniAppId == 13 {
+            print("📍 [OrdersAutoPrinter] location filter:", adminPickupLocation)
+        }
+        
 
         var req = URLRequest(url: url, timeoutInterval: 15)
         req.httpMethod = "POST"
@@ -364,7 +396,10 @@ final class OrdersAutoPrinter {
             let perUnit  = totalQty > 0 ? dto.totalGBP / Double(totalQty) : dto.totalGBP
 
             let items: [SimpleLine] = dto.lines.enumerated().map { idx, l in
-                let resolved = resolvePrinter(productId: l.productId, station: l.station, name: l.name)
+                let ids = resolveStationIds(productId: l.productId, station: l.station, name: l.name)
+                // keep first for now (or you can support multi later)
+                let resolved = ids.first ?? "s2"
+
                 return SimpleLine(
                     id: l.itemId ?? idx,
                     productId: l.productId,
@@ -413,33 +448,75 @@ final class OrdersAutoPrinter {
         let raw = (s ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !raw.isEmpty else { return nil }
 
-        switch raw.lowercased() {
+        let t = raw.lowercased()
+
+        // ✅ NEW: station ids
+        if t == "s1" { return "kitchen" }
+        if t == "s2" { return "bar" }
+        if t == "s3" { return "bakery" }
+
+        switch t {
         case "מטבח", "kitchen": return "kitchen"
         case "בר", "bar":       return "bar"
         case "מאפה", "קונדיטוריה", "bakery": return "bakery"
         default:
-            let cleaned = raw.lowercased()
-            if cleaned.contains("kitchen") { return "kitchen" }
-            if cleaned.contains("bakery")  { return "bakery"  }
-            if cleaned.contains("bar")     { return "bar"     }
+            if t.contains("kitchen") { return "kitchen" }
+            if t.contains("bakery")  { return "bakery" }
+            if t.contains("bar")     { return "bar" }
             return nil
         }
     }
 
-    private func resolvePrinter(productId: Int?, station: String?, name: String) -> String {
-        if isToastName(name) { return "kitchen" }
+    private func normalizeToStationIds(_ s: String?) -> [String] {
+        let raw = (s ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !raw.isEmpty else { return [] }
 
-        if let cat = normalizePrinter(MenuCatalog.shared.printer(for: productId)) {
-            return cat
+        // already station id
+        if raw.hasPrefix("s"), raw.count >= 2 { return [raw] }
+
+        // legacy words
+        switch raw {
+        case "מטבח", "kitchen": return ["s1"]
+        case "בר", "bar":       return ["s2"]
+        case "מאפה", "קונדיטוריה", "bakery": return ["s3"]
+        default:
+            if raw.contains("kitchen") { return ["s1"] }
+            if raw.contains("bakery")  { return ["s3"] }
+            if raw.contains("bar")     { return ["s2"] }
+            return []
         }
-
-        if let api = normalizePrinter(station) {
-            return api
-        }
-
-        return "bar"
     }
+    
+    private func resolveStationIds(productId: Int?, station: String?, name: String) -> [String] {
+        if isToastName(name) { return ["s1"] }
 
+        // ✅ 1) MenuCatalog is authoritative
+        if let pid = productId, let item = MenuCatalog.shared.item(for: pid) {
+
+            if let ps = item.printers, !ps.isEmpty {
+                let cleaned = ps.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+                let sids = cleaned.filter { $0.hasPrefix("s") }
+                if !sids.isEmpty { return sids }
+            }
+
+            // legacy single printer may already be "s3"
+            let p = (item.printer ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if p.hasPrefix("s") { return [p] }
+
+            // legacy words
+            let legacy = normalizeToStationIds(item.printer)
+            if !legacy.isEmpty { return legacy }
+        }
+
+        // ✅ 2) API station
+        let api = normalizeToStationIds(station)
+        if !api.isEmpty { return api }
+
+        // ✅ 3) final fallback
+        return ["s2"]
+    }
+    
+    
     // MARK: - Print + markPrinted
 
     private func printAndMark(order: SimpleOrder, trigger: String) async {
@@ -511,10 +588,9 @@ final class OrdersAutoPrinter {
         order.items.enumerated().map { idx, li in
             let pid = li.productId
 
-            let resolvedPrinter =
-                normalizePrinter(MenuCatalog.shared.printer(for: pid))
-                ?? normalizePrinter(li.station)
-                ?? "bar"
+            // li.station is already resolved to "sX", but we keep this robust:
+            let stationIds = resolveStationIds(productId: pid, station: li.station, name: li.name)
+            let resolvedSid = stationIds.first ?? "s2"
 
             let item: ShellMenuItem = {
                 if let menuItem = MenuCatalog.shared.item(for: pid) {
@@ -528,7 +604,8 @@ final class OrdersAutoPrinter {
                         description: menuItem.description,
                         status: menuItem.status,
                         stockQuantity: menuItem.stockQuantity,
-                        printer: resolvedPrinter
+                        printer: resolvedSid,
+                        printers: stationIds    // ✅ optional but good (if your initializer includes it)
                     )
                 }
 
@@ -542,7 +619,8 @@ final class OrdersAutoPrinter {
                     description: nil,
                     status: nil,
                     stockQuantity: nil,
-                    printer: resolvedPrinter
+                    printer: resolvedSid,
+                    printers: stationIds     // ✅ optional but good
                 )
             }()
 

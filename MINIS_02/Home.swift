@@ -56,7 +56,7 @@ struct HomeView: View {
     @State private var showQR = false
     @Namespace private var underlineNS
     @State private var openedFallbackOnce = false
-    
+    @AppStorage(AppSettings.Key.cashPointMode) private var cashPointMode: Bool = AppSettings.Defaults.cashPointMode
     private let fallbackMiniShopId: Int = 12
     
     private var kinds: [MiniKind] {
@@ -154,9 +154,25 @@ struct HomeView: View {
             if launchStudioOnce { showStudio = true; launchStudioOnce = false }
             if launchMenuOnce  { showMenu  = true; launchMenuOnce  = false }
 
-            // ✅ Auto-open Menu when app already has a miniAppId (e.g. set by AppDelegate),
-            // even if there are no referrals to show on Home.
-           
+            // ✅ iPad: jump straight into Menu using saved miniAppId
+        if   UIDevice.current.userInterfaceIdiom == .pad && !cashPointMode && !openedDefaultMiniOnce {
+                openedDefaultMiniOnce = true
+
+                // If you want a fallback mini when none saved:
+                if miniAppId <= 0 {
+                    miniAppId = fallbackMiniShopId
+                    shopId = String(fallbackMiniShopId)
+                    UserDefaults.standard.set(miniAppId, forKey: "miniAppId")
+                    UserDefaults.standard.set(shopId, forKey: "shopId")
+                }
+
+                // Optional: fresh style each boot
+                resetShopUserDefaultsToDefaults()
+
+                // Go straight in
+                showMenu = true
+            }
+
             selectedIndex = index(of: selectedFilter)
         }
         .onChange(of: launchStudioOnce) { if $0 { showStudio = true; launchStudioOnce = false } }
@@ -538,5 +554,6 @@ struct ForceRTL<Content: View>: View {
             }
         }
     }
+    
     
 }

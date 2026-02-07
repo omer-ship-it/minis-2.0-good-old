@@ -7,12 +7,12 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		3A5A94AF2F34D5A000972D3A /* Mini.app in Embed App Clips */ = {isa = PBXBuildFile; fileRef = 3A5D0EA32EEF2F640020509C /* Mini.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		3A5D0ED42EEF2FE00020509C /* Kingfisher in Frameworks */ = {isa = PBXBuildFile; productRef = 3A5D0ED32EEF2FE00020509C /* Kingfisher */; };
 		3A5D0ED82EEF30040020509C /* StripeApplePay in Frameworks */ = {isa = PBXBuildFile; productRef = 3A5D0ED72EEF30040020509C /* StripeApplePay */; };
 		3A5D0EDA2EEF30040020509C /* StripePaymentsUI in Frameworks */ = {isa = PBXBuildFile; productRef = 3A5D0ED92EEF30040020509C /* StripePaymentsUI */; };
 		3A6A141E2F0D489600FC63BA /* Stripe in Frameworks */ = {isa = PBXBuildFile; productRef = 3A5D0ED52EEF30040020509C /* Stripe */; };
 		3A6F59AB2ECE535800062F59 /* Kingfisher in Frameworks */ = {isa = PBXBuildFile; productRef = 3A6F59AA2ECE535800062F59 /* Kingfisher */; };
-		3A91A97F2F1D5E8800C99900 /* Mini.app in Embed App Clips */ = {isa = PBXBuildFile; fileRef = 3A5D0EA32EEF2F640020509C /* Mini.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		3AA0D51E2EEAEECD00D9B4C2 /* StripeApplePay in Frameworks */ = {isa = PBXBuildFile; productRef = 3AA0D51D2EEAEECD00D9B4C2 /* StripeApplePay */; };
 		3AA0D5202EEBFEA300D9B4C2 /* Stripe in Frameworks */ = {isa = PBXBuildFile; productRef = 3AA0D51F2EEBFEA300D9B4C2 /* Stripe */; };
 		3AA0D5222EEBFEA300D9B4C2 /* StripePayments in Frameworks */ = {isa = PBXBuildFile; productRef = 3AA0D5212EEBFEA300D9B4C2 /* StripePayments */; };
@@ -35,7 +35,7 @@
 			dstPath = "$(CONTENTS_FOLDER_PATH)/AppClips";
 			dstSubfolderSpec = 16;
 			files = (
-				3A91A97F2F1D5E8800C99900 /* Mini.app in Embed App Clips */,
+				3A5A94AF2F34D5A000972D3A /* Mini.app in Embed App Clips */,
 			);
 			name = "Embed App Clips";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -60,7 +60,6 @@
 			membershipExceptions = (
 				AppDelegate.swift,
 				Discount.swift,
-				"Fastlane 2.swift",
 				Fastlane.swift,
 				FastlaneModel.swift,
 				Home.swift,
@@ -353,6 +352,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_ENTITLEMENTS = Mini/Mini.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
@@ -371,7 +371,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 12.0;
+				MARKETING_VERSION = 13.5;
 				PRODUCT_BUNDLE_IDENTIFIER = minis.co.uk.Clip;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -391,6 +391,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_ENTITLEMENTS = Mini/Mini.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
@@ -409,7 +410,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 12.0;
+				MARKETING_VERSION = 13.5;
 				PRODUCT_BUNDLE_IDENTIFIER = minis.co.uk.Clip;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -566,7 +567,7 @@
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 15.5;
-				MARKETING_VERSION = 12.0;
+				MARKETING_VERSION = 13.5;
 				PRODUCT_BUNDLE_IDENTIFIER = minis.co.uk;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -606,7 +607,7 @@
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 15.5;
-				MARKETING_VERSION = 12.0;
+				MARKETING_VERSION = 13.5;
 				PRODUCT_BUNDLE_IDENTIFIER = minis.co.uk;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;

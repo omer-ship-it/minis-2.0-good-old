@@ -2,7 +2,8 @@
 import UniformTypeIdentifiers
 import Kingfisher
 import Combine
-
+import SwiftUI
+import WebKit
 
 
 
@@ -13,6 +14,7 @@ struct CashPointView: View {
     @State private var noteEditingLineId: Int? = nil
     @State private var noteEditingText: String = ""
     @FocusState private var focusedStockProductId: Int?
+    @AppStorage("pinpadId") private var pinpadId: String = ""
     @Environment(\.isRtl) private var isRtl
     @Environment(\.currency) private var currency
     @StateObject private var api = MenuApiModel()
@@ -40,10 +42,284 @@ struct CashPointView: View {
     @State private var showClearStockConfirm = false
     @State private var isCategoryReorderMode: Bool = false
     @Environment(\.dismiss) private var dismiss
+    @State private var frozenOrderIds: [Int] = []
     @Environment(\.presentationMode) private var presentationMode
+    private let NO_TERMINAL_PINPAD = "111111"
     @StateObject private var stockToggles = StockToggleStore(
         shopId: 12   // 👈 hard-coded miniAppId
     )
+    @State private var stockCommitInFlight = false
+    @State private var stockCommitError: String? = nil
+    @State private var mobileIsOpen: Bool = true           // current server value
+    @State private var mobileToggleBusy: Bool = false
+    @State private var confirmCloseMobile = false
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var priceText: String = "0"
+    @State private var isNegative: Bool = false
+
+    var signedValue: Double {
+        let v = Double(priceText.replacingOccurrences(of: ",", with: ".")) ?? 0
+        return isNegative ? -v : v
+    }
+    @State private var pricePulseLineId: Int? = nil
+    @State private var pricePulseScale: CGFloat = 1.0
+    @AppStorage("admin.pickupLocation") private var adminPickupLocation: String = "cafeteria" // default
+    
+    @MainActor
+    private func pulsePrice(for lineId: Int) {
+        pricePulseLineId = lineId
+        pricePulseScale = 1.0
+
+        withAnimation(.easeOut(duration: 0.10)) { pricePulseScale = 1.06 }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) {
+            withAnimation(.easeOut(duration: 0.10)) { pricePulseScale = 1.0 }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+            if pricePulseLineId == lineId { pricePulseLineId = nil }
+        }
+    }
+    
+    enum AdminPickupLocation: String, CaseIterable, Identifiable {
+        case cafeteria
+        case scienceBuilding
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .cafeteria:       return "מדעי הרוח"
+            case .scienceBuilding: return "מדעי החברה"
+            }
+        }
+    }
+    
+    private var isMiniApp13: Bool { resolvedMiniAppId == 13 }
+
+    private var selectedAdminLocation: AdminPickupLocation? {
+        AdminPickupLocation(rawValue: adminPickupLocation)
+    }
+    private func setMiniAppOpen(_ open: Bool) {
+        guard !mobileToggleBusy else { return }
+
+        let id = resolvedMiniAppId
+        guard id > 0 else { return }
+
+        mobileToggleBusy = true
+        let base = UserDefaults.standard.string(forKey: "apiBase") ?? "https://minis.studio"
+        let url = URL(string: "\(base)/api/admin/miniapps/open?miniAppId=\(id)&isOpen=\(open)")!
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+
+        Task {
+            do {
+                let (data, resp) = try await URLSession.shared.data(for: req)
+                let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
+                let text = String(data: data, encoding: .utf8) ?? ""
+
+                await MainActor.run {
+                    mobileToggleBusy = false
+                    if (200...299).contains(code) {
+                        mobileIsOpen = open
+                        Haptics.success()
+                        print("✅ miniApp IsOpen updated:", text)
+                        // optional: refresh cached menu json
+                        api.load(skipCache: true)
+                    } else {
+                        Haptics.error()
+                        print("❌ miniApp open toggle failed HTTP \(code):", text)
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    mobileToggleBusy = false
+                    Haptics.error()
+                    print("❌ miniApp open toggle network error:", error.localizedDescription)
+                }
+            }
+        }
+    }
+    
+    // MARK: - Single product stock edit (2s idle -> commit + close)
+
+    private func startSingleStockEdit(productId: Int) {
+        if let prev = editingStockProductId, prev != productId {
+            Task { await commitSingleStockAndClose(prev) }
+        }
+
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            isStockEditMode = false
+            editingStockProductId = productId
+        }
+
+        if stockText[productId] == nil {
+            if let v = stockAdjustments[productId] {
+                stockText[productId] = "\(max(v, 0))"
+            } else {
+                stockText[productId] = ""
+            }
+        }
+
+        restartSingleStockEditTimer(productId: productId)
+        Haptics.light()
+    }
+
+    private func restartSingleStockEditTimer(productId: Int) {
+        stockEditWorkItem?.cancel()
+
+        let work = DispatchWorkItem { [productId] in
+            Task { await commitSingleStockAndClose(productId) }
+        }
+
+        stockEditWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0, execute: work)  // ✅ 2 seconds
+    }
+
+    @MainActor
+    private func commitSingleStockAndClose(_ productId: Int) async {
+        // if user already switched away, still commit that product and close the editor
+        // but avoid double-commit storms
+        if stockCommitInFlight { return }
+
+        stockCommitInFlight = true
+        stockCommitError = nil
+
+        // take current value (nil = ∞ / untracked)
+        let qty = stockAdjustments[productId]
+
+        let ok = await StockQuantityAPI.setStock(productId: productId, quantity: qty)
+
+        stockCommitInFlight = false
+
+        if ok {
+            dirtyStockIds.remove(productId)
+            stockText[productId] = nil
+
+            // close editor UI
+            focusedStockProductId = nil
+            if editingStockProductId == productId {
+                editingStockProductId = nil
+            }
+
+            // refresh canonical menu state (optional but matches your global flow)
+            api.load(skipCache: true)
+            Haptics.success()
+        } else {
+            stockCommitError = "שמירת מלאי נכשלה"
+            Haptics.error()
+            // keep editor open so user can retry / keep changing
+        }
+    }
+    // ✅ NOTE routing helper (station IDs)
+    private func makeNoteItem(id: Int, name: String, stationId: String, legacy: String) -> ShellMenuItem {
+        ShellMenuItem(
+            id: id,
+            name: name,
+            price: 0,
+            category: "✏️ הערות",
+            modifiers: nil,
+            imageURL: nil,
+            description: nil,
+            status: 1,
+            stockQuantity: nil,
+
+            // ✅ NEW routing (station id)
+            printer: stationId,                 // primary printer id
+            printers: [stationId],              // explicit list (PrinterIds)
+
+            // ✅ Optional: keep legacy in description if you ever need it for debugging
+            // description: legacy
+                              // (only if your model has this field; otherwise remove)
+        )
+    }
+    private func applyFrozenOrder(_ items: [ShellMenuItem]) -> [ShellMenuItem] {
+        guard !frozenOrderIds.isEmpty else { return items }
+
+        let map = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
+
+        var out: [ShellMenuItem] = []
+        out.reserveCapacity(items.count)
+
+        // keep frozen order first
+        for id in frozenOrderIds {
+            if let it = map[id] { out.append(it) }
+        }
+
+        // append anything new that wasn't in snapshot
+        let used = Set(out.map(\.id))
+        for it in items where !used.contains(it.id) {
+            out.append(it)
+        }
+
+        return out
+    }
+    
+    private func isCategoryZeroed(_ category: String) -> Bool {
+        let items = api.items.filter { $0.category == category }
+        guard !items.isEmpty else { return false }
+
+        return items.allSatisfy { item in
+            stockAdjustments[item.id] == 0
+        }
+    }
+    
+    private func flushDirtyStockAndExit() async {
+        print("✅ flushDirtyStockAndExit() ENTER dirty=\(dirtyStockIds.sorted()) inFlight=\(stockCommitInFlight)")
+
+        guard !stockCommitInFlight else {
+            print("⛔️ flush EXIT: inFlight already true")
+            return
+        }
+
+        guard !dirtyStockIds.isEmpty else {
+            print("⛔️ flush EXIT: no dirty ids")
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                isStockEditMode = false
+            }
+            return
+        }
+
+        stockCommitInFlight = true
+        stockCommitError = nil
+
+        // close inline editor focus
+        focusedStockProductId = nil
+        editingStockProductId = nil
+        stockEditWorkItem?.cancel()
+        stockEditWorkItem = nil
+
+        // snapshot ids so UI edits won't race the loop
+        let ids = Array(dirtyStockIds)
+
+        var failed: Set<Int> = []
+
+        for pid in ids {
+            let ok = await StockQuantityAPI.setStock(productId: pid, quantity: stockAdjustments[pid])
+            if !ok { failed.insert(pid) }
+        }
+
+        dirtyStockIds = failed
+        stockCommitInFlight = false
+
+        if failed.isEmpty {
+            // clear typed cache if you want
+            for pid in ids { stockText[pid] = nil }
+
+            // ✅ refresh canonical JSON immediately after successful writes
+            api.load(skipCache: true)
+
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                isStockEditMode = false
+            }
+        } else {
+            stockCommitError = "לא כל המלאי נשמר. נסה שוב."
+            Haptics.error()
+            // stay in stock mode so user can hit Done again
+        }
+    }
     
     private func goBack() {
         // If menu is open, close it first (feels natural)
@@ -63,6 +339,14 @@ struct CashPointView: View {
         // Otherwise, if it's a modal (sheet / fullScreenCover), dismiss
         dismiss()
     }
+    
+    @ObservedObject private var printerStore = PrintersConfigStore.shared
+
+    private func defaultPrinterId() -> String {
+        printerStore.config.stations.first(where: { $0.status != 0 })?.id ?? ""
+    }
+    
+    
     private var isPhoneDevice: Bool {
         UIDevice.current.userInterfaceIdiom == .phone
     }
@@ -94,6 +378,7 @@ struct CashPointView: View {
     @State private var activeReportType: ReportType? = nil
     @State private var reportData: PrinterManager.SalesReportData? = nil
     @State private var showBones = false
+    @State private var showBonbon = false
  
     @State private var showPrintSuccess = false
     @State private var stockText: [Int: String] = [:]   // productId -> "typed value"
@@ -124,25 +409,43 @@ struct CashPointView: View {
         ("קיוסק 1", "48796856")
     ]
 
-    private var currentPinpadId: String {
-        UserDefaults.standard.string(forKey: "pinpadId") ?? ""
-    }
+    private var currentPinpadId: String { pinpadId }
 
     private func setPinpadAndPing(_ id: String) {
-        // 1) persist
-        UserDefaults.standard.set(id, forKey: "pinpadId")
-        Haptics.light()
+        let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // 2) ping: start 1₪ and cancel after 1s
-        //    (this is exactly what you asked for; cancellation is "best effort")
-        ZCreditPaymentHandler.shared.pay(amount: 1.0, orderId: nil) { _ in
-            // ignore result; this is only a connectivity ping
+        // ✅ No terminal sentinel
+        if trimmed == NO_TERMINAL_PINPAD {
+            pinpadId = NO_TERMINAL_PINPAD
+            UserDefaults.standard.set(NO_TERMINAL_PINPAD, forKey: "pinpadId")
+
+            ZCreditPaymentHandler.shared.cancelCurrent()
+            Haptics.success()
+            print("✅ pinpad disabled (pinpadId=\(NO_TERMINAL_PINPAD))")
+            return
         }
 
+        // ✅ Normal terminal
+        guard !trimmed.isEmpty else {
+            // optional: treat empty as "no terminal" too
+            pinpadId = NO_TERMINAL_PINPAD
+            UserDefaults.standard.set(NO_TERMINAL_PINPAD, forKey: "pinpadId")
+            ZCreditPaymentHandler.shared.cancelCurrent()
+            Haptics.success()
+            return
+        }
+
+        pinpadId = trimmed
+        UserDefaults.standard.set(trimmed, forKey: "pinpadId")
+        Haptics.light()
+
+        // ping (only for real terminals)
+        ZCreditPaymentHandler.shared.pay(amount: 1.0, orderId: nil) { _ in }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             ZCreditPaymentHandler.shared.cancelCurrent()
         }
     }
+    
     @State private var showPrinterStatusSheet = false
 
     @StateObject private var printerMonitor = PrinterReachabilityMonitor(printers: [
@@ -369,7 +672,9 @@ struct CashPointView: View {
 
         // ✅ 4) keep notes last
         merged.removeAll(where: { $0 == "✏️ הערות" })
-        merged.append("✏️ הערות")
+        if cashPointMode {
+            merged.append("✏️ הערות")
+        }
 
         categoryOrder = merged
 
@@ -470,30 +775,18 @@ struct CashPointView: View {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if trimmed.isEmpty {
-            // empty → treat as ∞ / untracked
-            stockAdjustments[productId] = nil
-            stockToggles.binding(for: productId).wrappedValue = true    // in stock
+            stockAdjustments[productId] = nil   // ∞
         } else if let value = Int(trimmed), value >= 0 {
-            stockAdjustments[productId] = value
-            // 0 → out of stock, >0 → in stock
-            stockToggles.binding(for: productId).wrappedValue = (value > 0)
+            stockAdjustments[productId] = value // 0..n
         } else {
-            // invalid input → ignore, reset from current stock
-            let current = remainingStock(for: ShellMenuItem(id: productId,
-                                                            name: "",
-                                                            price: 0,
-                                                            category: "",
-                                                            modifiers: nil,
-                                                            imageURL: nil,
-                                                            description: nil))
+            let current = remainingStock(for: ShellMenuItem(id: productId, name: "", price: 0, category: "", modifiers: nil, imageURL: nil, description: nil))
             stockText[productId] = current.map { String($0) } ?? ""
             return
         }
 
-        // mark this product as needing sync
-        dirtyStockIds.insert(productId)
-        scheduleStockCommit()
+        dirtyStockIds.insert(productId)   // ✅ local only; commit on Done
     }
+    
     private func printUpdatedUnpaidOrder() {
         
         guard let existingId = unpaidOrderId else {
@@ -668,7 +961,8 @@ struct CashPointView: View {
     @State private var editingStockProductId: Int? = nil
     @State private var stockEditWorkItem: DispatchWorkItem? = nil
     @State private var isStockEditMode: Bool = false
-    @State private var stockCommitWorkItem: DispatchWorkItem? = nil
+    @State private var locationsExpanded: Bool = false
+    
     private enum DiscountMode {
         case none, ten, fifteen,thirteen, custom
     }
@@ -1288,7 +1582,10 @@ struct CashPointView: View {
                                 .font(.system(size: 18, weight: .bold))
                                 .foregroundColor(.white)
                                 .frame(width: 180, height: 48)
-                                .background(basketIsEmpty ? Color.gray.opacity(0.4) : .black)
+                                .background(basketIsEmpty
+                                    ? Color.gray.opacity(0.4)
+                                    : (colorScheme == .dark ? Color(red: 1.0, green: 0.192, blue: 0.251) : .black)
+                                )
                                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                         }
                         .buttonStyle(.plain)
@@ -1309,10 +1606,17 @@ struct CashPointView: View {
                         } label: {
                             Text(mainActionButtonTitle)
                                 .font(.system(size: 20, weight: .bold))
-                                .foregroundColor(.white)
+                                .foregroundColor(
+                                    basketIsEmpty
+                                        ? .black
+                                        : (colorScheme == .dark ? .black : .white)
+                                )
                                 .frame(maxWidth: .infinity)
                                 .frame(height: 56)
-                                .background(basketIsEmpty ? Color.gray.opacity(0.4) : .black)
+                                .background(basketIsEmpty
+                                    ? Color.gray.opacity(0.4)
+                                            : (colorScheme == .dark ? .white : .black)
+                                )
                                 .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                         }
                         .buttonStyle(.plain)
@@ -1363,60 +1667,6 @@ struct CashPointView: View {
         return 12
     }
     
-    private func restoreOrderFromMetadata(_ meta: OrderMetadataDTO) {
-
-        basket.removeAll()
-        nextBasketLineId = 1
-        lockedLineIds.removeAll()
-        lineSessionTime.removeAll()
-
-        let lines = meta.basket ?? []
-
-        for l in lines {
-            let item = MenuCatalog.shared.item(for: l.productId)
-                ?? ShellMenuItem(
-                    id: l.productId,
-                    name: l.name,
-                    price: l.unitPrice,
-                    category: "",
-                    modifiers: nil,
-                    imageURL: nil,
-                    description: nil,
-                    status: 1,
-                    stockQuantity: nil,
-                    printer: nil
-                )
-
-            let entry = BasketEntry(
-                id: l.lineId,
-                item: item,
-                quantity: l.quantity,
-                subtitle: l.modifiers,
-                unitPrice: l.unitPrice
-            )
-
-            basket[l.lineId] = entry
-            lockedLineIds.insert(l.lineId)
-
-            // We don’t have per-line timestamps in metadata yet → just tag now
-            lineSessionTime[l.lineId] = Date()
-        }
-
-        // Important: future adds should use fresh line ids
-        let maxLineId = lines.map(\.lineId).max() ?? 0
-        nextBasketLineId = max(maxLineId + 1, 1)
-
-        // service
-        if (meta.service ?? "").lowercased() == "ta" {
-            diningMode = .takeAway
-        } else {
-            diningMode = .dineIn
-        }
-
-        // team tab behavior
-        isPayLaterMode = true
-        hasChosenServiceMode = true
-    }
     
     private func printInvoice(for snapshot: CashOrderSnapshot) {
 
@@ -1595,7 +1845,8 @@ struct CashPointView: View {
 
 
         do {
-            let payload = draft.toUpsertPayload(shopId: shopId)
+            let stations = PrintersConfigStore.shared.config.stations
+            let payload  = draft.toUpsertPayload(shopId: shopId, stations: stations)
             let returnedId = try await productApi.upsertProduct(payload)
             if returnedId > 0 {
                 // If this was a new product, we should update its productId for future edits
@@ -1616,37 +1867,83 @@ struct CashPointView: View {
             print("❌ Admin upsert/publish error:", error.localizedDescription)
         }
     }
+    @MainActor
     private func makeAdminDraft(from item: ShellMenuItem) -> AdminProductDraft {
-        var groupDrafts: [AdminModifierGroupDraft] = []
+        // Snapshot stations once (no actor issues)
+        let stations = PrintersConfigStore.shared.config.stations.filter { $0.status != 0 }
 
-        if let groups = item.modifiers {
-            for g in groups {
-                // Map ModifierGroup.GroupType -> AdminModifierGroupDraft.Kind
-                let kind: AdminModifierGroupDraft.Kind
-                switch g.type {
-                case .options:
-                    kind = .options
-                case .additions:
-                    kind = .additions
-                }
+        func normalize(_ s: String?) -> String {
+            (s ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        }
 
-                var itemDrafts: [AdminModifierItemDraft] = []
-                for opt in g.items {
-                    let priceText = String(format: "%.2f", opt.extraPrice)
-                    let draftItem = AdminModifierItemDraft(
-                        name: opt.name,
-                        extraPriceText: priceText
-                    )
-                    itemDrafts.append(draftItem)
-                }
+        func stationIdForLegacyPrinter(_ legacy: String) -> String? {
+            let t = legacy.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 
-                let groupDraft = AdminModifierGroupDraft(
-                    title: g.title,
-                    kind: kind,
-                    items: itemDrafts
-                )
-                groupDrafts.append(groupDraft)
+            if t == "bar" || legacy.contains("בר") {
+                return stations.first(where: { $0.label.lowercased().contains("bar") || $0.label.contains("בר") })?.id
             }
+            if t == "kitchen" || legacy.contains("מטבח") {
+                return stations.first(where: { $0.label.lowercased().contains("kitchen") || $0.label.contains("מטבח") })?.id
+            }
+            if t == "bakery" || legacy.contains("מאפ") || legacy.contains("ויטרינה") {
+                return stations.first(where: {
+                    $0.label.lowercased().contains("bakery")
+                    || $0.label.contains("מאפ")
+                    || $0.label.contains("ויטרינה")
+                })?.id
+            }
+            return nil
+        }
+
+        // ✅ 1) ids from JSON "Printers": [...]
+        let parsedIds: [String] = (item.printers ?? [])
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        // ✅ 2) primary selection:
+        // - prefer first parsed
+        // - else try "printer" (could be "s2" or "Bar")
+        // - else fallback to first station
+        var primary: String = ""
+
+        if let first = parsedIds.first {
+            primary = first
+        } else {
+            let p = normalize(item.printer)
+
+            if stations.contains(where: { $0.id == p }) {
+                primary = p                      // already a station id
+            } else if !p.isEmpty, let mapped = stationIdForLegacyPrinter(p) {
+                primary = mapped                 // legacy "Bar/Kitchen/Bakery"
+            } else {
+                primary = stations.first?.id ?? ""
+            }
+        }
+
+        // ✅ 3) checkbox set
+        var idsSet = Set(parsedIds)
+        if !primary.isEmpty { idsSet.insert(primary) }
+        if idsSet.isEmpty, let first = stations.first?.id {
+            primary = first
+            idsSet = [first]
+        }
+
+        // ✅ 4) MODIFIERS: restore the old mapping (this is what was missing)
+        let groups: [AdminModifierGroupDraft] = (item.modifiers ?? []).map { g in
+            let kind: AdminModifierGroupDraft.Kind = (g.type == .options) ? .options : .additions
+
+            let items: [AdminModifierItemDraft] = g.items.map { opt in
+                AdminModifierItemDraft(
+                    name: opt.name,
+                    extraPriceText: String(format: "%.2f", opt.extraPrice)
+                )
+            }
+
+            return AdminModifierGroupDraft(
+                title: g.title,
+                kind: kind,
+                items: items
+            )
         }
 
         return AdminProductDraft(
@@ -1656,32 +1953,62 @@ struct CashPointView: View {
             category: item.category,
             description: item.description ?? "",
             imageURL: item.imageURL ?? "",
-            modifierGroups: groupDrafts,
-            printer: item.printer ?? "Bar"      // ✅ NEW
+            modifierGroups: groups,       // ✅ now loads in the editor again
+            printerId: primary,
+            printerIds: idsSet,
+            isPhoneRequired: (item.isPhone ?? false)
+
         )
     }
     
-    private var requiresPhoneStep: Bool {
-        basket.values.contains { entry in
-            let name     = entry.item.name.trimmingCharacters(in: .whitespacesAndNewlines)
-            let category = entry.item.category.trimmingCharacters(in: .whitespacesAndNewlines)
-
-            // Phone mandatory if:
-            // 1) category contains "סלט"
-            // 2) OR product name contains "טוסט"
-            // 3) OR product name contains "מרק"
-            return category.contains("סלט")
-                || name.contains("טוסט")
-                || name.contains("מרק")
-        }
+    private var basketRequiresPhone: Bool {
+        basket.values.contains { ($0.item.isPhone ?? false) }
     }
-
     // Apply an edited draft back into api.items (and optionally call your backend)
     // Apply an edited draft back into api.items (and optionally call your backend)
     private func applyAdminSave(_ draft: AdminProductDraft) {
+
+        func normalizeId(_ s: String) -> String {
+            s.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        func resolvedPrimaryId(fallback: String) -> String {
+            let p = normalizeId(draft.printerId)
+            return p.isEmpty ? fallback : p
+        }
+
+        func resolvedPrinterIds(primary: String) -> [String]? {
+            // If no checkboxes were used, we still publish [primary]
+            var ids: [String] = []
+
+            if !draft.printerIds.isEmpty {
+                ids = draft.printerIds.map { normalizeId($0) }.filter { !$0.isEmpty }
+            }
+
+            // Always include primary (so routing is stable)
+            let p = normalizeId(primary)
+            if !p.isEmpty && !ids.contains(p) {
+                ids.insert(p, at: 0)
+            }
+
+            // If still empty, return nil (means "not set")
+            if ids.isEmpty { return nil }
+
+            // Keep stable order (nice for diffs/debug)
+            // Primary already inserted at [0], so sort the rest only
+            if ids.count > 1 {
+                let head = ids[0]
+                let tail = Array(ids.dropFirst()).sorted()
+                return [head] + tail
+            }
+
+            return ids
+        }
+
         // 1) NEW product path
         guard let productId = draft.productId else {
             let price = Double(draft.priceText.replacingOccurrences(of: ",", with: ".")) ?? 0
+
             let newModifiers = draft.modifierGroups.map { g in
                 let kind: ModifierGroup.GroupType = (g.kind == .options) ? .options : .additions
                 let items = g.items.map {
@@ -1692,7 +2019,12 @@ struct CashPointView: View {
                 }
                 return ModifierGroup(type: kind, title: g.title, items: items)
             }
+
             let newId = (api.items.map(\.id).max() ?? 0) + 1
+
+            let primary = resolvedPrimaryId(fallback: defaultPrinterId())
+            let printers = resolvedPrinterIds(primary: primary)
+
             let newItem = ShellMenuItem(
                 id: newId,
                 name: draft.name,
@@ -1703,21 +2035,22 @@ struct CashPointView: View {
                 description: draft.description.isEmpty ? nil : draft.description,
                 status: 1,
                 stockQuantity: nil,
-                printer: "Bar"   // ✅ or "Kitchen" default
+                printer: primary,
+                printers: printers
             )
 
             api.items.append(newItem)
 
             // Remote upsert + publish
-            Task {
-                await syncAdminDraftToServer(draft)
-            }
+            Task { await syncAdminDraftToServer(draft) }
             return
         }
 
         // 2) EDIT EXISTING product locally in api.items
         if let idx = api.items.firstIndex(where: { $0.id == productId }) {
+
             let price = Double(draft.priceText.replacingOccurrences(of: ",", with: ".")) ?? api.items[idx].price
+
             let newModifiers = draft.modifierGroups.map { g in
                 let kind: ModifierGroup.GroupType = (g.kind == .options) ? .options : .additions
                 let items = g.items.map {
@@ -1728,6 +2061,10 @@ struct CashPointView: View {
                 }
                 return ModifierGroup(type: kind, title: g.title, items: items)
             }
+
+            let fallbackPrimary = api.items[idx].printer ?? defaultPrinterId()
+            let primary = resolvedPrimaryId(fallback: fallbackPrimary)
+            let printers = resolvedPrinterIds(primary: primary)
 
             let updatedItem = ShellMenuItem(
                 id: productId,
@@ -1739,7 +2076,8 @@ struct CashPointView: View {
                 description: draft.description,
                 status: api.items[idx].status,
                 stockQuantity: api.items[idx].stockQuantity,
-                printer: api.items[idx].printer     // ✅ preserve
+                printer: primary,
+                printers: printers
             )
 
             api.items[idx] = updatedItem
@@ -1753,134 +2091,181 @@ struct CashPointView: View {
                     item: updatedItem,
                     quantity: entry.quantity,
                     subtitle: entry.subtitle,
-                    unitPrice: entry.unitPrice   // keep the price used when it was added
+                    unitPrice: entry.unitPrice
                 )
             }
         }
 
         // 4) Remote upsert + publish
-        Task {
-            await syncAdminDraftToServer(draft)
-        }
+        Task { await syncAdminDraftToServer(draft) }
     }
     
     enum StockQuantityAPI {
-        static func setStock(productId: Int, quantity: Int?) async {
-            let shopId = 12
-            guard let url = URL(string: "https://minis.studio/api/products/\(productId)/stock") else { return }
+
+        private static func resolvedMiniAppId() -> Int {
+            let d = UserDefaults.standard
+            let m = d.integer(forKey: "miniAppId")
+            if m > 0 { return m }
+            if let s = d.string(forKey: "shopId"), let v = Int(s), v > 0 { return v }
+            return 0
+        }
+
+        /// ✅ Returns `true` only when the server ACKs with 2xx.
+        /// - Retries on network errors + 408/429/502/503/504
+        /// - Logs requestId + response body prefix for debugging
+        static func setStock(productId: Int, quantity: Int?) async -> Bool {
+            print("🔥 StockQuantityAPI.setStock CALLED productId=\(productId) qty=\(String(describing: quantity))")
+
+            let miniAppId = resolvedMiniAppId()
+            guard miniAppId > 0 else {
+                print("❌ setStock: missing miniAppId/shopId")
+                return false
+            }
+
+            guard let url = URL(string: "https://minis.studio/api/products/\(productId)/stock") else {
+                print("❌ setStock: bad URL for productId=\(productId)")
+                return false
+            }
+
+            let requestId = UUID().uuidString
 
             var body: [String: Any] = [
-                "miniAppId": shopId
+                "miniAppId": miniAppId,
+                "stockQuantity": quantity as Any // Int or nil
             ]
+            if quantity == nil { body["stockQuantity"] = NSNull() }
 
-            if let q = quantity {
-                body["stockQuantity"] = q   // finite stock
-            } else {
-                body["stockQuantity"] = NSNull()  // 👈 sends JSON null
-            }
+            let bodyData = (try? JSONSerialization.data(withJSONObject: body)) ?? Data()
 
-            let bodyData = try? JSONSerialization.data(withJSONObject: body)
-
-            var req = URLRequest(url: url)
+            var req = URLRequest(url: url, timeoutInterval: 20)
             req.httpMethod = "POST"
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.setValue("application/json", forHTTPHeaderField: "Accept")
+            req.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+            req.setValue(requestId, forHTTPHeaderField: "X-Request-Id")
             req.httpBody = bodyData
 
-            do {
-                let (data, response) = try await URLSession.shared.data(for: req)
-                if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-                    let text = String(data: data, encoding: .utf8) ?? "<non-utf8 body \(data.count) bytes>"
-                    print("❌ setStock failed: \(http.statusCode)\n\(text)")
-                } else if let http = response as? HTTPURLResponse {
-                    print("✅ setStock OK: \(http.statusCode)")
+            // Debug
+            print("📤 setStock reqId=\(requestId) product=\(productId) qty=\(String(describing: quantity)) miniAppId=\(miniAppId)")
+            print(req.curlDebug)
+
+            // Retry policy
+            // 0s, 0.4s, 0.9s, 1.8s (small exponential-ish backoff)
+            let delays: [UInt64] = [0, 400_000_000, 900_000_000, 1_800_000_000]
+
+            for attempt in 0..<delays.count {
+                if delays[attempt] > 0 {
+                    try? await Task.sleep(nanoseconds: delays[attempt])
                 }
-            } catch {
-                print("❌ setStock error:", error.localizedDescription)
+
+                do {
+                    let (data, resp) = try await URLSession.shared.data(for: req)
+                    let http = resp as? HTTPURLResponse
+                    let code = http?.statusCode ?? -1
+
+                    let text = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
+                    let prefix = String(text.prefix(400))
+
+                    // Helpful headers if present
+                    let serverReqId =
+                        http?.value(forHTTPHeaderField: "x-request-id")
+                        ?? http?.value(forHTTPHeaderField: "X-Request-Id")
+                        ?? http?.value(forHTTPHeaderField: "x-correlation-id")
+
+                    print("📥 setStock resp reqId=\(requestId) serverReqId=\(serverReqId ?? "nil") attempt=\(attempt+1) HTTP \(code) body=\(prefix)")
+
+                    if (200...299).contains(code) {
+                        return true
+                    }
+
+                    // Retry only on transient cases
+                    let retryableCodes: Set<Int> = [408, 429, 502, 503, 504]
+                    if retryableCodes.contains(code), attempt < delays.count - 1 {
+                        continue
+                    }
+
+                    return false
+
+                } catch {
+                    print("❌ setStock network reqId=\(requestId) attempt=\(attempt+1) err=\(error.localizedDescription)")
+                    // Retry on network errors
+                    if attempt < delays.count - 1 { continue }
+                    return false
+                }
             }
+
+            return false
         }
     }
     
     
     /// Set stock of all products in the selected category to 0 (out of stock)
-    private func clearStockForSelectedCategory() {
-        // No category / notes pseudo-category → do nothing
+    private func toggleStockForSelectedCategory() {
         guard !selectedCategory.isEmpty,
               selectedCategory != "✏️ הערות"
         else { return }
 
-        // All items in this category
-        let itemsInCategory = api.items.filter { $0.category == selectedCategory }
-        guard !itemsInCategory.isEmpty else { return }
+        let items = api.items.filter { $0.category == selectedCategory }
+        guard !items.isEmpty else { return }
 
-        for item in itemsInCategory {
-            let pid = item.id
+        let isZeroed = isCategoryZeroed(selectedCategory)
 
-            // 0 = out of stock
-            stockAdjustments[pid] = 0
-
-            // Update toggle so UI immediately shows as out of stock
-            stockToggles.binding(for: pid).wrappedValue = false
-
-            // Mark for API sync
-            dirtyStockIds.insert(pid)
+        if isZeroed {
+            // ✅ אינסוף = להסיר את הערך מהדיקט (nil => remove key)
+            for item in items {
+                stockAdjustments[item.id] = nil
+                stockText[item.id] = nil
+                dirtyStockIds.insert(item.id)
+            }
+        } else {
+            // ✅ אפס
+            for item in items {
+                stockAdjustments[item.id] = 0
+                stockText[item.id] = nil
+                dirtyStockIds.insert(item.id)
+            }
         }
 
-        print("📦 clearStockForSelectedCategory: '\(selectedCategory)' → \(itemsInCategory.count) items set to 0")
-
-        // Commit to server after debounce
-        scheduleStockCommit()
+        Haptics.light()
     }
     private func bumpStockAmount(productId: Int, delta: Int) {
-        var currentOpt = stockAdjustments[productId]  // Int? (nil = ∞ / untracked)
+        var currentOpt = stockAdjustments[productId]  // Int? (nil = ∞)
 
         if let current = currentOpt {
-            // We are currently tracking a finite stock number
-            var newValue = current + delta
-
+            let newValue = current + delta
             if newValue < 0 {
-                // Went below 0 → switch to nil (∞ / untracked)
-                currentOpt = nil
+                currentOpt = nil          // below 0 => ∞
             } else {
-                // 5 → 4 → 3 → 2 → 1 → 0 (still tracked)
-                currentOpt = newValue
+                currentOpt = newValue     // 0..n
             }
         } else {
-            // Currently "infinite" / untracked (nil)
+            // currently ∞
             if delta > 0 {
-                // First "+" from ∞ → start tracking at 1
-                currentOpt = 1
+                currentOpt = 1            // first + => 1
             } else {
-                // "-" from ∞: stay at ∞ (no change)
-                currentOpt = nil
+                currentOpt = nil          // - from ∞ => stays ∞
             }
         }
 
+        // ✅ write once
         stockAdjustments[productId] = currentOpt
-
-        // 👇 NEW: sync local Status (stockToggles) so isOut updates immediately
-        if let value = currentOpt {
-            if value > 0 {
-                // have stock -> mark as "in stock"
-                stockToggles.binding(for: productId).wrappedValue = true
-            } else {
-                // value == 0 -> out of stock
-                stockToggles.binding(for: productId).wrappedValue = false
-            }
-        } else {
-            // nil = infinite / untracked -> treat as "in stock"
-            stockToggles.binding(for: productId).wrappedValue = true
-        }
-
-        // mark this product as needing sync
         dirtyStockIds.insert(productId)
+
+        // ✅ IMPORTANT: if TextField is showing, it reads stockText first — update it!
+        if editingStockProductId == productId || isStockEditMode {
+            if let v = currentOpt {
+                stockText[productId] = "\(max(v, 0))"
+            } else {
+                stockText[productId] = ""     // empty => shows placeholder "∞"
+            }
+        }
 
         print("📦 pending stock:", stockAdjustments, "dirty:", dirtyStockIds)
 
-        // Schedule commit after 3s of no further changes
-        scheduleStockCommit()
-
-        // Keep UI auto-close behaviour only when NOT in global edit mode
-        if !isStockEditMode {
+        // ✅ keep the 2s auto-commit alive when editing a single product
+        if editingStockProductId == productId && !isStockEditMode {
+            restartSingleStockEditTimer(productId: productId)
+        } else if !isStockEditMode {
             restartStockEditTimer()
         }
     }
@@ -1895,38 +2280,8 @@ struct CashPointView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: work)
     }
     
-    private func scheduleStockCommit() {
-        stockCommitWorkItem?.cancel()
-        let work = DispatchWorkItem {
-            Task {
-                await commitStockAdjustments()
-            }
-        }
-        stockCommitWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: work)
-    }
-
-    @MainActor
-    private func commitStockAdjustments() async {
-        // snapshot dirty ids so we don't race with UI
-        let pendingIds = dirtyStockIds
-        guard !pendingIds.isEmpty else { return }
-
-        // clear dirty set + timers
-        dirtyStockIds.removeAll()
-        stockCommitWorkItem = nil
-
-        // close the inline stock editor but keep badge
-        editingStockProductId = nil
-        stockEditWorkItem?.cancel()
-        stockEditWorkItem = nil
-
-        for productId in pendingIds {
-            let qtyOpt = stockAdjustments[productId] // Int?  (nil = ∞)
-            await StockQuantityAPI.setStock(productId: productId, quantity: qtyOpt)
-        }
-    }
-    
+   
+   
     struct CashOrderSnapshot: Identifiable {
         let id = UUID()
         let orderNumber: Int
@@ -1996,8 +2351,9 @@ struct CashPointView: View {
 
         // No modifiers → only note matters
         guard let groups = current.item.modifiers, !groups.isEmpty else {
-            let noteText = noteDrafts[lineId] ?? noteFromSubtitle(current.subtitle)
-            let noteClean = noteText.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+            let raw = (noteDrafts[lineId] ?? current.subtitle ?? "")
+            let noteClean = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+
             current = BasketEntry(
                 id: current.id,
                 item: current.item,
@@ -2008,7 +2364,7 @@ struct CashPointView: View {
             basket[lineId] = current
             return
         }
-
+        
         let optionsMap   = optionSelections[lineId] ?? [:]
         let additionsSet = additionSelections[lineId] ?? []
 
@@ -2200,7 +2556,9 @@ struct CashPointView: View {
 
         // 3) keep notes last
         out.removeAll(where: { $0 == "✏️ הערות" })
-        out.append("✏️ הערות")
+        if cashPointMode {
+            out.append("✏️ הערות")
+        }
 
         return out
     }
@@ -2210,42 +2568,9 @@ struct CashPointView: View {
 
         if selectedCategory == "✏️ הערות" {
             return [
-                ShellMenuItem(
-                    id: -1001,
-                    name: "הערה לבר",
-                    price: 0,
-                    category: "✏️ הערות",
-                    modifiers: nil,
-                    imageURL: nil,
-                    description: nil,
-                    status: 1,
-                    stockQuantity: nil,
-                    printer: "Bar"        // ✅
-                ),
-                ShellMenuItem(
-                    id: -1002,
-                    name: "הערה למטבח",
-                    price: 0,
-                    category: "✏️ הערות",
-                    modifiers: nil,
-                    imageURL: nil,
-                    description: nil,
-                    status: 1,
-                    stockQuantity: nil,
-                    printer: "Kitchen"    // ✅
-                ),
-                ShellMenuItem(
-                    id: -1003,
-                    name: "הערה לוטרינה",
-                    price: 0,
-                    category: "✏️ הערות",
-                    modifiers: nil,
-                    imageURL: nil,
-                    description: nil,
-                    status: 1,
-                    stockQuantity: nil,
-                    printer: "Bakery"     // ✅
-                )
+                makeNoteItem(id: -1001, name: "הערה לבר",     stationId: "s2", legacy: "Bar"),
+                makeNoteItem(id: -1002, name: "הערה למטבח",   stationId: "s1", legacy: "Kitchen"),
+                makeNoteItem(id: -1003, name: "הערה לוטרינה", stationId: "s3", legacy: "Bakery")
             ]
         }
 
@@ -2510,6 +2835,32 @@ struct CashPointView: View {
         basket.values.reduce(0) { $0 + $1.quantity }
     }
     
+    
+    private func resolvedCustomerNameForPrint(
+        fallbackNameFromFlow: String? = nil
+    ) -> String {
+        func clean(_ s: String?) -> String {
+            (s ?? "")
+                .replacingOccurrences(of: "Customer", with: "", options: .caseInsensitive)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        // 1) If OrderFlowView ever passes a name (optional future-proof)
+        let a = clean(fallbackNameFromFlow)
+        if a.count >= 2 { return a }
+
+        // 2) Your POS stored name
+        let b = clean(posSavedName)
+        if b.count >= 2 { return b }
+
+        // 3) Last resort: read directly from UserDefaults (covers timing issues)
+        let c = clean(UserDefaults.standard.string(forKey: "posSavedName"))
+        if c.count >= 2 { return c }
+
+        // 4) Never return empty to printer
+        return "שם לקוח"
+    }
+    
     private func stockLabel(for value: Int?, isOutOfStock: Bool) -> String {
         // If product is marked out-of-stock → show "0"
         if isOutOfStock { return "0" }
@@ -2673,10 +3024,20 @@ struct CashPointView: View {
                 let commitThreshold: CGFloat = 40
 
                 let remaining = maxAdditionalQuantity(for: item) ?? 1
-                let isOut =
-                    selectedCategory != "✏️ הערות"
-                    && (!stockToggles.isOn(item.id) || remaining <= 0)
+                let derivedOnFromQty: Bool = {
+                    if let q = stockAdjustments[item.id] { return q > 0 } // 0 -> off
+                    return true                                           // nil -> ∞ -> on
+                }()
+                let remainingForItem = maxAdditionalQuantity(for: item)
 
+                
+
+                let isOut =
+                selectedCategory != "✏️ הערות"
+                && (
+                    (isStockEditMode ? !derivedOnFromQty : !stockToggles.isOn(item.id))
+                    || (remainingForItem ?? 1) <= 0
+                )
                 let canAdd = remaining > 0 && !isOut && selectedCategory != "✏️ הערות"
                 let canRemove = quantityInBasket(for: item) > 0
 
@@ -2756,6 +3117,10 @@ struct CashPointView: View {
                }
 
                // 🔹 Sort: active first, then by `sort`, then name
+               if isStockEditMode || !dirtyStockIds.isEmpty || stockCommitInFlight {
+                   return base
+               }
+
                return base.sorted { lhs, rhs in
                    productSortKey(lhs) < productSortKey(rhs)
                }
@@ -2765,44 +3130,21 @@ struct CashPointView: View {
            guard !selectedCategory.isEmpty else { return [] }
 
            // Notes category stays as-is (no stock / sort logic needed)
-           if selectedCategory == "✏️ הערות" {
-               return [
-                   ShellMenuItem(
-                       id: -1001,
-                       name: "הערה לבר",
-                       price: 0,
-                       category: "✏️ הערות",
-                       modifiers: nil,
-                       imageURL: nil,
-                       description: nil
-                   ),
-                   ShellMenuItem(
-                       id: -1002,
-                       name: "הערה למטבח",
-                       price: 0,
-                       category: "✏️ הערות",
-                       modifiers: nil,
-                       imageURL: nil,
-                       description: nil
-                   ),
-                   ShellMenuItem(
-                       id: -1003,
-                       name: "הערה לוטרינה",
-                       price: 0,
-                       category: "✏️ הערות",
-                       modifiers: nil,
-                       imageURL: nil,
-                       description: nil
-                   )
-               ]
-           }
+        if selectedCategory == "✏️ הערות" {
+            return [
+                makeNoteItem(id: -1001, name: "הערה לבר",     stationId: "s2", legacy: "Bar"),
+                makeNoteItem(id: -1002, name: "הערה למטבח",   stationId: "s1", legacy: "Kitchen"),
+                makeNoteItem(id: -1003, name: "הערה לוטרינה", stationId: "s3", legacy: "Bakery")
+            ]
+        }
 
-           let base = api.items.filter { $0.category == selectedCategory }
+        let base = api.items.filter { $0.category == selectedCategory }
 
-           // 🔹 Sort: active first, then by `sort`, then name
-           return base.sorted { lhs, rhs in
-               productSortKey(lhs) < productSortKey(rhs)
-           }
+        if isStockEditMode {
+            return applyFrozenOrder(base)       // ✅ keep frozen order
+        }
+       
+        return base.sorted { productSortKey($0) < productSortKey($1) }
        }
     // MARK: - Side menu
 
@@ -2925,22 +3267,79 @@ struct CashPointView: View {
             // ✅ SCROLLABLE CONTENT
             ScrollView {
                 VStack(alignment: isRtl ? .trailing : .leading, spacing: 0) {
+                    if isMiniApp13 {
+                       
 
-                    fullRow("הזמנות", "list.bullet.rectangle") {
+                        Button {
+                            withAnimation(.spring(response: 0.25, dampingFraction: 0.9)) {
+                                // reuse one of your expand states or create a new one
+                                // simplest: toggle a new flag
+                                locationsExpanded.toggle()
+                            }
+                        } label: {
+                            HStack(spacing: 10) {
+                                Image(systemName: "mappin.and.ellipse")
+                                    .font(.system(size: 18))
+                                Text("מיקום")
+                                    .font(.system(size: 18, weight: .medium))
+                                Spacer()
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 14)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+
+                        if locationsExpanded {
+                            VStack(alignment: isRtl ? .trailing : .leading, spacing: 0) {
+                                ForEach(AdminPickupLocation.allCases) { loc in
+                                    Button {
+                                        adminPickupLocation = loc.rawValue
+                                        Haptics.light()
+
+                                        // optional: if Orders screen already open, you can force refresh there.
+                                        // Also optional: auto-close menu:
+                                        // showSideMenu = false
+                                    } label: {
+                                        HStack(spacing: 10) {
+                                            Image(systemName: (selectedAdminLocation == loc)
+                                                  ? "checkmark.circle.fill"
+                                                  : "circle")
+                                            Text(loc.title)
+                                                .font(.system(size: 16, weight: .semibold))
+                                            Spacer()
+                                        }
+                                        .padding(.horizontal, 16)
+                                        .padding(.vertical, 10)
+                                        .contentShape(Rectangle())
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                            .padding(.leading, isRtl ? 0 : 32)
+                            .padding(.trailing, isRtl ? 32 : 0)
+                        }
+                    }
+                    SideMenuRow(title: "הזמנות", systemImage: "list.bullet.rectangle") {
                         showSideMenu = false
                         showOrdersAdmin = true
                     }
-
-                    fullRow("בונים", "rectangle.grid.2x2") {
+                    /*
+                    SideMenuRow(title: "בונים", systemImage: "square.grid.2x2") {
                         showSideMenu = false
                         showBones = true
                     }
+                     */
+                    SideMenuRow(title: "בונבונים", systemImage: "square.grid.3x2") {
+                        showSideMenu = false
+                        showBonbon = true
+                    }
 
-                    fullRow("פתח מגירה", "tray.and.arrow.down") {
+                    SideMenuRow(title: "פתח מגירה", systemImage: "tray") {
                         PrinterManager.shared.openCashDrawer()
                     }
 
-                    fullRow("זיכוי לקוח", "arrow.uturn.left.circle") {
+                    SideMenuRow(title: "זיכוי לקוח", systemImage: "arrow.uturn.left.circle.fill") {
                         showSideMenu = false
                         refundInput = ""
                         showRefundFlow = true
@@ -3031,6 +3430,25 @@ struct CashPointView: View {
 
                     if pinpadsExpanded {
                         VStack(alignment: isRtl ? .trailing : .leading, spacing: 0) {
+
+                            // ✅ NEW: no-terminal option (saves empty string)
+                            Button {
+                                showSideMenu = false
+                                setPinpadAndPing(NO_TERMINAL_PINPAD)
+                            } label: {
+                                HStack(spacing: 10) {
+                                    Image(systemName: currentPinpadId == NO_TERMINAL_PINPAD ? "checkmark.circle.fill" : "circle")
+                                    Text("ללא מסוף")
+                                        .font(.system(size: 16, weight: .semibold))
+                                    Spacer()
+                                }
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 10)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+
+                            // existing terminals
                             ForEach(pinpads, id: \.id) { item in
                                 Button {
                                     showSideMenu = false
@@ -3059,9 +3477,74 @@ struct CashPointView: View {
                         showSideMenu = false
                         showStudentHandshakeSheet = true
                     }
+                 
+                    VStack(spacing: 0) {
+                        HStack(spacing: 10) {
+                            Image(systemName: mobileIsOpen ? "lock.open" : "lock")
+                                .font(.system(size: 18))
 
+                            Text("הזמנות מהאפליקציה")
+                                .font(.system(size: 18, weight: .medium))
+
+                            Spacer()
+
+                            if mobileToggleBusy {
+                                ProgressView().scaleEffect(0.8)
+                            } else {
+                                Toggle("", isOn: Binding(
+                                    get: { mobileIsOpen },
+                                    set: { newVal in
+                                        // ✅ if turning OFF -> confirm first
+                                        if newVal == false {
+                                            confirmCloseMobile = true
+                                            return
+                                        }
+
+                                        // ✅ turning ON -> immediate
+                                        mobileIsOpen = true
+                                        Haptics.light()
+                                        setMiniAppOpen(true)
+                                    }
+                                ))
+                                .labelsHidden()
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 14)
+
+                        Text(mobileIsOpen ? "פתוח להזמנות" : "סגור — רק קופה")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 16)
+                            .padding(.bottom, 10)
+                    }
+                    .confirmationDialog(
+                        "לסגור הזמנות מהטלפון?",
+                        isPresented: $confirmCloseMobile,
+                        titleVisibility: .visible
+                    ) {
+                        Button("סגור הזמנות", role: .destructive) {
+                            mobileIsOpen = false
+                            Haptics.light()
+                            setMiniAppOpen(false)
+                        }
+                        Button("בטל", role: .cancel) {
+                            mobileIsOpen = true
+                        }
+                    }
+                    
                     fullRow("קופת שירות עצמי", "person.fill") {
-                        cashPointMode = false
+                        Task { @MainActor in
+                            cashPointMode = false                 // ✅ persist via AppStorage
+                            UserDefaults.standard.set(false, forKey: AppSettings.Key.cashPointMode) // (optional safety)
+                            Haptics.success()
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                                showSideMenu = false
+                            }
+                            // If this view was presented modally and you want to go back to menu/home immediately:
+                            // dismiss()
+                        }
                     }
                 }
                 .padding(.top, 8)
@@ -3198,33 +3681,27 @@ struct CashPointView: View {
         print("🧾 Printing Z report…")
     }
 
-    private func sideMenuRow(
-        _ title: String,
-        _ systemImage: String,
-        _ action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            HStack(spacing: 10) {
-                if !isRtl {
+    private struct SideMenuRow: View {
+        let title: String
+        let systemImage: String
+        let action: () -> Void
+
+        var body: some View {
+            Button(action: action) {
+                HStack(spacing: 10) {
                     Image(systemName: systemImage)
                         .font(.system(size: 18))
+                    Text(title)
+                        .font(.system(size: 18, weight: .medium))
+                    Spacer()
                 }
-
-                if isRtl {
-                    Image(systemName: systemImage)
-                        .font(.system(size: 18))
-                }
-                
-                Text(title)
-                    .font(.system(size: 18, weight: .medium))
-
-
-                Spacer()
+                .padding(.horizontal, 16)
+                .padding(.vertical, 14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 14)
+            .buttonStyle(.plain)
         }
-        .buttonStyle(.plain)
     }
     
     private var cashpointHeaderTitle: String {
@@ -3246,8 +3723,16 @@ struct CashPointView: View {
                 .font(.system(size: 14, weight: .semibold))
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
-                .background(isSelected ?.black : Color(.systemGray6))
-                .foregroundColor(isSelected ? .white : .primary)
+                .background(
+                    isSelected
+                        ? (colorScheme == .dark ? .white : .black)
+                        : Color(.systemGray5)
+                )
+                .foregroundColor(
+                    isSelected
+                        ? (colorScheme == .dark ? .black : .white)
+                        : .primary
+                )
                 .clipShape(Capsule())
         }
         .buttonStyle(.plain)
@@ -3320,7 +3805,7 @@ struct CashPointView: View {
                                                    !selectedCategory.isEmpty,
                                                    selectedCategory != "✏️ הערות" {
                                                     Button {
-                                                        clearStockForSelectedCategory()
+                                                        toggleStockForSelectedCategory()
                                                     } label: {
                                                         Text("אפס")
                                                             .font(.system(size: 14, weight: .semibold))
@@ -3332,24 +3817,42 @@ struct CashPointView: View {
                                                 }
 
                                                 Button {
-                                                    withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
-                                                        isStockEditMode.toggle()
-                                                        if isStockEditMode {
-                                                            stockEditWorkItem?.cancel()
-                                                            stockEditWorkItem = nil
-                                                            editingStockProductId = nil
+                                                    if isStockEditMode {
+                                                        // ✅ exit stock mode = commit
+                                                        Task { await flushDirtyStockAndExit() }
+                                                    } else {
+                                                        withAnimation(nil) {
+                                                            isStockEditMode = true
                                                         }
                                                     }
                                                 } label: {
-                                                    Text(isRtl
-                                                         ? (isStockEditMode ? "סיים" : "מלאי")
-                                                         : (isStockEditMode ? "Done" : "Stock"))
+                                                    HStack(spacing: 6) {
+                                                        Text(isRtl ? (isStockEditMode ? "סיים" : "מלאי")
+                                                                   : (isStockEditMode ? "Done" : "Stock"))
+
+                                                        // ✅ tiny dirty badge
+                                                        if isStockEditMode && !dirtyStockIds.isEmpty {
+                                                            Text("\(dirtyStockIds.count)")
+                                                                .font(.system(size: 12, weight: .bold))
+                                                                .padding(.horizontal, 6)
+                                                                .padding(.vertical, 3)
+                                                                .background(Color(.systemBackground))
+                                                                .clipShape(Capsule())
+                                                        }
+
+                                                        // ✅ saving indicator
+                                                        if stockCommitInFlight {
+                                                            ProgressView()
+                                                                .scaleEffect(0.7)
+                                                        }
+                                                    }
                                                     .font(.system(size: 14, weight: .semibold))
                                                     .padding(.horizontal, 12)
                                                     .padding(.vertical, 6)
                                                     .background(Color(.systemGray5))
                                                     .clipShape(Capsule())
                                                 }
+                                                .disabled(stockCommitInFlight)
                                             }
                                         }
                                     }
@@ -3429,7 +3932,8 @@ struct CashPointView: View {
                                             category: defaultCategory,
                                             description: "",
                                             imageURL: "https://beithaam.com/wp-content/uploads/2024/12/share.jpg",
-                                            modifierGroups: []
+                                            modifierGroups: [],
+                                            printerId: defaultPrinterId()        // ✅ NEW
                                         )
                                     } label: {
                                         Image(systemName: "plus.circle.fill")
@@ -3553,7 +4057,8 @@ struct CashPointView: View {
                                         category: defaultCategory,
                                         description: "",
                                         imageURL: "https://beithaam.com/wp-content/uploads/2024/12/share.jpg",
-                                        modifierGroups: []
+                                        modifierGroups: [],
+                                        printerId: defaultPrinterId()        // ✅ NEW
                                     )
                                 } label: {
                                     HStack(spacing: 6) {
@@ -3570,23 +4075,34 @@ struct CashPointView: View {
                                 if isStockEditMode,
                                    !selectedCategory.isEmpty,
                                    selectedCategory != "✏️ הערות" {
+                                    let isZeroed = isCategoryZeroed(selectedCategory)
+
                                     Button {
-                                        showClearStockConfirm = true
+                                        let items = api.items.filter { $0.category == selectedCategory }
+                                        guard !items.isEmpty else { return }
+
+                                        if isZeroed {
+                                            // אינסוף
+                                            for item in items {
+                                                stockAdjustments[item.id] = nil
+                                                dirtyStockIds.insert(item.id)
+                                            }
+                                        } else {
+                                            // אפס
+                                            for item in items {
+                                                stockAdjustments[item.id] = 0
+                                                dirtyStockIds.insert(item.id)
+                                            }
+                                        }
+
+                                        Haptics.light()
                                     } label: {
-                                        Text("אפס")
+                                        Text(isZeroed ? "אינסוף" : "אפס")
                                             .font(.system(size: 14, weight: .semibold))
                                             .padding(.horizontal, 10)
                                             .padding(.vertical, 6)
                                             .background(Color(.systemGray5))
                                             .clipShape(Capsule())
-                                    }
-                                    .alert("האם אתה בטוח?", isPresented: $showClearStockConfirm) {
-                                        Button("כן", role: .destructive) {
-                                            clearStockForSelectedCategory()
-                                        }
-                                        Button("בטל", role: .cancel) { }
-                                    } message: {
-                                        Text("זה יאפס את המלאי לכל המוצרים בקטגוריה הנבחרת.")
                                     }
                                 }
                                 // Stock mode toggle
@@ -3715,77 +4231,94 @@ struct CashPointView: View {
                                                     isOutOfStock: isOut
                                                 )
                                                 .scaleEffect(tappedProductId == item.id ? 0.96 : 1.0)
-                                                .contentShape(Rectangle())
-                                                .onTapGesture {
-                                                    // If this interaction was a swipe, ignore the tap
-                                                    guard !isStockEditMode else { return }
-                                                    guard swipingProductId == nil else { return }
 
-                                                    searchText = ""
-                                                    isSearchFocused = false
+                                                // ✅ tap layer (adds product), but DISABLED while stock UI is shown
+                                                .overlay(
+                                                    Color.clear
+                                                        .contentShape(Rectangle())
+                                                        .onTapGesture {
 
-                                                    if selectedCategory == "✏️ הערות" {
-                                                        messageTargetIsKitchen = false
-                                                        messageTargetIsBakery  = false
+                                                            // ✅ If any single-item stock editor is open:
+                                                            // tap another row -> commit+close, and do NOT add-to-basket
+                                                            if let editing = editingStockProductId {
+                                                                if editing != item.id {
+                                                                    Task { await commitSingleStockAndClose(editing) }
+                                                                }
+                                                                return
+                                                            }
 
-                                                        if item.name.contains("וטרינה") {
-                                                            messageTargetIsBakery  = true
-                                                        } else if item.name.contains("מטבח") {
-                                                            messageTargetIsKitchen = true
+                                                            // existing guards
+                                                            guard !isStockEditMode else { return }
+                                                            guard swipingProductId == nil else { return }
+
+                                                            let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+                                                            let wasSearching = !q.isEmpty
+
+                                                            if wasSearching, item.category != "✏️ הערות" {
+                                                                selectedCategory = item.category
+                                                            }
+
+                                                            // now clear search UI
+                                                            searchText = ""
+                                                            isSearchFocused = false
+                                                            
+                                                            searchText = ""
+                                                            isSearchFocused = false
+
+                                                            if selectedCategory == "✏️ הערות" {
+                                                                // Map the hard-coded note items to targets
+                                                                messageTargetIsKitchen = (item.id == -1002)
+                                                                messageTargetIsBakery  = (item.id == -1003)
+
+                                                                // Reset fields
+                                                                messageText = ""
+                                                                messagePrice = "0"
+
+                                                                // ✅ kill any focus/keyboard BEFORE presenting the sheet
+                                                                dismissKeyboard()
+
+                                                                // Show sheet
+                                                                showMessageSheet = true
+                                                                Haptics.light()
+                                                                return
+                                                            }
+
+                                                            guard !isOut else { Haptics.error(); return }
+                                                            if let maxAdd = maxAdditionalQuantity(for: item), maxAdd <= 0 { Haptics.error(); return }
+
+                                                            withAnimation(.spring(response: 0.18, dampingFraction: 0.6, blendDuration: 0.1)) {
+                                                                tappedProductId = item.id
+                                                            }
+                                                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                                                                withAnimation(.spring(response: 0.25, dampingFraction: 0.7, blendDuration: 0.1)) {
+                                                                    tappedProductId = nil
+                                                                }
+                                                            }
+
+                                                            Haptics.light()
+                                                            addToBasket(item: item, quantity: 1, subtitle: nil, unitPrice: item.price)
                                                         }
-
-                                                        messageText  = ""
-                                                        messagePrice = ""
-
-                                                        DispatchQueue.main.async {
-                                                            showMessageSheet = true
-                                                        }
-                                                        return
-                                                    }
-
-                                                    guard !isOut else {
-                                                        Haptics.error()
-                                                        return
-                                                    }
-
-                                                    if let maxAdd = maxAdditionalQuantity(for: item), maxAdd <= 0 {
-                                                        Haptics.error()
-                                                        return
-                                                    }
-
-                                                    withAnimation(.spring(response: 0.18, dampingFraction: 0.6, blendDuration: 0.1)) {
-                                                        tappedProductId = item.id
-                                                    }
-                                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                                                        withAnimation(.spring(response: 0.25, dampingFraction: 0.7, blendDuration: 0.1)) {
-                                                            tappedProductId = nil
-                                                        }
-                                                    }
-
-                                                    Haptics.light()
-
-                                                    addToBasket(
-                                                        item: item,
-                                                        quantity: 1,
-                                                        subtitle: nil,
-                                                        unitPrice: item.price
-                                                    )
-                                                }
+                                                        // ✅ KEY LINE: when stock UI is visible, this overlay stops receiving taps
+                                                        .allowsHitTesting(!showFullStockUI)
+                                                )
                                                 .contextMenu {
                                                     Group {
-                                                        if selectedCategory != "הודעות" {
+                                                        // ✅ Edit product (existing)
+                                                        Button("ערוך מוצר") {
+                                                            adminDraft = makeAdminDraft(from: item)
+                                                        }
 
-                                                           
-
-
-                                                            Button("ערוך מוצר") {
-                                                                adminDraft = makeAdminDraft(from: item)
+                                                        // ✅ NEW: Edit stock for this specific product
+                                                        Button("ערוך מלאי") {
+                                                            var t = Transaction()
+                                                            t.disablesAnimations = true
+                                                            withTransaction(t) {
+                                                                startSingleStockEdit(productId: item.id)
                                                             }
                                                         }
                                                     }
                                                     .environment(\.layoutDirection, .rightToLeft)
                                                 }
-
                                                 // 🔹 STOCK UI (unchanged)
                                                 let isEditingThisStock = isStockEditMode || editingStockProductId == item.id
 
@@ -3793,6 +4326,7 @@ struct CashPointView: View {
                                                     HStack(spacing: 6) {
                                                         Button {
                                                             bumpStockAmount(productId: item.id, delta: -1)
+                                                            
                                                         } label: {
                                                             Image(systemName: "minus")
                                                                 .font(.system(size: 13, weight: .bold))
@@ -3801,13 +4335,15 @@ struct CashPointView: View {
                                                                 .background(Color(.systemGray5))
                                                                 .clipShape(Circle())
                                                         }
+                                                        .buttonStyle(.plain)
+
 
                                                         if isEditingThisStock {
                                                             TextField(
                                                                 "∞",
                                                                 text: Binding(
                                                                     get: {
-                                                                        if !stockToggles.isOn(item.id) { return "0" }
+                                                                        if let q = stockAdjustments[item.id], q <= 0 { return "0" }
 
                                                                         if let existing = stockText[item.id] { return existing }
                                                                         if let current = remainingStock(for: item) { return String(current) }
@@ -3849,6 +4385,7 @@ struct CashPointView: View {
 
                                                         Button {
                                                             bumpStockAmount(productId: item.id, delta: +1)
+                                                           
                                                         } label: {
                                                             Image(systemName: "plus")
                                                                 .font(.system(size: 13, weight: .bold))
@@ -3857,7 +4394,9 @@ struct CashPointView: View {
                                                                 .background(Color(.systemGray5))
                                                                 .clipShape(Circle())
                                                         }
+                                                        .buttonStyle(.plain)
                                                     }
+                                                    
                                                     .padding(6)
                                                     .background(
                                                         RoundedRectangle(cornerRadius: 12)
@@ -3979,10 +4518,7 @@ struct CashPointView: View {
                             StudentHandshakeWebSheet(url: URL(string: "https://minis.studio/handshake")!)
                                 .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
                         }
-                        .sheet(isPresented: $showOutboxLog) {
-                            OutboxLogView()
-                                .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
-                        }
+                       
                         .sheet(isPresented: $showTeamTabsSheet) {
                             TeamTabsSheet { tab in
                                 showTeamTabsSheet = false
@@ -4001,58 +4537,66 @@ struct CashPointView: View {
                                     // PrinterManager.shared.printTestBone()
                                 }
                             )
-                            .presentationDetents([.height(340)])
+                            .presentationDetents([.medium, .large])
                             .presentationDragIndicator(.hidden)
                             .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
                         }
                         .sheet(isPresented: $showMessageSheet) {
-                                                 MessageSheet(
-                                                     isRtl: isRtl,
-                                                     targetIsKitchen: messageTargetIsKitchen,
-                                                     targetIsBakery: messageTargetIsBakery,
-                                                     text: $messageText,
-                                                     priceText: $messagePrice
-                                                 ) { text, price in
-                                                     let name: String
-                                                     if messageTargetIsKitchen {
-                                                         name = "הערה למטבח"
-                                                     } else if messageTargetIsBakery {
-                                                         name = "הערה לוטרינה"
-                                                     } else {
-                                                         name = "הערה לבר"
-                                                     }
+                            MessageSheet(
+                                isRtl: isRtl,
+                                targetIsKitchen: messageTargetIsKitchen,
+                                targetIsBakery: messageTargetIsBakery,
+                                text: $messageText,
+                                priceText: $messagePrice
+                            ) { text, price in
 
-                                                     let printer: String = {
-                                                         if messageTargetIsKitchen { return "Kitchen" }
-                                                         if messageTargetIsBakery  { return "Bakery" }
-                                                         return "Bar"
-                                                     }()
+                                // ✅ Title / label
+                                let name: String
+                                if messageTargetIsKitchen {
+                                    name = "הערה למטבח"
+                                } else if messageTargetIsBakery {
+                                    name = "הערה לוטרינה"
+                                } else {
+                                    name = "הערה לבר"
+                                }
 
-                                                     let item = ShellMenuItem(
-                                                         id: Int.random(in: -9000 ... -8000),
-                                                         name: name,
-                                                         price: price,
-                                                         category: "הערות",
-                                                         modifiers: nil,
-                                                         imageURL: nil,
-                                                         description: nil,
-                                                         status: 1,
-                                                         stockQuantity: nil,
-                                                         printer: printer          // ✅
-                                                     )
-                                                     addToBasket(
-                                                         item: item,
-                                                         quantity: 1,
-                                                         subtitle: text,
-                                                         unitPrice: price
-                                                     )
+                                // ✅ Route by station id:
+                                // s1 = Kitchen, s2 = Bar, s3 = Bakery/Vitrine
+                                let stationId: String = {
+                                    if messageTargetIsKitchen { return "s1" }
+                                    if messageTargetIsBakery  { return "s3" }
+                                    return "s2"
+                                }()
 
-                                                     messageTargetIsKitchen = false
-                                                     messageTargetIsBakery  = false
-                                                 }
-                                                 .presentationDetents([.height(280)])
-                                                 .presentationDragIndicator(.hidden)
-                                             }
+                                let item = ShellMenuItem(
+                                    id: Int.random(in: -9000 ... -8000),
+                                    name: name,
+                                    price: price,
+                                    category: "✏️ הערות",      // ✅ keep consistent with your notes category
+                                    modifiers: nil,
+                                    imageURL: nil,
+                                    description: nil,
+                                    status: 1,
+                                    stockQuantity: nil,
+
+                                    // ✅ IMPORTANT: send to the right printer(s)
+                                    printer: stationId,         // primary station
+                                    printers: [stationId]       // explicit list (PrinterIds)
+                                )
+
+                                addToBasket(
+                                    item: item,
+                                    quantity: 1,
+                                    subtitle: text,
+                                    unitPrice: price
+                                )
+
+                                messageTargetIsKitchen = false
+                                messageTargetIsBakery  = false
+                            }
+                            .presentationDetents([.height(280)])
+                            .presentationDragIndicator(.hidden)
+                        }
                         Divider()
                         
                         if !isPhone {
@@ -4138,6 +4682,10 @@ struct CashPointView: View {
             }
             
             .onAppear {
+                let sid = UserDefaults.standard.string(forKey: "shopId") ?? "12"
+                   if let cfg = loadSavedPrinters(shopId: sid) {
+                       print("🎯 TEST prefix =", cfg.netPrefix ?? "nil")
+                   }
                 updatePendingBacklog()
                 OrderOutbox.shared.drainNow()
                 isPayLaterMode = false
@@ -4150,6 +4698,51 @@ struct CashPointView: View {
                 } else {
                     // Already have items (e.g. returning to view) – just try a network refresh
                     api.load(skipCache: true)
+                }
+            }
+            .onChange(of: focusedStockProductId) { newVal in
+                if newVal == nil && !isStockEditMode {
+                    editingStockProductId = nil
+                }
+            }
+            .onChange(of: isStockEditMode) { nowOn in
+                Task { @MainActor in
+                    print("🟡 isStockEditMode changed -> \(nowOn) dirty=\(dirtyStockIds.sorted())")
+
+                    if nowOn {
+                        // ✅ freeze current visual order using the SAME rule as normal mode (ACTIVE FIRST)
+
+                        let base: [ShellMenuItem] = {
+                            let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !q.isEmpty {
+                                let qq = q.folding(options: .diacriticInsensitive, locale: .current).lowercased()
+                                return api.items.filter {
+                                    $0.name.folding(options: .diacriticInsensitive, locale: .current)
+                                        .lowercased()
+                                        .contains(qq)
+                                }
+                            }
+
+                            guard !selectedCategory.isEmpty else { return [] }
+                            if selectedCategory == "✏️ הערות" { return filteredItems }
+                            return api.items.filter { $0.category == selectedCategory }
+                        }()
+
+                        @MainActor func sortKeyActiveFirst(_ item: ShellMenuItem) -> (Int, Int, String) {
+                            let activeRank = stockToggles.isOn(item.id) ? 0 : 1   // ✅ active first
+                            let idx = api.items.firstIndex(where: { $0.id == item.id }) ?? Int.max
+                            return (activeRank, idx, item.name)
+                        }
+
+                        frozenOrderIds = base
+                            .sorted { sortKeyActiveFirst($0) < sortKeyActiveFirst($1) }
+                            .map(\.id)
+
+                    } else {
+                        // ✅ exit stock mode -> commit + clear freeze
+                        await flushDirtyStockAndExit()
+                        frozenOrderIds = []
+                    }
                 }
             }
             .onChange(of: basket.count) { _ in
@@ -4255,6 +4848,10 @@ struct CashPointView: View {
                 })
                 .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
             }
+            .fullScreenCover(isPresented: $showBonbon) {
+                SwipeUpCardCarousel()
+                .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
+            }
             .fullScreenCover(isPresented: $showOrdersAdmin) {
                 OrdersHostView(
                     mode: adminMode,
@@ -4340,7 +4937,7 @@ struct CashPointView: View {
                 // ✅ Don't reload while editing stock OR while we still have pending stock changes
                 if isStockEditMode { return }
                 if !dirtyStockIds.isEmpty { return }          // your debounced list
-                if stockCommitWorkItem != nil { return }      // commit scheduled/running
+                if stockCommitInFlight { return }
                 if !stockToggles.pending.isEmpty { return }   // status toggle sync in-flight
 
                 if !showOrderFlow && basket.isEmpty {
@@ -4349,6 +4946,7 @@ struct CashPointView: View {
             }
             .onChange(of: isPayLaterMode) { print("isPayLaterMode =", $0) }
             .fullScreenCover(isPresented: $showOrderFlow) {
+                let safeNameForPrint: String = resolvedCustomerNameForPrint()
                 OrderFlowView(
                     onSendToKitchen: {
                         // 🔥 1. PRINT ONLY ONCE PER ORDER
@@ -4387,7 +4985,7 @@ struct CashPointView: View {
                                 entries: entriesArray,
                                 total: totalForPrint,
                                 diningMode: diningMode,
-                                customerName: safeName,
+                                customerName: safeNameForPrint,
                                 customerPhone: posSavedPhone
                             )
 
@@ -4449,7 +5047,7 @@ struct CashPointView: View {
                     total: finalTotal,
                     isRtl: isRtl,
                     diningMode: $diningMode,
-                    requiresPhoneStep: requiresPhoneStep,
+                    requiresPhoneStep: basketRequiresPhone,
 
                     onCancel: {
                         showOrderFlow = false
@@ -4522,6 +5120,7 @@ struct CashPointView: View {
                 AdminProductEditorView(
                     draft: draft,
                     mode: draft.productId == nil ? .create : .edit,
+                    categories: categories.filter { $0 != "✏️ הערות" },
                     onSave: { updatedDraft in
                         applyAdminSave(updatedDraft)
                     },
@@ -4571,6 +5170,7 @@ struct CashPointView: View {
             
             // 🔁 Every time JSON is parsed, refresh stock & status maps
             .onChange(of: api.version) { _ in
+                guard dirtyStockIds.isEmpty else { return }
                 guard !isStockEditMode else { return }
                 loadCategoryOrderFromStorageOrMenu()
                 let items = api.items
@@ -4713,9 +5313,9 @@ struct CashPointView: View {
                         } label: {
                             Text(isRtl ? "זכה באשראי" : "Refund")
                                 .font(.system(size: 18, weight: .bold))
-                                .foregroundColor(.white)
+                                .foregroundColor(amountInt > 0 ? .black : .white)
                                 .frame(width: padWidth, height: 50)
-                                .background(amountInt > 0 ? Color.black : Color.gray.opacity(0.4))
+                                .background(amountInt > 0 ? Color.white : Color.gray.opacity(0.4))
                                 .clipShape(RoundedRectangle(cornerRadius: 18))
                         }
                         .disabled(amountInt <= 0)
@@ -5063,12 +5663,6 @@ struct CashPointView: View {
     }
     
     private func productSortKey(_ item: ShellMenuItem) -> (Int, Int, String) {
-        // ✅ While editing stock: do NOT sort by active/inactive (prevents jumping)
-        if isStockEditMode {
-            return (0, stableIndex(item), item.name)
-        }
-
-        // Normal mode: active first
         let isActive = stockToggles.isOn(item.id)
         let activeRank = isActive ? 0 : 1
         return (activeRank, stableIndex(item), item.name)
@@ -5212,13 +5806,7 @@ struct CashPointView: View {
                     // ✅ Always fetch from server so it restores across devices
                     TeamTabsAPI.fetchOrderMetadata(orderId: oid) { res in
                         DispatchQueue.main.async {
-                            switch res {
-                            case .success(let meta):
-                                restoreOrderFromMetadata(meta)   // ✅ fills basket + lockedLineIds
-                            case .failure(let err):
-                                // If order exists but has no metadata yet, keep empty
-                                print("⚠️ fetchOrderMetadata failed:", err.localizedDescription)
-                            }
+                          
                         }
                     }
 
@@ -5356,60 +5944,154 @@ struct CashPointView: View {
 
         @Environment(\.dismiss) private var dismiss
 
-        private var offlineCount: Int {
-            monitor.rows.filter { !$0.isReachable }.count
+        // ✅ NEW: open printer setup
+        @State private var showPrinterSetup = false
+
+        // ✅ NEW: owner PIN gate
+        @State private var showOwnerPin = false
+        @State private var unlocked = false
+
+        private var ownerPin: String {
+            UserDefaults.standard.string(forKey: "owner.pin") ?? "1234"
         }
 
-        private var isOnPrinterNetwork: Bool {
-            monitor.isNetworkUp
-        }
+        @ObservedObject private var printerStore = PrintersConfigStore.shared
 
-        private var allOnline: Bool {
-            !monitor.rows.isEmpty && offlineCount == 0
-        }
+        private var offlineCount: Int { monitor.rows.filter { !$0.isReachable }.count }
+        private var isOnPrinterNetwork: Bool { monitor.isNetworkUp }
+        private var allOnline: Bool { !monitor.rows.isEmpty && offlineCount == 0 }
 
         private var statusTitle: String {
-            // ✅ If we don’t even have network, show “neutral” copy
-            guard isOnPrinterNetwork else {
-                return "לא מחובר לרשת המדפסות"
-            }
-
-            // On network: show real health
+            guard isOnPrinterNetwork else { return "לא מחובר לרשת המדפסות" }
             if allOnline { return "כל המדפסות מחוברות" }
             return "חסרה מדפסת (\(offlineCount))"
         }
 
         private var iconName: String {
-            // ✅ Not on network → neutral printer icon
             guard isOnPrinterNetwork else { return "printer" }
-
-            // On network → show filled when everything ok, otherwise still show printer (not slash)
             return allOnline ? "printer.fill" : "printer"
         }
 
         private var iconColor: Color {
-            // ✅ Not on network → gray
             guard isOnPrinterNetwork else { return .secondary }
-
-            // On network: good = primary, problem = primary (with badge later if you want)
-            return allOnline ? .primary : .primary
+            return .primary
         }
 
         private var canTestPrint: Bool {
-            // ✅ Only allow test print if we are on the printer network
-            // and at least one printer is reachable
             isOnPrinterNetwork && monitor.rows.contains(where: { $0.isReachable })
         }
 
+        private var configuredPrefixText: String {
+            let p = printerStore.config.netPrefix.trimmingCharacters(in: .whitespacesAndNewlines)
+            return p.isEmpty ? "—" : p
+        }
+
+        private var detectedLanIP: String? {
+            // If you have monitor.currentIP, put it here.
+            // return monitor.currentIP
+            return nil
+        }
+
+        private func openSetup() {
+            showPrinterSetup = true
+        }
+
         var body: some View {
-            ZStack {
-                Color(.systemBackground).ignoresSafeArea()
+            NavigationStack {
+                ZStack {
+                    Color(.systemBackground).ignoresSafeArea()
 
-                VStack(spacing: 12) {
+                    VStack(spacing: 12) {
 
-                    // top bar
-                    HStack {
-                        if isRtl { Spacer() }
+                        // header row
+                        HStack(spacing: 10) {
+                            Image(systemName: iconName)
+                                .font(.system(size: 18, weight: .bold))
+                                .foregroundColor(iconColor)
+
+                            Text(statusTitle)
+                                .font(.system(size: 18, weight: .bold))
+
+                            Spacer()
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.top, 8)
+
+                        // config summary
+                        VStack(spacing: 8) {
+                            HStack {
+                                Text("רשת")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundColor(.secondary)
+                                Spacer()
+                                Text(configuredPrefixText)
+                                    .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                            }
+
+                            HStack {
+                                Text("מדפסות")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundColor(.secondary)
+                                Spacer()
+                                let activeCount = printerStore.config.stations.filter { $0.status != 0 }.count
+                                Text(activeCount == 0 ? "לא מוגדר" : "\(activeCount)")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(Color(.secondarySystemBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .padding(.horizontal, 16)
+
+                        // list
+                        VStack(spacing: 8) {
+                            ForEach(monitor.rows) { row in
+                                HStack {
+                                    Text(row.printer.name)
+                                        .font(.system(size: 16, weight: .semibold))
+
+                                    Spacer()
+
+                                    Text(!isOnPrinterNetwork ? "—" : (row.isReachable ? "Online" : "Offline"))
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .foregroundColor(!isOnPrinterNetwork ? .secondary : (row.isReachable ? .primary : .secondary))
+                                }
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 10)
+                                .background(Color(.secondarySystemBackground))
+                                .clipShape(RoundedRectangle(cornerRadius: 12))
+                            }
+                        }
+                        .padding(.horizontal, 16)
+
+                        // test print (kept as the only bottom button)
+                        Button {
+                            onTestPrint()
+                            Haptics.light()
+                        } label: {
+                            Text("הדפס בדיקה")
+                                .font(.system(size: 18, weight: .bold))
+                                .foregroundColor(.white)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 50)
+                                .background(canTestPrint ? Color.black : Color.gray.opacity(0.35))
+                                .clipShape(RoundedRectangle(cornerRadius: 14))
+                        }
+                        .disabled(!canTestPrint)
+                        .padding(.horizontal, 16)
+                        .padding(.top, 6)
+
+                        Spacer(minLength: 8)
+                    }
+                }
+                .navigationTitle("מדפסות")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    // Close button (left in LTR, right in RTL)
+                    ToolbarItem(placement: .cancellationAction) {
                         Button { dismiss() } label: {
                             Image(systemName: "xmark")
                                 .font(.system(size: 16, weight: .bold))
@@ -5417,71 +6099,40 @@ struct CashPointView: View {
                                 .background(Color(.systemGray5))
                                 .clipShape(Circle())
                         }
-                        .buttonStyle(.plain)
-                        if !isRtl { Spacer() }
                     }
-                    .padding(.top, 10)
-                    .padding(.horizontal, 14)
 
-                    // header row
-                    HStack(spacing: 10) {
-                        Image(systemName: iconName)
-                            .font(.system(size: 18, weight: .bold))
-                            .foregroundColor(iconColor)
-
-                        Text(statusTitle)
-                            .font(.system(size: 18, weight: .bold))
-
-                        Spacer()
-                    }
-                    .padding(.horizontal, 16)
-
-                    // list
-                    VStack(spacing: 8) {
-                        ForEach(monitor.rows) { row in
-                            HStack {
-                                Text(row.printer.name)
-                                    .font(.system(size: 16, weight: .semibold))
-
-                                Spacer()
-
-                                Text(!isOnPrinterNetwork ? "—" : (row.isReachable ? "Online" : "Offline"))
-                                    .font(.system(size: 14, weight: .semibold))
-                                    .foregroundColor(!isOnPrinterNetwork ? .secondary : (row.isReachable ? .primary : .secondary))
-                            }
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 10)
-                            .background(Color(.secondarySystemBackground))
-                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                    // ✅ Edit link in nav bar
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button {
+                            openSetup()
+                            Haptics.light()
+                        } label: {
+                            Text(isRtl ? "עריכה" : "Edit")
+                                .font(.system(size: 16, weight: .bold))
                         }
                     }
-                    .padding(.horizontal, 16)
-
-                    // test print
-                    Button {
-                        onTestPrint()
-                        Haptics.light()
-                    } label: {
-                        Text("הדפס בדיקה")
-                            .font(.system(size: 18, weight: .bold))
-                            .foregroundColor(.white)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 50)
-                            .background(canTestPrint ? Color.black : Color.gray.opacity(0.35))
-                            .clipShape(RoundedRectangle(cornerRadius: 14))
+                }
+                .onAppear {
+                    Task { await monitor.checkNow() }
+                }
+                .sheet(isPresented: $showOwnerPin) {
+                    OwnerPinGateSheet(title: "Owner PIN", correctPin: ownerPin) {
+                        unlocked = true
+                        showPrinterSetup = true
                     }
-                    .disabled(!canTestPrint)
-                    .padding(.horizontal, 16)
-                    .padding(.top, 6)
-
-                    Spacer(minLength: 0)
+                    .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
+                }
+                .sheet(isPresented: $showPrinterSetup) {
+                    PrinterSetupSheet(
+                        isRtl: isRtl,
+                        detectedLANIP: detectedLanIP,
+                        onClose: { showPrinterSetup = false }
+                    )
+                    .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
                 }
             }
-            .onAppear {
-                Task { await monitor.checkNow() }
-            }
+            .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
         }
-    
     }
     
      struct SwipeToSendOrderView: View {
@@ -5698,6 +6349,9 @@ struct CashPointView: View {
         @FocusState private var messageFocused: Bool
         @FocusState private var priceFocused: Bool
 
+        // ✅ NEW: sign toggle (because decimalPad has no minus on iPad)
+        @State private var isNegative: Bool = false
+
         private var title: String {
             if targetIsKitchen {
                 return isRtl ? "הערה למטבח" : "Message to kitchen"
@@ -5708,30 +6362,41 @@ struct CashPointView: View {
             }
         }
 
-        // Text is OPTIONAL now – only price must be numeric
-        private var parsedPrice: Double? {
+        // ✅ Parse absolute numeric value from priceText (digits only)
+        private var parsedAbsPrice: Double? {
             let raw = priceText
                 .replacingOccurrences(of: ",", with: ".")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
 
-            // allow empty -> treat as 0 by default
-            if raw.isEmpty { return 0 }
-
-            guard let d = Double(raw), d >= 0 else { return nil }
-            return d
+            if raw.isEmpty { return 0 }   // default 0
+            guard let d = Double(raw) else { return nil }
+            return abs(d)
         }
 
-        private var canSubmit: Bool {
-            parsedPrice != nil          // 👈 text no longer required
+        // ✅ Final signed price uses the toggle (works on iPad numeric keyboard)
+        private var parsedPrice: Double? {
+            guard let v = parsedAbsPrice else { return nil }
+            return isNegative ? -v : v
         }
+
+        private var canSubmit: Bool { parsedPrice != nil }
 
         private var hasText: Bool {
             !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
 
+        // ✅ show minus sign next to the field (visual feedback)
+        private var signedPreview: String {
+            let v = (parsedAbsPrice ?? 0)
+            // keep it simple (you can format decimals if you want)
+            let num = String(format: "%.2f", v)
+            return (isNegative ? "-" : "") + num
+        }
+
         var body: some View {
             NavigationStack {
                 VStack(spacing: 16) {
+
                     // TEXT FIELD + CLEAR BUTTON
                     ZStack(alignment: .topTrailing) {
                         TextField(isRtl ? "טקסט הערה" : "Message text",
@@ -5745,9 +6410,7 @@ struct CashPointView: View {
                             .focused($messageFocused)
 
                         if hasText {
-                            Button {
-                                text = ""
-                            } label: {
+                            Button { text = "" } label: {
                                 Image(systemName: "xmark.circle.fill")
                                     .font(.system(size: 16, weight: .semibold))
                                     .foregroundColor(.secondary)
@@ -5757,26 +6420,62 @@ struct CashPointView: View {
                         }
                     }
 
-                    // PRICE FIELD
-                    TextField(isRtl ? "סכום" : "Amount", text: $priceText)
+                    // ✅ PRICE ROW: +/- toggle + decimalPad (no minus key needed)
+                    HStack(spacing: 10) {
+
+                        Button {
+                            isNegative.toggle()
+                            Haptics.light()
+                        } label: {
+                            Text(isNegative ? "−" : "+")
+                                .font(.system(size: 20, weight: .heavy))
+                                .foregroundColor(.primary)
+                                .frame(width: 44, height: 44)
+                                .background(Color(.systemGray5))
+                                .clipShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+
+                        TextField(isRtl ? "סכום" : "Amount", text: Binding(
+                            get: { priceText },
+                            set: { newValue in
+                                // ✅ keep only digits + one dot (optional)
+                                // allows fast paste / typing while staying numeric-safe
+                                var s = newValue
+                                    .replacingOccurrences(of: ",", with: ".")
+                                    .trimmingCharacters(in: .whitespacesAndNewlines)
+
+                                // remove leading "-"
+                                if s.hasPrefix("-") { s.removeFirst() }
+
+                                // keep only digits and "."
+                                s = s.filter { $0.isNumber || $0 == "." }
+
+                                // allow only one "."
+                                if let firstDot = s.firstIndex(of: ".") {
+                                    let after = s.index(after: firstDot)
+                                    let rest = s[after...].replacingOccurrences(of: ".", with: "")
+                                    s = String(s[..<after]) + rest
+                                }
+
+                                priceText = s
+                            }
+                        ))
                         .keyboardType(.decimalPad)
                         .padding(10)
                         .background(Color(.secondarySystemBackground))
                         .cornerRadius(10)
                         .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
                         .focused($priceFocused)
-                        .onChange(of: priceFocused) { focused in
-                            if focused {
-                                DispatchQueue.main.async {
-                                    UIApplication.shared.sendAction(
-                                        #selector(UIResponder.selectAll(_:)),
-                                        to: nil,
-                                        from: nil,
-                                        for: nil
-                                    )
-                                }
-                            }
-                        }
+                        // ✅ DO NOT auto-select-all or auto-focus (prevents annoying popup focus)
+                        // .onChange(of: priceFocused) { ... }  // removed
+
+                        // ✅ tiny live preview (optional but nice)
+                        Text(signedPreview)
+                            .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .frame(width: 88, alignment: .trailing)
+                    }
 
                     // SAVE BUTTON – text can be empty
                     Button {
@@ -5803,9 +6502,7 @@ struct CashPointView: View {
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
-                        Button {
-                            dismiss()
-                        } label: {
+                        Button { dismiss() } label: {
                             Image(systemName: "xmark")
                                 .font(.system(size: 16, weight: .bold))
                                 .padding(8)
@@ -5819,7 +6516,14 @@ struct CashPointView: View {
                     if priceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         priceText = "0"
                     }
-                    messageFocused = true
+
+                    // ✅ prevent auto-focus on appear
+                    messageFocused = false
+                    priceFocused = false
+                    DispatchQueue.main.async {
+                        messageFocused = false
+                        priceFocused = false
+                    }
                 }
             }
             .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
@@ -5865,13 +6569,23 @@ struct CashPointView: View {
                                 // ⬅️ BACK / CLEAR BUTTON
                                 Button {
                                     onBack()
-                                } label: {
-                                    Image(systemName: "chevron.backward")
-                                        .font(.system(size: 18, weight: .bold))
-                                        .foregroundColor(.black)
-                                        .frame(width: 44, height: 44)
-                                        .background(Color.white)
-                                        .clipShape(Circle())
+                                }label: {
+                                    HStack(spacing: 8) {
+
+                                        Image(systemName: "chevron.backward")
+                                            .font(.system(size: 18, weight: .bold))
+
+                                        Text(isRtl ? "חזרה לקופה" : "Back to till")
+                                            .font(.system(size: 15, weight: .semibold))
+                                            .lineLimit(1)
+                                    }
+                                    .foregroundColor(.white)
+                                    .padding(.horizontal, 14)
+                                    .frame(height: 44)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                            .fill(Color.black.opacity(0.9))
+                                    )
                                 }
                                 .buttonStyle(.plain)
 
@@ -5961,6 +6675,7 @@ struct CashPointView: View {
         if let entry = basket[id] {
             let newQty = entry.quantity - 1
             if newQty <= 0 {
+                if pricePulseLineId == id { pricePulseLineId = nil }
                 basket[id] = nil
                 if expandedBasketLineId == id {
                     expandedBasketLineId = nil
@@ -6151,12 +6866,22 @@ struct CashPointView: View {
         /// Date shown on screen + printed on receipt
         private var printDate: Date { restoreDate }
 
+        private var businessDayForPrint: Date {
+            // If the API returned a business date, it wins (both X and Z)
+            if let bd = model.businessDate { return bd }
+
+            // Restore Z fallback (if API didn’t return bd for some reason)
+            if type == .z && restoreMode { return restoreDate }
+
+            // Normal mode fallback (only if API didn’t return bd)
+            return Date()
+        }
         private func handlePrint() {
             guard let d = model.data else { return } // ✅ must have data
             PrinterManager.shared.printSalesReport(
                 d,
                 type: type,
-                reportDate: printDate,
+                reportDate: businessDayForPrint,
                 isRestore: (type == .z && restoreMode),
                 generatedAt: Date()
             )
@@ -6505,10 +7230,10 @@ struct CashPointView: View {
                 Button(action: handlePrint) {
                     Text("הדפס")
                         .font(.system(size: 18, weight: .bold))
-                        .foregroundColor(.white)
+                        .foregroundColor(.black)
                         .frame(maxWidth: .infinity)
                         .frame(height: 52)
-                        .background(.black)
+                        .background(.white)
                         .clipShape(RoundedRectangle(cornerRadius: 16))
                         .opacity(canPrint ? 1 : 0.5)
                 }
@@ -6520,10 +7245,10 @@ struct CashPointView: View {
                     Button(action: handlePrint) {
                         Text("הדפס")
                             .font(.system(size: 18, weight: .bold))
-                            .foregroundColor(.white)
+                            .foregroundColor(.black)
                             .frame(maxWidth: .infinity)
                             .frame(height: 52)
-                            .background(.black)
+                            .background(.white)
                             .clipShape(RoundedRectangle(cornerRadius: 16))
                             .opacity(canPrint ? 1 : 0.5)
                     }
@@ -6640,10 +7365,16 @@ struct CashPointView: View {
             .font(.system(size: 17, weight: .medium))   // ⬅️ Bigger
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
-            .background(isSelected
-                        ?.black
-                        : Color(.systemGray5))
-            .foregroundColor(isSelected ? .white : .primary)
+            .background(
+                isSelected
+                    ? (colorScheme == .dark ? .white : .black)
+                    : Color(.systemGray5)
+            )
+            .foregroundColor(
+                isSelected
+                    ? (colorScheme == .dark ? .black : .white)
+                    : .primary
+            )
             .clipShape(Capsule())
             .onTapGesture {
                 var map = optionSelections[entry.id] ?? [:]
@@ -6664,8 +7395,16 @@ struct CashPointView: View {
             .font(.system(size: 17, weight: .medium))
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
-            .background(isSelected ? Color.black : Color(.systemGray5))
-            .foregroundColor(isSelected ? .white : .primary)
+            .background(
+                isSelected
+                    ? (colorScheme == .dark ? .white : .black)
+                    : Color(.systemGray5)
+            )
+            .foregroundColor(
+                isSelected
+                    ? (colorScheme == .dark ? .black : .white)
+                    : .primary
+            )
             .clipShape(Capsule())
             .onTapGesture {
                 var set = additionSelections[entry.id] ?? []
@@ -6707,13 +7446,20 @@ struct CashPointView: View {
             VStack(alignment: .leading, spacing: 6) {
                 // MAIN ROW
                 HStack(spacing: 8) {
-                    VStack(alignment: .leading, spacing: 4) {
+                    VStack(alignment: .leading, spacing: 6) {
                         Text(entry.item.name)
                             .font(.system(size: 20, weight: .medium))
                             .strikethrough(isLocked, color: .secondary)
+                        
+                        Text(String(format: "\(currency)%.0f", lineTotal))
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundColor(.secondary)
+                            .scaleEffect(pricePulseLineId == entry.id ? pricePulseScale : 1.0)
+
 
                         if let s = entry.subtitle, !s.isEmpty, !isExpanded {
-                            Text(cleanModifierSubtitle(s) ?? s)
+                            Text("• " + (cleanModifierSubtitle(s) ?? s))
+                                .padding(.leading, 6)
                                 .font(.system(size: 13))
                                 .foregroundColor(.secondary)
                                 .lineLimit(1)
@@ -6723,29 +7469,29 @@ struct CashPointView: View {
                     Spacer()
 
                     // ✅ RIGHT SIDE: line total + qty controls
-                    HStack(spacing: 10) {
-                        Text(String(format: "\(currency)%.0f", lineTotal))
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundColor(.secondary)
-                            .frame(minWidth: 86, alignment: isRtl ? .leading : .trailing)
-
-                        HStack(spacing: 8) {
-                            if !isLocked {
-                                Button { decrementEntry(entry.id) } label: {
-                                    Image(systemName: "minus.circle.fill")
-                                        .font(.system(size: 22))
-                                }
+                    HStack(spacing: 8) {
+                        if !isLocked {
+                            Button {
+                                decrementEntry(entry.id)
+                                pulsePrice(for: entry.id)
+                            } label: {
+                                Image(systemName: "minus.circle.fill")
+                                    .font(.system(size: 22))
                             }
+                        }
 
-                            Text("\(entry.quantity)")
-                                .font(.system(size: 17, weight: .semibold))
-                                .frame(minWidth: 26)
+                        Text("\(entry.quantity)")
+                            .font(.system(size: 17, weight: .semibold))
+                            .frame(minWidth: 26)
+                            .frame(minWidth: 26)
 
-                            if !isLocked {
-                                Button { incrementEntry(entry.id) } label: {
-                                    Image(systemName: "plus.circle.fill")
-                                        .font(.system(size: 22))
-                                }
+                        if !isLocked {
+                            Button {
+                                incrementEntry(entry.id)
+                                pulsePrice(for: entry.id)
+                            } label: {
+                                Image(systemName: "plus.circle.fill")
+                                    .font(.system(size: 22))
                             }
                         }
                     }
@@ -6822,8 +7568,16 @@ struct CashPointView: View {
                                                         .font(.system(size: 17, weight: .medium))
                                                         .padding(.horizontal, 16)
                                                         .padding(.vertical, 8)
-                                                        .background(isSelected ? Color.black : Color(.systemGray5))
-                                                        .foregroundColor(isSelected ? .white : .primary)
+                                                        .background(
+                                                            isSelected
+                                                                ? (colorScheme == .dark ? .white : .black)
+                                                                : Color(.systemGray5)
+                                                        )
+                                                        .foregroundColor(
+                                                            isSelected
+                                                                ? (colorScheme == .dark ? .black : .white)
+                                                                : .primary
+                                                        )
                                                         .clipShape(Capsule())
                                                         .onTapGesture {
                                                             // ✅ Default behaves like "None": selects ONLY itself (clears others)
@@ -6857,8 +7611,16 @@ struct CashPointView: View {
                                                                 .font(.system(size: 17, weight: .medium))
                                                                 .padding(.horizontal, 16)
                                                                 .padding(.vertical, 8)
-                                                                .background(isSelected ? Color.black : Color(.systemGray5))
-                                                                .foregroundColor(isSelected ? .white : .primary)
+                                                                .background(
+                                                                    isSelected
+                                                                        ? (colorScheme == .dark ? .white : .black)
+                                                                        : Color(.systemGray5)
+                                                                )
+                                                                .foregroundColor(
+                                                                    isSelected
+                                                                        ? (colorScheme == .dark ? .black : .white)
+                                                                        : .primary
+                                                                )
                                                                 .clipShape(Capsule())
                                                                 .onTapGesture {
                                                                     var set = additionSelections[entry.id] ?? []
@@ -6943,7 +7705,7 @@ struct CashPointView: View {
                     RoundedRectangle(cornerRadius: 12).fill(sentBg)
                 )
                 .opacity(sentOpacity)
-                .saturation(isLocked ? 0 : 1)
+                .saturation(isLocked ? 0.45 : 1.0)
 
             Rectangle()
                 .fill(Color.black.opacity(0.06))
@@ -7014,7 +7776,7 @@ struct CashPointView: View {
                 }
 
                 additionSelections[entry.id] = set
-                updateEntryPricingAndSubtitle(lineId: entry.id)
+                updateEntryPricingAndSubtitle(lineId: entry.id)   // 👈 THIS fires even when no modifiers
             }
         }
     }
@@ -7219,7 +7981,10 @@ struct CashProductTile: View {
                 RoundedRectangle(cornerRadius: 16)
                     .fill(Color(.systemBackground))
             )
-            .shadow(color: .black.opacity(0.04), radius: 2, y: 2)
+            .overlay(
+                RoundedRectangle(cornerRadius: 16)
+                    .stroke(Color.black.opacity(0.05), lineWidth: 1)
+            )
             .opacity(isOutOfStock ? 0.4 : 1.0)
 
             // 🔴 OUT OF STOCK BADGE
@@ -7769,7 +8534,7 @@ final class StockToggleStore: ObservableObject {
             get: { self.isOn(productId) },
             set: { newVal in
                 let old = self.isOn(productId)
-
+                guard newVal != old else { return }
                 self.state[productId] = newVal
                 UserDefaults.standard.set(newVal, forKey: self.prefix + String(productId))
 
@@ -7793,24 +8558,42 @@ final class StockToggleStore: ObservableObject {
     }
 
     private func syncStatus(productId: Int, enabled: Bool) async -> Bool {
-        guard let url = URL(string: "\(API_BASE)/api/products/\(productId)/status") else { return false }
-        var req = URLRequest(url: url)
+        let base = UserDefaults.standard.string(forKey: "apiBase") ?? "https://minis.studio"
+        guard let url = URL(string: "\(base)/api/products/\(productId)/status") else { return false }
+
+        let requestId = UUID().uuidString
+
+        var req = URLRequest(url: url, timeoutInterval: 15)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+        req.setValue(requestId, forHTTPHeaderField: "X-Request-Id")
 
         struct Payload: Encodable { let miniAppId: Int; let enabled: Bool }
+        req.httpBody = try? JSONEncoder().encode(Payload(miniAppId: shopId, enabled: enabled))
 
-        do {
-            req.httpBody = try JSONEncoder().encode(Payload(miniAppId: shopId, enabled: enabled))
-            let (_, resp) = try await URLSession.shared.data(for: req)
-            guard let http = resp as? HTTPURLResponse,
-                  (200..<300).contains(http.statusCode) else {
+        print("📤 setStatus reqId=\(requestId) product=\(productId) enabled=\(enabled) shopId=\(shopId)")
+        print(req.curlDebug)
+
+        let delays: [UInt64] = [0, 400_000_000, 900_000_000]
+
+        for attempt in 0..<delays.count {
+            if delays[attempt] > 0 { try? await Task.sleep(nanoseconds: delays[attempt]) }
+            do {
+                let (data, resp) = try await URLSession.shared.data(for: req)
+                let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
+                let text = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
+                print("📥 setStatus resp reqId=\(requestId) attempt=\(attempt+1) HTTP \(code) body=\(String(text.prefix(300)))")
+                if (200..<300).contains(code) { return true }
+                if [502, 503, 504].contains(code), attempt < delays.count - 1 { continue }
+                return false
+            } catch {
+                print("❌ setStatus network reqId=\(requestId) attempt=\(attempt+1) err=\(error.localizedDescription)")
+                if attempt < delays.count - 1 { continue }
                 return false
             }
-            return true
-        } catch {
-            return false
         }
+        return false
     }
 }
 
@@ -7822,8 +8605,7 @@ private extension View {
     }
 }
 
-import SwiftUI
-import WebKit
+
 
 // MARK: - CashPoint Hosted Card (ZCredit) Result Types
 
@@ -8074,8 +8856,6 @@ struct CashPointZCreditHostedWebView: UIViewRepresentable {
 }
 
 
-import SwiftUI
-import WebKit
 
 // MARK: - CashPoint Result Types (rename to avoid collisions)
 

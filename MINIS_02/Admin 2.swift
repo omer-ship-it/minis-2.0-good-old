@@ -1,3 +1,4 @@
+/*
 import SwiftUI
 import Kingfisher
 
@@ -13,7 +14,7 @@ struct AdminProductDraft: Identifiable {
     var description: String
     var imageURL: String
     var modifierGroups: [AdminModifierGroupDraft]
-    var legacyPrinter: String = "Bar"   // Bar / Kitchen / Bakery
+
     // ✅ PRIMARY (single route)
     var printerId: String
 
@@ -312,24 +313,10 @@ struct AdminProductEditorView: View {
     }
 
     private func syncLegacySegmentFromCurrentSelection() {
-
-        // ✅ 1) Prefer the legacy value coming from DB
-        let raw = draft.legacyPrinter.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        
-        // ✅ 2) Fallback: if legacy is missing, infer from printerId (s1/s2/s3 or labels)
-        let pid = draft.printerId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-
-        if pid == "s1" { legacyStation = .kitchen; return }
-        if pid == "s2" { legacyStation = .bar;     return }
-        if pid == "s3" { legacyStation = .bakery;  return }
-
-        // If printerId is not sX, try station label (your existing logic)
         guard let st = activeStations.first(where: { $0.id == draft.printerId }) else {
             legacyStation = .bar
             return
         }
-
         let l = st.label.lowercased()
         if l.contains("kitchen") || st.label.contains("מטבח") {
             legacyStation = .kitchen
@@ -519,6 +506,8 @@ struct AdminProductEditorView: View {
                     .textFieldStyle(.roundedBorder)
                     .lineLimit(3, reservesSpace: true)
             }
+            
+            
 
             // EXTRA: PHONE REQUIRED
             VStack(alignment: .leading, spacing: 6) {
@@ -542,7 +531,7 @@ struct AdminProductEditorView: View {
                         .foregroundColor(.secondary)
                         .padding(.vertical, 6)
                 } else {
-                  
+                    
                     // ✅ OLD (KEEP): segmented quick route
                     VStack(alignment: .leading, spacing: 6) {
                         Text(isRtl ? "בחירה מהירה" : "Quick route")
@@ -557,13 +546,19 @@ struct AdminProductEditorView: View {
                         .pickerStyle(.segmented)
                         .tint(.primary)
                         .onChange(of: legacyStation) { newValue in
-                            draft.legacyPrinter = newValue.rawValue   // ✅ ONLY legacy DB field
+                            guard let sid = stationId(for: newValue) else {
+                                Haptics.error()
+                                return
+                            }
+                            // segment = force single selection while testing
+                            draft.printerId = sid
+                            draft.printerIds = [sid]
                             Haptics.light()
                         }
                     }
                     .padding(.bottom, 6)
-                  
-
+                     
+/*
                     // ✅ NEW: multi-select checkboxes
                     VStack(alignment: .leading, spacing: 6) {
                         Text(isRtl ? "הדפס גם ל…" : "Also print to…")
@@ -623,6 +618,7 @@ struct AdminProductEditorView: View {
                             .foregroundColor(.secondary)
                             .padding(.top, 2)
                     }
+ */
                 }
             }
         }
@@ -762,10 +758,10 @@ struct AdminProductEditorView: View {
                 Text(mode == .create ? (isRtl ? "הוסף מוצר" : "Create")
                                      : (isRtl ? "שמור שינויים" : "Save"))
                     .font(.primariesDemi(17))
-                    .foregroundColor(.black)
+                    .foregroundColor(.white)
                     .frame(maxWidth: .infinity)
                     .frame(height: 52)
-                    .background(.white)
+                    .background(.black)
                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
         }
@@ -1265,7 +1261,7 @@ extension AdminProductDraft {
         var dict = baseJsonData
 
         // ✅ old world (string printer name)
-        dict["Printer"] = .init(legacyPrinter)   // ✅ picker wins
+        dict["Printer"] = .init(legacy)
 
         // ✅ new world (station id(s))
         dict["PrinterId"]  = .init(stationForLegacy)
@@ -1275,3 +1271,4 @@ extension AdminProductDraft {
     }
 }
 
+*/

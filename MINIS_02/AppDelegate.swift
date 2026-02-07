@@ -18,14 +18,15 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 
     private let lastReadyOrderKey    = "lastReadyOrderId"
     private let isLastOrderReadyKey  = "isLastOrderReady"
-    private let apnsTokenKey         = "apnsDeviceToken"
-
+  
     // ✅ New: stash universal links for SwiftUI to drain
     private let pendingUniversalLinkKey = "pendingUniversalLink"
 
     // ✅ New: student payload stored for Full App (and App Clip if shared)
     private let pendingStudentDiscountKey = "pendingStudentDiscount"
 
+    
+  
     // MARK: - App launch
     func application(
         _ application: UIApplication,
@@ -36,9 +37,11 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 
         let center = UNUserNotificationCenter.current()
         center.delegate = self
-        application.registerForRemoteNotifications()
 
-        // If app opened due to remote notification
+        // ✅ Ask permission FIRST (fresh install gets prompt here)
+       
+
+        // ✅ Keep your launchOptions push handling as-is
         if let remote = launchOptions?[.remoteNotification] as? [AnyHashable: Any] {
             print("🚀 Launched from remote notification:", remote)
             storeOrderIdIfPresent(remote)
@@ -48,11 +51,15 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
             print("ℹ️ No remote notification in launchOptions")
         }
 
-        if let savedToken = UserDefaults.standard.string(forKey: apnsTokenKey) {
-            print("🔎 Saved APNs token (from last launch):", savedToken)
+        // ✅ Print token from canonical store (may be empty on first launch)
+        let saved = loadApnsToken()
+        if saved.isEmpty {
+            print("⚠️ No saved APNs token yet")
+        } else {
+            print("🔎 Saved APNs token (from last launch):", saved)
         }
 
-        // ✅ Cold-launch support: if we already saved a universal link (from prior run)
+        // ✅ Universal link cold launch support (unchanged)
         if let s = UserDefaults.standard.string(forKey: pendingUniversalLinkKey),
            let url = URL(string: s) {
             handleUniversalLink(url)
@@ -154,6 +161,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         print("✅ Saved pendingStudentDiscount:", payload)
     }
 
+   
     // MARK: - APNs token registration
     func application(
         _ application: UIApplication,
@@ -170,10 +178,16 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 
         print("📬 APNs token (hex): \(tokenString)")
 
-        UserDefaults.standard.set(tokenString, forKey: apnsTokenKey)
+        UserDefaults.standard.set(tokenString, forKey: DeviceKeys.apnsToken)
+
+        if let suite = UserDefaults(suiteName: "group.minis") {
+            suite.set(tokenString, forKey: DeviceKeys.apnsToken)
+            suite.synchronize()
+        }
+
         UserDefaults.standard.synchronize()
     }
-
+   
     func application(
         _ application: UIApplication,
         didFailToRegisterForRemoteNotificationsWithError error: Error

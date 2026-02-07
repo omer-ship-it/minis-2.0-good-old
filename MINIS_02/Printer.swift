@@ -31,12 +31,57 @@ final class PrinterReachabilityMonitor: ObservableObject {
 
     private var checkTask: Task<Void, Never>? = nil
 
-    init(printers: [Printer]) {
-        self.printers = printers
+    init(printers: [Printer] = []) {
+        if printers.isEmpty {
+            self.printers = Self.loadSavedPrintersAsTargets()
+        } else {
+            self.printers = printers
+        }
         startPathMonitor()
         startPolling()
     }
+    private struct SavedPrintersPayload: Decodable {
+        let netPrefix: String?
+        let stations: [SavedStation]?
+        struct SavedStation: Decodable {
+            let id: String
+            let label: String
+            let octet: Int
+            let set: String?
+            let status: Int?
+        }
+    }
 
+    private static func resolveShopKeyId() -> String? {
+        let d = UserDefaults.standard
+        if let s = d.string(forKey: "shopId"), !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return s.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let mini = d.integer(forKey: "miniAppId")
+        if mini > 0 { return String(mini) }
+        return nil
+    }
+
+    private static func loadSavedPrintersAsTargets() -> [Printer] {
+        guard let sid = resolveShopKeyId() else { return [] }
+        let key = "printers.config.shop\(sid)"
+        guard let data = UserDefaults.standard.data(forKey: key) else { return [] }
+
+        guard let decoded = try? JSONDecoder().decode(SavedPrintersPayload.self, from: data) else { return [] }
+        let prefix = (decoded.netPrefix ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prefix.isEmpty else { return [] }
+
+        let stations = (decoded.stations ?? [])
+            .filter { ($0.status ?? 1) != 0 }
+
+        return stations.map {
+            Printer(
+                name: $0.label,
+                host: prefix + String($0.octet),
+                port: 9100
+            )
+        }
+    }
     deinit {
         pathMonitor.cancel()
         checkTask?.cancel()
