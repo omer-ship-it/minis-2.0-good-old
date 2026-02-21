@@ -11,6 +11,16 @@ import UIKit
 
 // MARK: - Pending order draft (for launch recovery banner)
 
+enum ExperienceMode: String, CaseIterable, Codable {
+    case casual
+    case fineDining
+    case waiter
+}
+
+enum ExperienceModeKeys {
+    static let mode = "experience.mode.v1"   // "casual" | "fineDining" | "waiter"
+}
+
 enum PendingOrderDraftKeys {
     static let draft = "menu.pendingOrderDraft.v1"
 }
@@ -42,6 +52,11 @@ enum PickupLocation: String, CaseIterable, Identifiable {
         }
     }
 }
+
+enum WaiterOrderKeys {
+    static let tableId = "waiter.tableId"
+    static let covers  = "waiter.covers"
+}
 enum CheckoutRecoveryKeys {
     static let pendingCheckoutKey = "checkout.pendingKey.v1"   // idempotency key
     static let pendingMiniAppId   = "checkout.pendingMiniId.v1"
@@ -51,13 +66,75 @@ enum ILHours {
 
     /// Open 08:00–16:59 Jerusalem time (closed at 17:00)
     static func isOpenNowIL(_ now: Date = Date()) -> Bool {
+        return true
         var cal = Calendar(identifier: .gregorian)
         cal.timeZone = tz
         let hour = cal.component(.hour, from: now)
-        return hour >= 4 && hour < 17
+        return hour >= 4 && hour <= 24
     }
 }
 
+private struct HeaderHeroPromoView: View {
+    let promo: HeaderPromo
+    let itemsById: [Int: ShellMenuItem]
+    let isRtl: Bool
+    let onOpenProduct: (ShellMenuItem) -> Void
+
+    var body: some View {
+        VStack(spacing: 6) {
+
+            Text(promo.title)
+                .font(.menuRegular(30).weight(.heavy))
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+
+            if let s = promo.subtitle, !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text(s)
+                    .font(.menuRegular(17).weight(.semibold))
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+            }
+
+            let linked = promo.productIds.compactMap { itemsById[$0] }
+
+            if !linked.isEmpty {
+                HStack(spacing: 10) {
+                    ForEach(linked.prefix(3)) { item in
+                        Button {
+                            onOpenProduct(item)
+                        } label: {
+                            Text(item.name)
+                                .font(.menuRegular(14).weight(.semibold))
+                                .foregroundColor(.primary)
+                                .lineLimit(1)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(Color(.systemGray5))
+                                .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.top, 6)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 15)
+        .padding(.bottom, 12)
+    }
+}
+
+struct HeaderPromo: Identifiable, Codable, Equatable {
+    let id: String
+    let title: String
+    let subtitle: String?
+    let productIds: [Int]          // maps to ShellMenuItem.id
+    let imageURL: String?          // optional (future)
+    let priority: Int              // higher = shown first
+    let startsAt: Date?            // optional
+    let endsAt: Date?              // optional
+}
 extension UIColor {
     convenience init(hex: String) {
         var hex = hex.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -340,7 +417,41 @@ struct ServiceSegment: View {
     }
 }
 
+// MARK: - Global idle (file scope)
 
+private enum GlobalIdleKeys {
+    static let lastTouch = "global.idle.lastTouch"
+}
+
+private func markGlobalInteraction() {
+    UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: GlobalIdleKeys.lastTouch)
+}
+
+private func lastGlobalInteractionDate() -> Date {
+    let t = UserDefaults.standard.double(forKey: GlobalIdleKeys.lastTouch)
+    return (t > 0) ? Date(timeIntervalSince1970: t) : Date()
+}
+
+private struct GlobalInteractionCatcher: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .contentShape(Rectangle())
+            .simultaneousGesture(
+                TapGesture().onEnded { markGlobalInteraction() }
+            )
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 1).onChanged { _ in
+                    markGlobalInteraction()
+                }
+            )
+    }
+}
+
+private extension View {
+    func trackGlobalInteraction() -> some View {
+        self.modifier(GlobalInteractionCatcher())
+    }
+}
 private func parseSelectionSubtitle(_ subtitle: String?) -> (options: [String:String], additions: Set<String>) {
     guard let subtitle, !subtitle.isEmpty else { return ([:], []) }
 
@@ -418,6 +529,7 @@ struct menuView: View {
     @State private var nextBasketLineId = 1
     @State private var showBasketSheet = false
     @State private var showConfirmation = false
+    @AppStorage("assistance.requested") private var assistanceRequested: Bool = false
     @AppStorage(AppSettings.Key.cashPointMode) private var cashPointMode: Bool = AppSettings.Defaults.cashPointMode
     @AppStorage("miniAppId") private var miniAppId: Int = 0    // 👈 Use this instead of shopId
     @State private var lastOrder: OrderSnapshot?
@@ -455,13 +567,305 @@ struct menuView: View {
     @State private var showNightScreen: Bool = false
     @State private var scrollToTopToken: Int = 0
     @StateObject private var scrollVM = MenuScrollCoordinator()
-    // MARK: - Idle reset (customer mode only)
-    @State private var lastInteractionAt: Date = Date()
+    
+   
     @State private var showIdleSheet: Bool = false
-    @State private var idleCountdown: Int = 5
+    @State private var idleCountdown: Int = 8
+    // MARK: - Idle overlay (iPad only)
+    @State private var showIdleOverlay: Bool = false
+    @State private var idleOverlayCountdown: Int = 8
+    private let idleOverlayTick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+    // MARK: - Idle reset (customer mode only)
+
+    // ✅ put these near the top of menuView
+    @AppStorage(ExperienceModeKeys.mode) private var experienceModeRaw: String = ExperienceMode.casual.rawValue
+    private var experienceMode: ExperienceMode { ExperienceMode(rawValue: experienceModeRaw) ?? .casual }
+    private var isWaiterMode: Bool { experienceMode == .casual }
+    @State private var headerPromos: [HeaderPromo] = []
+    
+ 
+    private var itemsById: [Int: ShellMenuItem] {
+        Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
+    }
+    
+    private func registerInteraction() {
+        // single source of truth for "someone touched the screen"
+        markGlobalInteraction()
+
+        // hide overlays/sheets
+        if showIdleOverlay {
+            showIdleOverlay = false
+            idleOverlayCountdown = idleCountdownStart
+        }
+
+        if showIdleSheet {
+            showIdleSheet = false
+            idleCountdown = idleCountdownStart
+        }
+    }
+    
+    private struct IdleOverlayView: View {
+        let miniAppId: Int
+        let countdown: Int
+        let onTap: () -> Void
+
+        private let totalSeconds: Double = 8
+        private var progress: Double {
+            max(0, min(1, Double(countdown) / totalSeconds))
+        }
+
+        var body: some View {
+            ZStack {
+                Color.black.ignoresSafeArea()
+
+                VStack(spacing: 28) {
+                    Spacer()
+
+                    VStack(spacing: 12) {
+                        Text("עדיין כאן?")
+                            .font(.menuRegular(44).weight(.heavy))
+                            .foregroundColor(.white)
+                            .multilineTextAlignment(.center)
+
+                        Text("גע במסך כדי להמשיך")
+                            .font(.menuRegular(20).weight(.semibold))
+                            .foregroundColor(.white.opacity(0.85))
+                            .multilineTextAlignment(.center)
+                    }
+
+                    ZStack {
+                        Circle()
+                            .stroke(Color.white.opacity(0.18), lineWidth: 10)
+                            .frame(width: 160, height: 160)
+
+                        Circle()
+                            .trim(from: 0, to: progress)
+                            .stroke(Color.white, style: StrokeStyle(lineWidth: 10, lineCap: .round))
+                            .frame(width: 160, height: 160)
+                            .rotationEffect(.degrees(-90))
+                            .animation(.linear(duration: 1.0), value: progress)
+
+                        Text("\(countdown)")
+                            .font(.menuRegular(52).weight(.heavy))
+                            .foregroundColor(.white)
+                            .contentTransition(.numericText())
+                    }
+
+                    Spacer()
+                }
+                .padding(.horizontal, 40)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture { onTap() }
+        }
+    }
+
+    private var activeHeroPromo: HeaderPromo? {
+        let now = Date()
+
+        let visible = headerPromos.filter { p in
+            let okStart = (p.startsAt == nil) || (p.startsAt! <= now)
+            let okEnd   = (p.endsAt == nil) || (p.endsAt! >= now)
+            return okStart && okEnd
+        }
+        .sorted { $0.priority > $1.priority }
+
+        return visible.first
+    }
+
+    private var waiterTableId: Int {
+        let v = UserDefaults.standard.integer(forKey: "waiter.tableId")
+        return v > 0 ? v : 0
+    }
+    
+    private var activeTableId: Int {
+        // waiter mode uses waiter.tableId
+        if isWaiterMode {
+            let t = UserDefaults.standard.integer(forKey: WaiterOrderKeys.tableId)
+            return t > 0 ? t : 0
+        }
+        // fallback if you ever use "table.id"
+        let t = UserDefaults.standard.integer(forKey: "table.id")
+        return t > 0 ? t : 0
+    }
+    
+    private struct TableLogDisclosure: View {
+        let tableId: Int
+        @Environment(\.isRtl) private var isRtl
+
+        @State private var isExpanded: Bool = false
+        @State private var events: [TableEvent] = []
+
+        var body: some View {
+            // ✅ only show if we have real events to show
+            if !filteredEvents.isEmpty {
+
+                VStack(spacing: 10) {
+
+                    // Optional: one-line alert if there is an active service request
+                    if hasActiveServiceRequest {
+                        HStack(spacing: 10) {
+                            Image(systemName: "hand.raised.fill")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundColor(.primary)
+
+                            Text(isRtl ? "בקשת שירות פעילה" : "Service request active")
+                                .font(.menuRegular(14).weight(.semibold))
+                                .foregroundColor(.primary)
+
+                            Spacer()
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .background(.ultraThinMaterial)
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
+
+                    DisclosureGroup(
+                        isExpanded: $isExpanded,
+                        content: {
+                            VStack(spacing: 10) {
+                                ForEach(filteredEvents.sorted(by: { $0.at > $1.at })) { ev in
+                                    logRow(ev)
+                                }
+                            }
+                            .padding(.top, 8)
+                        },
+                        label: {
+                            HStack(spacing: 10) {
+                                Text(isRtl ? "יומן" : "Log")
+                                    .font(.menuRegular(16).weight(.semibold))
+                                    .foregroundColor(.primary)
+
+                                Spacer()
+
+                                Text("\(filteredEvents.count)")
+                                    .font(.menuRegular(13).weight(.semibold))
+                                    .foregroundColor(.secondary)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                    )
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
+                    .background(Color(.secondarySystemBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
+                .onAppear {
+                    events = TableEventStore.load(tableId: tableId)
+                }
+                .onReceive(NotificationCenter.default.publisher(for: Notification.Name("table.events.changed"))) { _ in
+                    events = TableEventStore.load(tableId: tableId)
+                }
+
+                 
+            }
+        }
+
+        // ✅ show only “opened” + “assistance requested”
+        private var filteredEvents: [TableEvent] {
+            events.filter { ev in
+                ev.type == .opened || ev.type == .assistanceRequested
+            }
+        }
+
+        private var hasActiveServiceRequest: Bool {
+            
+            // “active” if there exists an assistanceRequested event
+            // (later: you can mark acknowledged and hide it)
+            filteredEvents.contains(where: { $0.type == .assistanceRequested })
+        }
+
+        private func logRow(_ ev: TableEvent) -> some View {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: iconFor(ev.type))
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundColor(.secondary)
+                    .frame(width: 18)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(titleFor(ev.type))
+                        .font(.menuRegular(14).weight(.semibold))
+                        .foregroundColor(.primary)
+
+                    if let note = ev.note, !note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text(note)
+                            .font(.menuRegular(13))
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                Spacer()
+
+                Text(timeString(ev.at))
+                    .font(.menuRegular(13).weight(.semibold))
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(Color.black.opacity(0.03))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+
+        private func iconFor(_ t: TableEventType) -> String {
+            switch t {
+            case .opened:              return "person.2.fill"
+            case .assistanceRequested: return "hand.raised.fill"
+            default:                   return "circle"
+            }
+        }
+
+        private func titleFor(_ t: TableEventType) -> String {
+            if isRtl {
+                switch t {
+                case .opened:              return "נפתח שולחן"
+                case .assistanceRequested: return "בקשת שירות"
+                default:                   return ""
+                }
+            } else {
+                switch t {
+                case .opened:              return "Table opened"
+                case .assistanceRequested: return "Service requested"
+                default:                   return ""
+                }
+            }
+        }
+
+        private func timeString(_ d: Date) -> String {
+            let f = DateFormatter()
+            f.dateFormat = "HH:mm"
+            return f.string(from: d)
+        }
+    }
+    
+    private var waiterCovers: Int {
+        let v = UserDefaults.standard.integer(forKey: "waiter.covers")
+        return v > 0 ? v : 0
+    }
+    // ✅ tableId must be set elsewhere when the table is chosen
+    @AppStorage("table.id") private var tableId: Int = 0
+
+    @State private var serviceRequests: [ServiceRequest] = ServiceRequests.load()
+  
+    private var covers: Int {
+        let v = UserDefaults.standard.integer(forKey: WaiterOrderKeys.covers)
+        return v > 0 ? v : 0
+    }
+
+    private var isTableContext: Bool {
+        tableId > 0
+    }
+
+    private var effectiveTableIdForService: Int {
+        (tableId > 0) ? tableId : -1   // -1 = unknown table
+    }
+
+    private var assistanceActiveForThisTable: Bool {
+        ServiceRequests.isActive(tableId: effectiveTableIdForService)
+    }
 
     private let idleTimeout: TimeInterval = 30
-    private let idleCountdownStart: Int = 5
+    private let idleCountdownStart: Int = 8
     private let basketBarH: CGFloat = 76
     @State private var studentClaim: StudentClaim? = nil
     private let appGroupId = "group.minis"
@@ -491,6 +895,15 @@ struct menuView: View {
         
         print("🧨 nuked pending checkout state")
     }
+    
+    
+  
+    // Fine dining assistant sheet
+    @State private var showAssistanceSheet: Bool = false
+    @State private var showAssistanceToast: Bool = false
+    private var isFineDining: Bool { experienceMode == .fineDining }
+  
+    private var isCasual: Bool { experienceMode == .casual }
     
    
     private func loadPendingOrderDraft() -> PendingOrderDraft? {
@@ -730,6 +1143,7 @@ struct menuView: View {
     }
     private func presentNightIfPossible() {
         guard pendingNight else { return }
+        guard !isPad else { return }
 
         // ✅ Only present when nothing else is being presented
         if anyOtherModalPresented {
@@ -822,12 +1236,7 @@ struct menuView: View {
         studentClaim = claim
     }
     
-    private func registerInteraction() {
-        lastInteractionAt = Date()
-        if showIdleSheet {
-            showIdleSheet = false
-        }
-    }
+    
 
     private func startNewOrderFromIdle() {
         // ✅ clear persisted customer details
@@ -850,7 +1259,7 @@ struct menuView: View {
 
         // reset idle state
         showIdleSheet = false
-        lastInteractionAt = Date()
+        markGlobalInteraction()
     }
     private var hasMemberProfile: Bool {
         UserDefaults.standard.dictionary(forKey: MembersKeys.profile) != nil
@@ -1224,6 +1633,59 @@ struct menuView: View {
         memberStamps >= 10
     }
 
+    enum WaiterOrderKeys {
+        static let tableId = "waiter.tableId"
+        static let covers  = "waiter.covers"
+    }
+
+    private enum TableEventType: String, Codable {
+        case opened
+        case customerAdded
+        case assistanceRequested
+        case assistanceAcknowledged
+        case fired
+        case paid
+        case cleared
+    }
+
+    private struct TableEvent: Identifiable, Codable, Equatable {
+        let id: UUID
+        let type: TableEventType
+        let at: Date
+        let note: String?
+
+        init(type: TableEventType, at: Date = Date(), note: String? = nil) {
+            self.id = UUID()
+            self.type = type
+            self.at = at
+            self.note = note
+        }
+    }
+
+    private enum TableEventStore {
+        static func key(tableId: Int) -> String { "table.events.\(tableId).v1" }
+
+        static func load(tableId: Int) -> [TableEvent] {
+            guard tableId > 0 else { return [] }
+            guard let data = UserDefaults.standard.data(forKey: key(tableId: tableId)) else { return [] }
+            return (try? JSONDecoder().decode([TableEvent].self, from: data)) ?? []
+        }
+
+        static func save(tableId: Int, events: [TableEvent]) {
+            guard tableId > 0 else { return }
+            guard let data = try? JSONEncoder().encode(events) else { return }
+            UserDefaults.standard.set(data, forKey: key(tableId: tableId))
+        }
+
+        static func append(tableId: Int, _ ev: TableEvent) {
+            var cur = load(tableId: tableId)
+            cur.append(ev)
+            // keep last 50
+            if cur.count > 50 { cur = Array(cur.suffix(50)) }
+            save(tableId: tableId, events: cur)
+        }
+    }
+    
     private enum MembersKeys {
         static let didPrompt = "members.didPrompt"
         static let profile   = "memberProfileLocal"
@@ -1441,6 +1903,32 @@ if miniAppId == 12  || miniAppId == 13 {
     .buttonStyle(.plain)
 }
 #endif
+                                            
+                                            if (isFineDining  || isWaiterMode) && 1==2{
+                                                Button {
+                                                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                                    let tid = activeTableId
+                                                    if tid > 0 {
+                                                        TableEventStore.append(tableId: tid, TableEvent(type: .assistanceRequested, note: nil))
+                                                    }
+                                                    // If no table assigned, you can decide what to do.
+                                                    // For now: just open the sheet, but request will only store if tableId > 0.
+                                                    if assistanceActiveForThisTable {
+                                                        ServiceRequests.clear(tableId: effectiveTableIdForService)
+                                                        serviceRequests = ServiceRequests.load() // refresh immediately
+                                                    } else {
+                                                        showAssistanceSheet = true
+                                                    }
+                                                } label: {
+                                                    Image(systemName: assistanceActiveForThisTable ? "hand.raised.fill" : "hand.raised")
+                                                        .font(.system(size: 22, weight: .semibold))
+                                                        .foregroundColor(.primary)
+                                                        .animation(.easeInOut(duration: 0.2), value: assistanceActiveForThisTable)
+                                                }
+                                                .buttonStyle(.plain)
+                                            }
+                                            
+                                            
                                             // 🔗 SHARE
                                             Button {
                                                 showShareSheet = true
@@ -1453,50 +1941,83 @@ if miniAppId == 12  || miniAppId == 13 {
                                     .padding(.horizontal, 16)
                                     .padding(.top, 8)
 
+                                    
                                     VStack(spacing: 3) {
 
-                                        // TITLE
-                                        Text(
-                                            miniAppId == 13
-                                            ? "vitamin"
-                                            : (isRtl ? "תפריט בוקר" : "Beigel Bake · Brick Ln")
-                                        )
-                                        .padding(.top, 15)
-                                        .font(
-                                            miniAppId == 13
-                                            ? .system(size: 35, weight: .heavy)
-                                            : .menuRegular(28)
-                                        )
-                                        .contentShape(Rectangle()) // whole area tappable
-                                        .onLongPressGesture(minimumDuration: 1.2) {
-                                            guard isAdmin else { return }
-                                            UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
-                                            cashPointMode = true
-                                        }
+                                        if isWaiterMode, waiterTableId > 0 {
 
-                                        // SUBTITLE
-                                        Text(
-                                            miniAppId == 13
-                                            ? "בריא · מהיר · טבעי"
-                                            : (isRtl
-                                                ? "הזמינו מהטלפון ונעדכן כשמוכן"
-                                                : "Delivered in around 20 minutes")
-                                        )
-                                        .font(.menuRegular(isRtl ? 15 : 18))
-                                        .foregroundColor(
-                                            Color(UIColor { trait in
-                                                trait.userInterfaceStyle == .dark
-                                                    ? UIColor(Color.primary)
-                                                    : UIColor.secondaryLabel
-                                            })
-                                        )
+                                            // ✅ WAITER MODE TITLE
+                                            Text(isRtl ? "שולחן \(waiterTableId)" : "Table \(waiterTableId)")
+                                                .padding(.top, 15)
+                                                .font(.menuRegular(28).weight(.semibold))
+
+                                            // ✅ WAITER MODE SUBTITLE (covers)
+                                            if waiterCovers > 0 {
+                                                Text(isRtl ? "\(waiterCovers) סועדים" : "\(waiterCovers) guests")
+                                                    .font(.menuRegular(isRtl ? 15 : 18))
+                                                    .foregroundColor(
+                                                        Color(UIColor { trait in
+                                                            trait.userInterfaceStyle == .dark
+                                                                ? UIColor(Color.primary)
+                                                                : UIColor.secondaryLabel
+                                                        })
+                                                    )
+                                            }
+
+                                        } else {
+
+                                            // TITLE (original)
+                                            Text(
+                                                miniAppId == 13
+                                                ? "vitamin"
+                                                : (isRtl ? "תפריט בוקר" : "Beigel Bake · Brick Ln")
+                                            )
+                                            .padding(.top, 15)
+                                            .font(
+                                                miniAppId == 13
+                                                ? .system(size: 35, weight: .heavy)
+                                                : .menuRegular(28)
+                                            )
+                                            .contentShape(Rectangle()) // whole area tappable
+                                            .onLongPressGesture(minimumDuration: 1.2) {
+                                                guard isAdmin else { return }
+                                                UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
+                                                cashPointMode = true
+                                            }
+
+                                            // SUBTITLE (original)
+                                            Text(
+                                                miniAppId == 13
+                                                ? "בריא · מהיר · טבעי"
+                                                : (isRtl
+                                                    ? "הזמינו מהטלפון ונעדכן כשמוכן"
+                                                    : "Delivered in around 20 minutes")
+                                            )
+                                            .font(.menuRegular(isRtl ? 15 : 18))
+                                            .foregroundColor(
+                                                Color(UIColor { trait in
+                                                    trait.userInterfaceStyle == .dark
+                                                        ? UIColor(Color.primary)
+                                                        : UIColor.secondaryLabel
+                                                })
+                                            )
+                                        }
                                     }
                                     .frame(maxWidth: .infinity)
                                     .padding(.bottom, 12)
                                 }
                                 .padding(.bottom, 8)
+                                
+                                if isWaiterMode {
+                                    let tid = UserDefaults.standard.integer(forKey: WaiterOrderKeys.tableId)
+                                    if tid > 0 {
+                                        TableLogDisclosure(tableId: tid)
+                                            .padding(.horizontal, 16)
+                                            .padding(.bottom, 12)
+                                    }
+                                }
 
-                                if miniAppId == 13 {
+                                if miniAppId == 13  {
                                     LocationSegment(location: Binding(
                                         get: { pickupLocation },
                                         set: { pickupLocation = $0 }
@@ -1534,7 +2055,7 @@ if miniAppId == 12  || miniAppId == 13 {
                                         .padding(.bottom, 10)
                                 }
                                 
-                                if !myItems.isEmpty {
+                                if !myItems.isEmpty && !isWaiterMode {
                                     MyItemsStrip(items: myItems, isRtl: isRtl) { productId in
                                         if let item = items.first(where: { $0.id == productId }) {
                                             selectedBasketLineId = nil
@@ -1692,9 +2213,20 @@ if miniAppId == 12  || miniAppId == 13 {
                 .hidden()
                 .navigationTitle("")
                 .navigationBarHidden(true)
+                
+                if isPad && showIdleOverlay {
+                    IdleOverlayView(miniAppId: miniAppId, countdown: idleOverlayCountdown) {
+                        showIdleOverlay = false
+                        idleOverlayCountdown = idleCountdownStart
+                        markGlobalInteraction()
+                    }
+                    .zIndex(9998)
+                    .transition(.opacity)
+                }
             }
         }
-        
+        .trackGlobalInteraction()
+
         .foregroundColor(MenuTheme.textColor)
         .onChange(of: api.isOpen) { _ in
             if !shouldShowNight {
@@ -1791,6 +2323,47 @@ if miniAppId == 12  || miniAppId == 13 {
     .presentationDragIndicator(.visible)
 }
 #endif
+.sheet(isPresented: $showAssistanceSheet) {
+    AssistanceRequestSheet(
+        isRtl: isRtl,
+        onRequest: {
+            let tid = (tableId > 0) ? tableId : -1   // -1 = unknown table
+            ServiceRequests.upsert(tableId: tid, type: .assistance)
+            print("🛎️ assistance request tableId =", tableId)
+            ServiceRequests.upsert(tableId: tableId, type: .assistance)
+            serviceRequests = ServiceRequests.load()
+            // ✅ FORCE local UI refresh immediately (don’t rely on notification timing)
+            DispatchQueue.main.async {
+                self.serviceRequests = ServiceRequests.load()
+            }
+
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            showAssistanceSheet = false
+            showAssistanceToast = true
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                withAnimation(.easeOut(duration: 0.25)) {
+                    showAssistanceToast = false
+                }
+            }
+        }
+    )
+    .presentationDetents([.height(260)])
+    .presentationDragIndicator(.hidden)
+}
+.overlay(alignment: .top) {
+    if showAssistanceToast {
+        Text(isRtl ? "✓ הבקשה נשלחה" : "✓ Assistance requested")
+            .font(.menuRegular(15).weight(.semibold))
+            .foregroundColor(.primary)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(.ultraThinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .padding(.top, 10)
+            .transition(.opacity)
+    }
+}
 .fullScreenCover(isPresented: $showNightScreen) {
     NightClosedView(
         shopName: (miniAppId == 13 ? "vitamin" : (isRtl ? "בית העם" : "Beigel Bake"))
@@ -1807,8 +2380,22 @@ if miniAppId == 12  || miniAppId == 13 {
             print("🎓 studentClaimArrived received in menuView", note.name.rawValue)
             loadPendingStudentClaimIfAny()
         }
+        .onReceive(NotificationCenter.default.publisher(for: ServiceRequestKeys.changed)) { _ in
+            serviceRequests = ServiceRequests.load()
+        }
         .onAppear {
-          
+            
+            let tid = activeTableId
+            if isWaiterMode, tid > 0 {
+                // If no events yet, seed a real "opened" event from existing covers
+                let existing = TableEventStore.load(tableId: tid)
+                if existing.isEmpty {
+                    let c = UserDefaults.standard.integer(forKey: WaiterOrderKeys.covers)
+                    let note = c > 0 ? "\(c) סועדים" : nil
+                    TableEventStore.append(tableId: tid, TableEvent(type: .opened, note: note))
+                }
+            }
+            serviceRequests = ServiceRequests.load()
             runLaunchCheckoutRecoveryIfNeeded()
            
             pendingNight = shouldShowNight
@@ -1905,33 +2492,63 @@ if miniAppId == 12  || miniAppId == 13 {
         // ✅ any tap/drag anywhere counts as interaction (without breaking scroll)
         .contentShape(Rectangle())
         .simultaneousGesture(
-            DragGesture(minimumDistance: 12)
-                .onEnded { _ in
-                    guard !cashPointMode else { return }
-                    registerInteraction()
-                }
+            TapGesture().onEnded {
+                guard isPad else { return }
+                guard !cashPointMode else { return }
+                registerInteraction()
+            }
         )
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 12).onEnded { _ in
+                guard isPad else { return }
+                guard !cashPointMode else { return }
+                registerInteraction()
+            }
+        )
+        .onReceive(idleOverlayTick) { _ in
+            guard isPad else { return }
+            guard !cashPointMode else { return }
+
+            let idleFor = Date().timeIntervalSince(lastGlobalInteractionDate())
+
+            if !showIdleOverlay {
+                if idleFor >= idleTimeout {
+                    showIdleOverlay = true
+                    idleOverlayCountdown = idleCountdownStart
+                }
+                return
+            }
+
+            if idleOverlayCountdown > 0 {
+                idleOverlayCountdown -= 1
+            } else {
+                showIdleOverlay = false
+                idleOverlayCountdown = idleCountdownStart
+                startNewOrderFromIdle()
+                markGlobalInteraction() // reset baseline after reset
+            }
+        }
         .onChange(of: showWelcome) { isShown in
            
-                lastInteractionAt = Date()
+            markGlobalInteraction()
             
         }
         .onChange(of: showBasketSheet, perform: { open in
             if open {
                 showIdleSheet = false
                 idleCountdown = idleCountdownStart
-                lastInteractionAt = Date()
+                markGlobalInteraction()
             } else {
-                lastInteractionAt = Date()
+                markGlobalInteraction()
             }
         })
         .onChange(of: showOrderFlow, perform: { open in
             if open {
                 showIdleSheet = false
                 idleCountdown = idleCountdownStart
-                lastInteractionAt = Date()
+                markGlobalInteraction()
             } else {
-                lastInteractionAt = Date()
+                markGlobalInteraction()
             }
         })
         .onReceive(idleClock) { _ in
@@ -1943,13 +2560,14 @@ if miniAppId == 12  || miniAppId == 13 {
             guard selectedItem == nil else { return }     // optional
             guard !showIdleSheet else { return }
 
-            let idle = Date().timeIntervalSince(lastInteractionAt)
+            let idle = Date().timeIntervalSince(lastGlobalInteractionDate())
             if idle >= idleTimeout {
                 idleCountdown = idleCountdownStart
-                showIdleSheet = true
+                     //showIdleSheet = true
             }
         }
-        .sheet(isPresented: $showIdleSheet) {
+        .sheet(isPresented
+               : $showIdleSheet) {
             IdleResetSheet(
                 countdown: $idleCountdown,
                 onKeep: {
@@ -2256,7 +2874,7 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
                 selectedBasketLineId = nil
                 selectedItem = nil
             }
-           
+            .trackGlobalInteraction()
             .presentationCornerRadius(20)
             .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
             .environment(\.locale, Locale(identifier: "he_IL"))
@@ -2386,6 +3004,7 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
                     showBasketSheet = false
                 }
             )
+            .trackGlobalInteraction()
             
             .preferredColorScheme(forceDark ? .dark : nil)
             .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
@@ -3145,6 +3764,67 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
         }
     }
     
+    private struct AssistanceRequestSheet: View {
+        let isRtl: Bool
+        let onRequest: () -> Void
+        @Environment(\.dismiss) private var dismiss
+
+        var body: some View {
+            ZStack {
+                Color(.systemBackground).ignoresSafeArea()
+
+                VStack(spacing: 14) {
+                    HStack {
+                        Spacer()
+                        Button {
+                            dismiss()
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundColor(.primary)
+                                .frame(width: 34, height: 34)
+                                .background(.ultraThinMaterial)
+                                .clipShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    Image(systemName: "hand.raised.fill")
+                        .font(.system(size: 36, weight: .bold))
+                        .foregroundColor(.primary)
+
+                    Text(isRtl ? "בקשת שירות" : "Request assistance")
+                        .font(.menuRegular(22).weight(.semibold))
+
+                    Text(isRtl
+                         ? "המלצר ייגש אליכם בקרוב"
+                         : "We’ll notify the staff and someone will come by shortly.")
+                        .font(.menuRegular(15))
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 18)
+
+                    Button {
+                        onRequest()
+                    } label: {
+                        Text(isRtl ? "שלח בקשה" : "Request")
+                            .font(.menuRegular(17).weight(.semibold))
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 52)
+                            .background(MenuTheme.buttonBackground)
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 6)
+
+                    Spacer(minLength: 0)
+                }
+                .padding(18)
+            }
+        }
+    }
+    
     private struct ToastBanner: View {
         let text: String
         var body: some View {
@@ -3156,6 +3836,64 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
                 .background(.ultraThinMaterial)
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .shadow(radius: 10, y: 6)
+        }
+    }
+    
+    // MARK: - Local Service Requests (table-based, local only)
+
+    enum ServiceRequestType: String, Codable {
+        case assistance
+    }
+
+    struct ServiceRequest: Codable, Identifiable, Equatable {
+        // stable id so "one request per table"
+        var id: String { "table:\(tableId)" }
+
+        let tableId: Int
+        let type: ServiceRequestType
+        let createdAt: Date
+    }
+
+    enum ServiceRequestKeys {
+        static let storage = "service.requests.v1"      // JSON array
+        static let changed = Notification.Name("service.requests.changed")
+    }
+
+    enum ServiceRequests {
+
+        static func load() -> [ServiceRequest] {
+            guard let data = UserDefaults.standard.data(forKey: ServiceRequestKeys.storage),
+                  let arr = try? JSONDecoder().decode([ServiceRequest].self, from: data)
+            else { return [] }
+            return arr
+        }
+
+        static func save(_ arr: [ServiceRequest]) {
+            if let data = try? JSONEncoder().encode(arr) {
+                UserDefaults.standard.set(data, forKey: ServiceRequestKeys.storage)
+            }
+            NotificationCenter.default.post(name: ServiceRequestKeys.changed, object: nil)
+        }
+
+        static func upsert(tableId: Int, type: ServiceRequestType) {
+            var arr = load()
+
+            // remove any existing request for this table
+            arr.removeAll { $0.tableId == tableId }
+
+            // add fresh
+            arr.append(ServiceRequest(tableId: tableId, type: type, createdAt: Date()))
+            save(arr)
+        }
+
+        static func clear(tableId: Int) {
+            var arr = load()
+            arr.removeAll { $0.tableId == tableId }
+            save(arr)
+        }
+
+        static func isActive(tableId: Int) -> Bool {
+            load().contains { $0.tableId == tableId }
         }
     }
 
@@ -3718,7 +4456,9 @@ struct ProductSheet: View {
     let onAdd: (ShellMenuItem, Int, String?, Double, [String:String], Set<String>) -> Void
 
     private var isPad: Bool { UIDevice.current.userInterfaceIdiom == .pad }
-
+    // MARK: - Idle overlay (iPad only)
+    
+   
     @State private var quantity: Int
     @State private var heroFrozenImage: KFCrossPlatformImage? = nil
     @State private var selectedOptions: [String: String] = [:]
@@ -3744,6 +4484,9 @@ struct ProductSheet: View {
             value = max(value, nextValue())
         }
     }
+
+  
+    
 
     private func norm(_ s: String) -> String {
         s.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3949,7 +4692,7 @@ struct ProductSheet: View {
                             }
                             .padding(12)
                             .zIndex(10)
-                            .opacity(isPad ? 0 : 1)
+                            .opacity(isPad ? 1 : 1)
                             .allowsHitTesting(!isPad)
                         }
                         .frame(width: w, height: heroH)
@@ -4700,7 +5443,7 @@ struct BasketSheet: View {
 
                     print("🎟️ BasketSheet discount:", activeDiscount as Any)
 
-                    UserDefaults.standard.set(false, forKey: "debugSkipApplePay")
+                    UserDefaults.standard.set(true, forKey: "debugSkipApplePay")
 
                     // ✅ always derive diningMode from the shared intent
                     syncDiningModeFromIntent()
@@ -6932,7 +7675,7 @@ struct CategoryRail: View {
 
     var body: some View {
         VStack(spacing: 10) {
-
+            
             if MenuTheme.miniId == 12 {
                 ServiceSegment(intent: $intent, onEnterCashpoint: {
                     onEnterCashpoint?()

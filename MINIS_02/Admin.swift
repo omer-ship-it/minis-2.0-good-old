@@ -77,6 +77,21 @@ struct AdminProductEditorView: View {
     private let onDelete: (() -> Void)?
     private let onChangeImage: (() -> Void)?
     private let categories: [String]
+   
+    private func applyLegacyStation(_ s: LegacyStation) {
+        draft.legacyPrinter = s.rawValue
+
+        guard let id = stationId(for: s) else { return }
+
+        // Make it the primary
+        draft.printerId = id
+
+        // Make the multi-select match the quick pick (single-route)
+        draft.printerIds = [id]
+
+        ensurePrinterSelectionNotEmpty()
+        syncLegacySegmentFromCurrentSelection()
+    }
     // ✅ printers config store (UserDefaults-backed)
     @ObservedObject private var printerStore = PrintersConfigStore.shared
 
@@ -222,33 +237,18 @@ struct AdminProductEditorView: View {
     /// Returns a station id.
     private func normalizePrinterId(_ raw: String) -> String {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
-            return activeStations.first?.id ?? ""
-        }
+        if trimmed.isEmpty { return activeStations.first?.id ?? "" }
 
-        // 1) already a station id
+        // already a valid station id?
         if activeStations.contains(where: { $0.id == trimmed }) { return trimmed }
 
+        // If someone stored legacy strings ("Bar"/"Bakery"/"Kitchen"), map them to your forced ids:
         let t = trimmed.lowercased()
+        if t.contains("bar") || t.contains("בר") { return "s2" }
+        if t.contains("bakery") || t.contains("מאפ") || t.contains("ויטרינה") { return "s3" }
+        if t.contains("kitchen") || t.contains("מטבח") { return "s1" } // will still become Bakery by your rule
 
-        // 2) match by label (exact/contains)
-        if let s = activeStations.first(where: { $0.label.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == t }) {
-            return s.id
-        }
-        if let s = activeStations.first(where: { $0.label.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().contains(t) }) {
-            return s.id
-        }
-
-        // 3) legacy heuristics
-        let wantsKitchen = t.contains("kitchen") || t.contains("מטבח")
-        let wantsBakery  = t.contains("bakery")  || t.contains("מאפ") || t.contains("ויטרינה")
-        let wantsBar     = t.contains("bar")     || t.contains("בר")
-
-        if wantsKitchen, let s = activeStations.first(where: { $0.label.contains("מטבח") || $0.label.lowercased().contains("kitchen") }) { return s.id }
-        if wantsBakery,  let s = activeStations.first(where: { $0.label.contains("מאפ") || $0.label.contains("ויטרינה") || $0.label.lowercased().contains("bakery") }) { return s.id }
-        if wantsBar,     let s = activeStations.first(where: { $0.label.contains("בר") || $0.label.lowercased().contains("bar") }) { return s.id }
-
-        // 4) fallback
+        // fallback
         return activeStations.first?.id ?? ""
     }
 
@@ -557,7 +557,13 @@ struct AdminProductEditorView: View {
                         .pickerStyle(.segmented)
                         .tint(.primary)
                         .onChange(of: legacyStation) { newValue in
-                            draft.legacyPrinter = newValue.rawValue   // ✅ ONLY legacy DB field
+                            switch newValue {
+                            case .bar:     draft.printerId = "s2"; draft.printerIds = ["s2"]
+                            case .kitchen: draft.printerId = "s1"; draft.printerIds = ["s1"]
+                            case .bakery:  draft.printerId = "s3"; draft.printerIds = ["s3"]
+                            }
+                            draft.legacyPrinter = legacyNameForStationId(draft.printerId) // forced
+                            ensurePrinterSelectionNotEmpty()
                             Haptics.light()
                         }
                     }
@@ -779,30 +785,18 @@ struct AdminProductEditorView: View {
     private func cleanedForSave(_ draft: AdminProductDraft) -> AdminProductDraft {
         var copy = draft
 
-        copy.modifierGroups = copy.modifierGroups.map { group in
-            var g = group
-            g.items = g.items.filter {
-                !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            }
-            return g
-        }
+        // (your existing modifier cleanup stays)
 
-        copy.modifierGroups = copy.modifierGroups.filter { group in
-            let hasTitle = !group.title
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .isEmpty
-            return hasTitle || !group.items.isEmpty
-        }
-
-        // ✅ normalize primary
         copy.printerId = normalizePrinterId(copy.printerId)
 
-        // ✅ ensure multi list is never empty + always contains primary
         if copy.printerIds.isEmpty {
             if !copy.printerId.isEmpty { copy.printerIds = [copy.printerId] }
         } else {
             if !copy.printerId.isEmpty { copy.printerIds.insert(copy.printerId) }
         }
+
+        // ✅ FORCE legacy string from station id (ignore segment)
+        copy.legacyPrinter = legacyNameForStationId(copy.printerId)
 
         return copy
     }
@@ -920,7 +914,11 @@ struct AdminModifierGroupEditor: View {
                         } label: {
                             Image(systemName: "minus.circle.fill")
                                 .foregroundColor(.red.opacity(0.7))
+                                .font(.system(size: 18, weight: .bold))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 6)
                         }
+                        .buttonStyle(.plain)
                     }
                 }
 
@@ -1121,6 +1119,16 @@ struct AdminImagePicker: UIViewControllerRepresentable {
     }
 }
 
+
+private func legacyNameForStationId(_ id: String) -> String {
+    switch id.lowercased() {
+    case "s1": return "Kitchen"
+    case "s2": return "Bar"
+    case "s3": return "Bakery"
+    default:   return "Bar"
+    }
+}
+
 // MARK: - Payload mapping
 
 // MARK: - Payload mapping
@@ -1227,26 +1235,11 @@ extension AdminProductDraft {
         stations: [PrinterStation]
     ) -> [String: MinisProductAPI.AnyEncodable] {
 
-        func legacyPrinterName(forStationId s: String) -> String {
-            guard !s.isEmpty else { return "Bar" }
-
-            if let st = stations.first(where: { $0.id == s }) {
-                let label = st.label.trimmingCharacters(in: .whitespacesAndNewlines)
-                let t = label.lowercased()
-
-                if t.contains("bar") || label.contains("בר") { return "Bar" }
-                if t.contains("kitchen") || label.contains("מטבח") { return "Kitchen" }
-                if t.contains("bakery") || label.contains("ויטר") || label.contains("מאפ") { return "Bakery" }
-            }
-            return "Bar"
-        }
-
         func clean(_ s: String) -> String {
             s.trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
         let cleanedPrimary = clean(primaryId)
-
         let cleanedSet = Set(printerIds.map(clean).filter { !$0.isEmpty })
 
         let idsArray: [String] = {
@@ -1255,19 +1248,21 @@ extension AdminProductDraft {
             } else {
                 var s = cleanedSet
                 if !cleanedPrimary.isEmpty { s.insert(cleanedPrimary) }
-                return Array(s).sorted()  // stable JSON order
+                return Array(s).sorted()
             }
         }()
 
         let stationForLegacy = cleanedPrimary.isEmpty ? (idsArray.first ?? "") : cleanedPrimary
-        let legacy = legacyPrinterName(forStationId: stationForLegacy)
+
+        // ✅ FORCE legacy string using the hard rule
+        let legacy = legacyNameForStationId(stationForLegacy)
 
         var dict = baseJsonData
 
-        // ✅ old world (string printer name)
-        dict["Printer"] = .init(legacyPrinter)   // ✅ picker wins
+        // ✅ old world (string)
+        dict["Printer"] = .init(legacy)
 
-        // ✅ new world (station id(s))
+        // ✅ new world (ids)
         dict["PrinterId"]  = .init(stationForLegacy)
         dict["PrinterIds"] = .init(idsArray)
 

@@ -252,7 +252,7 @@ final class OrdersAutoPrinter {
 
     // MARK: - Public API
 
-    func startPolling(interval: TimeInterval = 5) {
+    func startPolling(interval: TimeInterval = 15) {
         guard pollTask == nil else { return }
         currentInterval = interval
 
@@ -269,7 +269,7 @@ final class OrdersAutoPrinter {
         pollTask = nil
     }
 
-    func startBackgroundPolling() { startPolling(interval: 5) }
+    func startBackgroundPolling() { startPolling(interval: 15) }
 
     func handleSilentPush(userInfo: [AnyHashable: Any]) async {
         await pollOnce(trigger: "silentPush")
@@ -524,7 +524,8 @@ final class OrdersAutoPrinter {
 
         let entries = toBasketEntries(from: order)
         let mode    = diningMode(for: order)
-
+        print("🧾 order \(order.id) service=\(order.service as Any) subtitle=\(order.subtitle)")
+        print("🧾 computed diningMode =", diningMode(for: order).rawValue)
         let ok = await PrinterManager.shared.printCashPointSplit(
             orderNumber: order.id,
             entries: entries,
@@ -635,21 +636,28 @@ final class OrdersAutoPrinter {
     }
 
     private func diningMode(for order: SimpleOrder) -> DiningMode {
-        if let svc = order.service?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-            switch svc {
-            case "ta", "takeaway", "take_away", "take-away":
+
+        func norm(_ s: String) -> String {
+            s.trimmingCharacters(in: .whitespacesAndNewlines)
+             .replacingOccurrences(of: "\u{200F}", with: "")
+             .replacingOccurrences(of: "\u{200E}", with: "")
+             .replacingOccurrences(of: "\u{00A0}", with: " ")
+             .lowercased()
+        }
+
+        if let raw = order.service, !raw.isEmpty {
+            let svc = norm(raw)
+            if svc == "ta" || svc.contains("take") || svc.contains("pickup") || svc.contains("togo") || svc.contains("to-go") {
                 return .takeAway
-            case "sit", "table", "ls":
+            }
+            if svc == "sit" || svc.contains("dine") || svc.contains("table") {
                 return .dineIn
-            default:
-                break
             }
         }
 
-        if order.subtitle.contains("לקחת") ||
-            order.subtitle.localizedCaseInsensitiveContains("take away") {
-            return .takeAway
-        }
+        // ✅ production-safe default for miniAppId 12 auto-print:
+        // if service is missing/garbled, assume takeaway.
+        if miniAppId == 12 { return .takeAway }
 
         return .dineIn
     }

@@ -29,6 +29,8 @@ private struct DiningModeBadge: View {
     }
 }
 struct AdminOrdersView: View {
+    let showsNavBackButton: Bool
+
     @State private var searchText: String = ""
     @State private var showOpenOnly: Bool = false
     @State private var closingTeamTableIds: Set<Int> = []
@@ -37,29 +39,42 @@ struct AdminOrdersView: View {
         case normal
         case endOfDay
     }
+    @State private var hiddenCancelledOrderIds: Set<Int> = []
     let mode: AdminMode
        let eodFilter: EODFilter
        let onSelectUnpaid: ((AdminOrderItem) -> Void)?
        let onRemainingChanged: ((Int) -> Void)?
        let onAllResolved: (() -> Void)?
 
-       init(
+    init(
            mode: AdminMode = .normal,
            eodFilter: EODFilter = .all,
+           showsNavBackButton: Bool = true,          // ✅ NEW default
            onSelectUnpaid: ((AdminOrderItem) -> Void)? = nil,
            onRemainingChanged: ((Int) -> Void)? = nil,
            onAllResolved: (() -> Void)? = nil
        ) {
            self.mode = mode
            self.eodFilter = eodFilter
+           self.showsNavBackButton = showsNavBackButton   // ✅ NEW
            self.onSelectUnpaid = onSelectUnpaid
            self.onRemainingChanged = onRemainingChanged
            self.onAllResolved = onAllResolved
        }
     
     private func isTeamTableName(_ s: String) -> Bool {
-        let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
-        return t.hasPrefix("שולחן")
+        let t = s
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "  ", with: " ")
+
+        let blocked: Set<String> = [
+            "שולחן מנהלים",
+            "שולחן קונדיטוריה",
+            "שולחן מטבח",
+            "שולחן פלור"
+        ]
+
+        return blocked.contains(t)
     }
     
     @MainActor
@@ -72,9 +87,10 @@ struct AdminOrdersView: View {
     }
 
     private var visibleOrders: [AdminOrderItem] {
-        // whatever you already do in filteredOrders,
-        // but ALSO hide those we optimistically closed
-        filteredOrders.filter { !optimisticallyClosedIds.contains($0.id) }
+        filteredOrders.filter {
+            !optimisticallyClosedIds.contains($0.id) &&
+            !hiddenCancelledOrderIds.contains($0.id)     // ✅ add
+        }
     }
 
     private func notifyRemainingChangedIfNeeded() {
@@ -217,30 +233,45 @@ struct AdminOrdersView: View {
                             printer: resolvedPrinter
                         )
                     }
+              
 
-                    // 2) Merge duplicates by a stable key
+                    // 2) Fix duplicate inflation:
+                    //    Merge ONLY when we have a stable ID (basketLineId OR itemId).
+                    //    If duplicates exist for the same line, take MAX(qty) instead of SUM(qty).
                     struct Key: Hashable {
                         let basketLineId: Int?
-                        let productId: Int?
-                        let name: String
-                        let mods: String
-                        let unitPrice: Double
+                        let itemId: Int?   // taken from AdminOrderLineItem.id when l.itemId exists
                     }
 
                     var firstIndex: [Key: Int] = [:]
                     var merged: [Key: AdminOrderLineItem] = [:]
+                    var passthrough: [AdminOrderLineItem] = []   // lines without stable IDs
 
                     for (i, li) in rawLines.enumerated() {
-                        let key = Key(
-                            basketLineId: li.basketLineId,
-                            productId: li.productId,
-                            name: li.name,
-                            mods: (li.modifiersText ?? ""),
-                            unitPrice: li.unitPrice
-                        )
+
+                        // Detect whether this line has a true stable item id.
+                        // Your `li.id` is "UI identity only" unless the server sent itemId.
+                        // Heuristic: if l.itemId exists, it was used as li.id. If not, li.id is pid/idx and is NOT stable.
+                        let stableBasketId = li.basketLineId
+                        let stableItemId: Int? = (stableBasketId == nil) ? nil : nil // placeholder, basketLineId is enough
+                        // Better: treat basketLineId as the only guaranteed stable key.
+                        // If basketLineId is missing, do NOT merge (prevents accidental x2).
+                        guard let bId = stableBasketId, bId > 0 else {
+                            passthrough.append(li)
+                            continue
+                        }
+
+                        let key = Key(basketLineId: bId, itemId: stableItemId)
 
                         if var existing = merged[key] {
-                            existing.quantity += max(1, li.quantity)
+                            // ✅ critical change: don't add. Duplicates are the same row repeated (SQL join / backend).
+                            existing.quantity = max(existing.quantity, li.quantity)
+                            // Keep other fields from first appearance; optionally update updatedAt if newer:
+                            if let e = existing.updatedAt, let n = li.updatedAt, n > e {
+                                existing.updatedAt = n
+                            } else if existing.updatedAt == nil {
+                                existing.updatedAt = li.updatedAt
+                            }
                             merged[key] = existing
                         } else {
                             firstIndex[key] = i
@@ -248,15 +279,20 @@ struct AdminOrdersView: View {
                         }
                     }
 
-                    // 3) Preserve original order (first appearance)
-                    return merged
+                    // 3) Preserve original order (first appearance) + append passthrough (no merge) at the end in original order
+                    let mergedSorted = merged
                         .sorted { (firstIndex[$0.key] ?? 0) < (firstIndex[$1.key] ?? 0) }
                         .map(\.value)
+
+                    // If you want passthrough to stay in-place relative to merged items, tell me and I’ll do a stable in-place merge.
+                    return mergedSorted + passthrough
                 }()
 
                 let stationSet = Set(dto.lines.map { line in
                     classifyAdminStation(fromPrinter: line.station ?? MenuCatalog.shared.printer(for: line.productId))
                 })
+                
+                
 
                 // ✅ NEW: Open order detection (prefer server status + payment method)
                 // You changed server status: 0=open, 1=closed. So use it when present.
@@ -293,7 +329,7 @@ struct AdminOrdersView: View {
                     return paymentIsUnpaid || legacyUnpaid
                 }()
                 let diningMode = resolveDiningMode(from: dto)
-                print("🍽 dto \(dto.id) service=\(dto.service ?? "nil") isDelivery=\(dto.isDelivery) -> diningMode=\(diningMode)")
+               // print("🍽 dto \(dto.id) service=\(dto.service ?? "nil") isDelivery=\(dto.isDelivery) -> diningMode=\(diningMode)")
                 return AdminOrderItem(
                     id: dto.id,
                     orderId: String(displayOrderNumber),
@@ -437,12 +473,14 @@ struct AdminOrdersView: View {
             .toolbar {
 
                 // Back
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button { dismiss() } label: {
-                        Image(systemName: isRtl ? "chevron.right" : "chevron.left")
-                            .font(.system(size: 18, weight: .semibold))
+                if showsNavBackButton {
+                    ToolbarItem(placement: .navigationBarLeading) {
+                        Button { dismiss() } label: {
+                            Image(systemName: isRtl ? "chevron.right" : "chevron.left")
+                                .font(.system(size: 18, weight: .semibold))
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
                 let isEod = (mode == .endOfDay)
                 // Center pill
@@ -523,11 +561,10 @@ struct AdminOrdersView: View {
                 order: order,
                 onClose: { selectedOrder = nil },
                 onResolved: {
-                    // ✅ instantly close + remove from list
                     let oid = order.id
                     selectedOrder = nil
                     orders.removeAll { $0.id == oid }
-
+                    hiddenCancelledOrderIds.insert(oid)      // ✅ add
                     Task { await refreshOrders() }
                 },
                 onPrintBon: {
@@ -612,7 +649,45 @@ struct AdminOrdersView: View {
 
         @State private var metaLines: [OrderBasketLineDTO] = []
         @State private var isLoadingMeta = false
+        private var cancelledMetaLineIds: Set<Int> {
+            Set(metaLines.compactMap { b in
+                let cancelled = (b.isCancelled ?? 0) == 1   // if you changed DTO to Int?
+                return cancelled ? b.lineId : nil
+            })
+        }
+        
+        private func norm(_ s: String) -> String {
+            s.trimmingCharacters(in: .whitespacesAndNewlines)
+             .replacingOccurrences(of: "\u{200F}", with: "") // RTL mark
+             .replacingOccurrences(of: "\u{200E}", with: "") // LTR mark
+             .replacingOccurrences(of: "  ", with: " ")
+        }
 
+        private func debugMetaBasket(_ basket: [OrderBasketLineDTO], uiLine: AdminOrderLineItem, idx: Int) {
+
+            func show(_ v: Int?) -> String { v.map(String.init) ?? "nil" }
+            func show(_ v: Bool?) -> String {
+                guard let v else { return "nil" }
+                return v ? "true" : "false"
+            }
+
+            print("🧾 META basket dump for orderId=\(order.id) (uiIdx=\(idx))")
+            for b in basket {
+                // ✅ IMPORTANT: pick the correct overload for your actual DTO fields:
+                // If X is Bool? use show(b.X) in the Bool line; if Int? use show(b.X) in the Int line.
+
+                print("   lineId=\(b.lineId) pid=\(b.productId ?? -1) qty=\(b.quantity ?? -1) name='\(norm(b.name))'")
+
+                // Try BOTH prints (comment out the one that doesn't compile):
+                // print("   cancelled=\(show(b.isCancelled)) oth=\(show(b.isOth))")   // <-- if both are Int?
+                // print("   cancelled=\(show(b.isCancelled)) oth=\(show(b.isOth))")   // <-- if both are Bool?
+
+                // ✅ Mixed? do them separately (one Int, one Bool):
+                // print("   cancelled=\(show(b.isCancelled)) oth=\(show(b.isOth))")
+            }
+
+            print("🧩 UI line: pid=\(uiLine.productId ?? -1) basketLineId=\(uiLine.basketLineId ?? -1) qty=\(uiLine.quantity) name='\(norm(uiLine.name))'")
+        }
         // Local-only cancellation state (by row index to avoid duplicate ids breaking List)
         @State private var cancelledRowIndexes: Set<Int> = []
 
@@ -709,7 +784,10 @@ struct AdminOrdersView: View {
                                 .padding(.vertical, 18)
                         } else {
                             ForEach(Array(order.items.enumerated()), id: \.offset) { idx, line in
-                                orderLineRow(line, isCancelled: cancelledRowIndexes.contains(idx))
+                                let metaCancelled = line.basketLineId.map { cancelledMetaLineIds.contains($0) } ?? false
+                                let isCancelledUI = cancelledRowIndexes.contains(idx) || metaCancelled
+
+                                orderLineRow(line, isCancelled: isCancelledUI)
                                     .listRowInsets(EdgeInsets(top: 10, leading: 16, bottom: 10, trailing: 16))
                                     .swipeActions(edge: .leading, allowsFullSwipe: false) {
 
@@ -734,9 +812,7 @@ struct AdminOrdersView: View {
                     }
                 }
                 .onAppear {
-                    if mode == .endOfDay {
-                        loadMeta()
-                    }
+                    loadMeta()   // ✅ always load metadata so cancelled shows after reload
                 }
                 .listStyle(.insetGrouped)
                 .scrollContentBackground(.hidden)
@@ -833,31 +909,43 @@ struct AdminOrdersView: View {
 
         private func toggleCancelIndex(_ idx: Int) {
             guard order.items.indices.contains(idx) else { return }
-
             let line = order.items[idx]
             let newValue = !cancelledRowIndexes.contains(idx)
 
+            // optimistic UI
             if newValue { cancelledRowIndexes.insert(idx) }
             else { cancelledRowIndexes.remove(idx) }
-
-            if let basketId = line.basketLineId, basketId > 0 {
-                sendCancelLineId(basketId, idx: idx, line: line, newValue: newValue)
-                return
-            }
 
             TeamTabsAPI.fetchOrderMetadata(orderId: order.id) { res in
                 switch res {
                 case .success(let meta):
                     let basket = meta.basket ?? []
-                    print("🧾 meta basket lineIds:", basket.map(\.lineId))
 
+                    // ✅ build a quick set of valid meta lineIds
+                    let basketLineIds = Set(basket.map(\.lineId))
+
+                    // ✅ pick the correct basket lineId (ignore bogus UI basketLineId like 1)
                     let match = basket.first(where: { b in
+                        if let bid = line.basketLineId, bid > 0, basketLineIds.contains(bid) {
+                            return b.lineId == bid
+                        }
                         if let pid = line.productId, pid > 0, b.productId == pid { return true }
-                        return b.name == line.name
+                        return norm(b.name) == norm(line.name)
                     })
 
+                    // ✅ optional debug if UI basketLineId is wrong
+                    if let bid = line.basketLineId, bid > 0, !basketLineIds.contains(bid) {
+                        print("⚠️ ignoring UI basketLineId=\(bid) (meta lineIds=\(basket.map(\.lineId))) for item '\(norm(line.name))'")
+                    }
+
                     guard let match else {
-                        print("❌ could not match item '\(line.name)' pid=\(line.productId ?? -1)")
+                        print("❌ could not match item. Will NOT call cancel.")
+                        debugMetaBasket(basket, uiLine: line, idx: idx)
+
+                        let wantedBid = line.basketLineId ?? -1
+                        let wantedPid = line.productId ?? -1
+                        print("🧪 match attempt: basketLineId=\(wantedBid) productId=\(wantedPid) name='\(norm(line.name))'")
+
                         DispatchQueue.main.async {
                             if newValue { cancelledRowIndexes.remove(idx) }
                             else { cancelledRowIndexes.insert(idx) }
@@ -865,7 +953,8 @@ struct AdminOrdersView: View {
                         return
                     }
 
-                    sendCancelLineId(match.lineId, idx: idx, line: line, newValue: newValue)
+                    print("✅ matched meta lineId=\(match.lineId) pid=\(match.productId ?? -1) name='\(norm(match.name))'")
+                    self.sendCancelLineId(match.lineId, idx: idx, line: line, newValue: newValue)
 
                 case .failure(let err):
                     print("❌ fetchOrderMetadata failed:", err.localizedDescription)
@@ -1832,16 +1921,16 @@ struct EODWizardView: View {
                 miniAppId: miniAppId,
                 businessDate: $businessDate
             ) {
-                // continue to step 1
-                EODStepOpenOrdersView(
+                EODStepTipsView(
                     miniAppId: miniAppId,
-                    businessDate: businessDate,
-                    onContinueOrder: onContinueOrder,
-                    dismissWizard: { dismiss() }
+                    dismissWizard: { dismiss() },
+                    businessDate: businessDate
                 )
             }
             .navigationBarTitleDisplayMode(.inline)
+            .wizardBackDismiss { dismiss() }
         }
+        .navigationBarBackButtonHidden(true)
         .environment(\.layoutDirection, .rightToLeft)
         .environment(\.locale, Locale(identifier: "he_IL"))
     }
@@ -1899,6 +1988,7 @@ private struct EODStepOpenOrdersView: View {
             AdminOrdersView(
                 mode: .endOfDay,
                 eodFilter: .openOrdersOnly,
+                showsNavBackButton: false,
                 onSelectUnpaid: { order in
                     onContinueOrder(order)
                     dismissWizard()
@@ -2053,11 +2143,8 @@ private struct EODStepTipsView: View {
     private var canProceedFromTips: Bool {
         guard cashSystemInclTip != nil else { return false }
         guard hasEnteredCountedCash else { return false }
-
-        // ✅ If counted is LOWER than system, allow continuing even if not "balanced"
-        if gap < -0.01 { return true }
-
-        // Otherwise keep strict logic (gap zero or updates match)
+        // ✅ Always require balance (gap==0 OR updates match).
+        // We'll auto-fill updates when gap is negative, so this will still pass.
         return gapIsZero || updateMatchesGap
     }
 
@@ -2165,6 +2252,18 @@ private struct EODStepTipsView: View {
                                             showAfterCounted = shouldShow
                                         }
                                     }
+
+                                    // ✅ SIMPLE: if counted < system, always force cash update to match the gap
+                                    // (fixes "stuck" old values like -3144)
+                                    if gap < -0.01 {
+                                        cashAdjText = String(format: "%.0f", r0(gap))   // e.g. "-59"
+                                        tipsAdjText = "0"
+                                    } else if abs(gap) < 0.01 {
+                                        // optional but nice: when perfectly balanced, clear updates
+                                        cashAdjText = "0"
+                                        tipsAdjText = "0"
+                                    }
+                                    // if gap > 0 (extra cash), we leave adjustments as-is so user can allocate if needed
                                 }
                         }
 
@@ -2300,13 +2399,16 @@ private struct EODStepTipsView: View {
 
         didSubmitAdjustment = true
 
-        // --- tiny cash hack (same as you had) ---
+     
         let cashUpdateRaw = cashUpdate
         let tipsUpdateRaw = tipsUpdate
-        let needsTinyCashHack = (cashUpdateRaw <= 0.01 && tipsUpdateRaw > 0.01)
-        let cashUpdateForDb = needsTinyCashHack ? 0.2 : cashUpdateRaw
-        let totalUpdateForDb = cashUpdateForDb + tipsUpdateRaw
 
+        // ✅ Only apply tiny-cash hack when cash is basically zero (non-negative) AND tips positive
+        let needsTinyCashHack = (cashUpdateRaw >= 0 && cashUpdateRaw <= 0.01 && tipsUpdateRaw > 0.01)
+        let cashUpdateForDb = needsTinyCashHack ? 0.2 : cashUpdateRaw
+
+        let totalUpdateForDb = cashUpdateForDb + tipsUpdateRaw
+        
         // Build the single "עדכון" entry
         let item = ShellMenuItem(
             id: -900_001,
@@ -2337,7 +2439,7 @@ private struct EODStepTipsView: View {
             "discount": 0,
             "excluded": 0,
             "tip": tipsUpdateRaw,
-            "total": cashUpdateForDb,               // keep aligned with your existing server logic
+            "total": cashUpdateForDb,
             "grandTotal": totalUpdateForDb,
             "currency": "ILS",
             "eodTinyCashHack": needsTinyCashHack
@@ -2381,6 +2483,7 @@ private struct EODStepTipsView: View {
                     case .success(let oid):
                         print("✅ EOD update saved. orderId=\(oid) tinyHack=\(needsTinyCashHack)")
                         Haptics.success()
+                        Task { await reloadCashExpectedFromXReport() } 
                     case .failure(let err):
                         print("❌ EOD update submit failed:", err)
                         Haptics.error()

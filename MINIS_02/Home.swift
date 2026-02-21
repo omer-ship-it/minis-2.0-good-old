@@ -2,6 +2,8 @@ import Combine
 import SwiftUI
 import Kingfisher
 
+// MARK: - Tabs
+
 private enum TabFilter: Hashable {
     case all
     case kind(MiniKind)
@@ -13,6 +15,7 @@ private enum TabFilter: Hashable {
         }
     }
 }
+
 enum MiniKind: String, Codable, CaseIterable, Identifiable {
     case miniMe, ticket, portfolio, fastlane, minitel
     var id: String { rawValue }
@@ -40,25 +43,40 @@ enum MiniKind: String, Codable, CaseIterable, Identifiable {
         }
     }
 }
+
+// MARK: - Home
+
 struct HomeView: View {
     @State private var referrals: [MiniReferral] = []
+
     @State private var selectedFilter: TabFilter = .all
     @State private var selectedIndex: Int = 0
+
     @State private var showStudio = false
     @State private var showMenu = false
+
     @State private var provisionalReloadCancellable: AnyCancellable?
-    @State private var showWelcome = false
+
     @AppStorage("launchStudioOnce") private var launchStudioOnce: Bool = false
     @AppStorage("launchMenuOnce") private var launchMenuOnce: Bool = false
+
     @AppStorage("shopId") private var shopId: String = "0"
     @AppStorage("miniAppId") private var miniAppId: Int = 0
+
     @State private var openedDefaultMiniOnce = false
+    @State private var openedFallbackOnce = false
+
     @State private var showQR = false
     @Namespace private var underlineNS
-    @State private var openedFallbackOnce = false
+
     @AppStorage(AppSettings.Key.cashPointMode) private var cashPointMode: Bool = AppSettings.Defaults.cashPointMode
+
+    // ✅ iPad “no saved mini” fallback (your existing behavior)
     private let fallbackMiniShopId: Int = 12
-    
+
+    // ✅ NEW: when no minis exist at all in app-group → open this mini
+    private let emptyStateMiniAppId: Int = 3
+
     private var kinds: [MiniKind] {
         Array(Set(referrals.map { $0.kind })).sorted { $0.rawValue < $1.rawValue }
     }
@@ -81,107 +99,54 @@ struct HomeView: View {
     }
 
     var body: some View {
-        ZStack {
-            VStack(spacing: 0) {
-                if !tabs.isEmpty {
-                    TabsBarView(
-                        tabs: tabs,
-                        selectedIndex: $selectedIndex,
-                        selectedFilter: $selectedFilter,
-                        underlineNS: underlineNS,
-                        showQR: $showQR
-                    )
+        VStack(spacing: 0) {
+            if !tabs.isEmpty {
+                TabsBarView(
+                    tabs: tabs,
+                    selectedIndex: $selectedIndex,
+                    selectedFilter: $selectedFilter,
+                    underlineNS: underlineNS,
+                    showQR: $showQR
+                )
+            }
+
+            if tabs.isEmpty {
+                GeometryReader { geo in
+                    VStack {
+                        Text("No recent Minis yet")
+                            .foregroundColor(.secondary)
+                            .font(.system(size: 18, weight: .medium))
+                    }
+                    .frame(width: geo.size.width, height: geo.size.height)
                 }
-
-                if tabs.isEmpty {
-                    GeometryReader { geo in
-                        VStack {
-                            Text("No recent Minis yet")
-                                .foregroundColor(.secondary)
-                                .font(.system(size: 18, weight: .medium))
-                        }
-                        .frame(width: geo.size.width, height: geo.size.height)
+            } else {
+                TabView(selection: $selectedIndex) {
+                    ForEach(Array(tabs.enumerated()), id: \.offset) { idx, tab in
+                        TabPageView(
+                            items: items(for: tab),
+                            onOpen: openReferral(_: )
+                        )
+                        .tag(idx)
                     }
-                } else {
-                    TabView(selection: $selectedIndex) {
-                        ForEach(Array(tabs.enumerated()), id: \.offset) { idx, tab in
-                            TabPageView(
-                                items: items(for: tab),
-                                onOpen: { r in
-                                    // Reset style to base before applying new mini’s customization
-                                    resetShopUserDefaultsToDefaults()
-
-                                    // 🔥 Update BOTH miniAppId and shopId
-                                    miniAppId = r.miniAppId
-                                    shopId = String(r.miniAppId)
-
-                                    UserDefaults.standard.set(r.miniAppId, forKey: "miniAppId")
-                                    UserDefaults.standard.set(String(r.miniAppId), forKey: "shopId")
-
-                                    print("🏠 HomeView.onOpen → tapped miniAppId=\(r.miniAppId), kind=\(r.kind)")
-
-                                    withAnimation(.spring(response: 0.25, dampingFraction: 0.9)) {
-                                        let isMiniMe = (r.kind == .miniMe)
-                                        showStudio = isMiniMe
-                                        showMenu   = !isMiniMe
-                                    }
-                                }
-                            )
-                            .tag(idx)
-                        }
-                    }
-                    .ignoresSafeArea(edges: .bottom)
-                    .tabViewStyle(.page(indexDisplayMode: .never))
-                    .animation(.interactiveSpring(response: 0.35, dampingFraction: 0.9), value: selectedIndex)
-                    .onChange(of: selectedIndex) { selectedFilter = tab(at: $0) }
-                    .onChange(of: selectedFilter) {
-                        let idx = index(of: $0)
-                        if idx != selectedIndex {
-                            withAnimation(.spring(response: 0.32, dampingFraction: 0.9)) {
-                                selectedIndex = idx
-                            }
-                        }
+                }
+                .ignoresSafeArea(edges: .bottom)
+                .tabViewStyle(.page(indexDisplayMode: .never))
+                .animation(.interactiveSpring(response: 0.35, dampingFraction: 0.9), value: selectedIndex)
+                .onChange(of: selectedIndex) { selectedFilter = tab(at: $0) }
+                .onChange(of: selectedFilter) { newFilter in
+                    let idx = index(of: newFilter)
+                    guard idx != selectedIndex else { return }
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.9)) {
+                        selectedIndex = idx
                     }
                 }
             }
-
-            
         }
-       
-        .onAppear {
-            reloadReferrals()
-
-            if launchStudioOnce { showStudio = true; launchStudioOnce = false }
-            if launchMenuOnce  { showMenu  = true; launchMenuOnce  = false }
-
-            // ✅ iPad: jump straight into Menu using saved miniAppId
-        if   UIDevice.current.userInterfaceIdiom == .pad && !cashPointMode && !openedDefaultMiniOnce {
-                openedDefaultMiniOnce = true
-
-                // If you want a fallback mini when none saved:
-                if miniAppId <= 0 {
-                    miniAppId = fallbackMiniShopId
-                    shopId = String(fallbackMiniShopId)
-                    UserDefaults.standard.set(miniAppId, forKey: "miniAppId")
-                    UserDefaults.standard.set(shopId, forKey: "shopId")
-                }
-
-                // Optional: fresh style each boot
-                resetShopUserDefaultsToDefaults()
-
-                // Go straight in
-                showMenu = true
-            }
-
-            selectedIndex = index(of: selectedFilter)
-        }
+        .onAppear(perform: handleAppear)
         .onChange(of: launchStudioOnce) { if $0 { showStudio = true; launchStudioOnce = false } }
         .onChange(of: launchMenuOnce) { newValue in
             guard newValue else { return }
-
-            // ✅ save referral at HomeView level
             saveCurrentMiniToHomeReferrals(kind: .fastlane)
-
             showMenu = true
             launchMenuOnce = false
         }
@@ -192,57 +157,127 @@ struct HomeView: View {
         }
         .onChange(of: showStudio) { $0 ? startProvisionalReloads() : stopProvisionalReloads() }
         .onChange(of: showMenu)   { $0 ? startProvisionalReloads() : stopProvisionalReloads() }
-        .onChange(of: miniAppId) { newValue in
-            // Ignore “no mini selected”
-            guard newValue != 0 else { return }
-
-            print("🎯 HomeView saw miniAppId change → \(newValue)")
-
-            // Make sure shopId matches this mini
-            shopId = String(newValue)
-
-            // If you want a fresh style each time:
-            resetShopUserDefaultsToDefaults()
-
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
-                showMenu = true
-            }
-        }
-
+        .onChange(of: miniAppId, perform: handleMiniAppChange(_:))
         .fullScreenCover(isPresented: $showMenu, onDismiss: {
             stopProvisionalReloads()
             reloadReferrals()
         }) {
-            @AppStorage("deliveryLoc") var deliveryLoc: String = ""
-
-            let isRtlDirection = (UserDefaults.standard.string(forKey: "direction") == "rtl")
-            let forceDark = !deliveryLoc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-
-            Group {
-                if isRtlDirection {
-                    ForceRTL {
-                        NavigationStack {
-                            menuView()
-                                .environment(\.isRtl, true)
-                                .navigationBarTitleDisplayMode(.inline)
-                                .environment(\.layoutDirection, .rightToLeft)
-                        }
-                    }
-                } else {
-                    NavigationStack {
-                        menuView()
-                            .environment(\.isRtl, false)
-                            .navigationBarTitleDisplayMode(.inline)
-                            .environment(\.layoutDirection, .leftToRight)
-                    }
-                }
-            }
-            .preferredColorScheme(forceDark ? .dark : nil)   // ✅ applies to menu + all sheets
-        
-            
+            MenuCover()
         }
     }
-    
+
+    // MARK: - Actions
+
+    private func openReferral(_ r: MiniReferral) {
+        // Reset style to base before applying new mini’s customization
+        resetShopUserDefaultsToDefaults()
+
+        // 🔥 Update BOTH miniAppId and shopId
+        miniAppId = r.miniAppId
+        shopId = String(r.miniAppId)
+
+        UserDefaults.standard.set(r.miniAppId, forKey: "miniAppId")
+        UserDefaults.standard.set(String(r.miniAppId), forKey: "shopId")
+
+        print("🏠 HomeView.onOpen → tapped miniAppId=\(r.miniAppId), kind=\(r.kind)")
+
+        withAnimation(.spring(response: 0.25, dampingFraction: 0.9)) {
+            let isMiniMe = (r.kind == .miniMe)
+            showStudio = isMiniMe
+            showMenu = !isMiniMe
+        }
+    }
+
+    private func openMiniAppId(_ id: Int) {
+        miniAppId = id
+        shopId = String(id)
+
+        UserDefaults.standard.set(id, forKey: "miniAppId")
+        UserDefaults.standard.set(String(id), forKey: "shopId")
+
+        resetShopUserDefaultsToDefaults()
+
+        withAnimation(.spring(response: 0.25, dampingFraction: 0.9)) {
+            showMenu = true
+        }
+    }
+
+    // MARK: - Lifecycle
+
+    private func handleAppear() {
+        reloadReferrals()
+
+        // ✅ NEW: if NO minis exist yet → open miniAppId=3 once
+        if referrals.isEmpty && !openedFallbackOnce {
+            openedFallbackOnce = true
+            openMiniAppId(emptyStateMiniAppId)
+            return
+        }
+
+        if launchStudioOnce { showStudio = true; launchStudioOnce = false }
+        if launchMenuOnce  { showMenu  = true; launchMenuOnce  = false }
+
+        // ✅ iPad: jump straight into Menu using saved miniAppId
+        if UIDevice.current.userInterfaceIdiom == .pad, !cashPointMode, !openedDefaultMiniOnce {
+            openedDefaultMiniOnce = true
+
+            if miniAppId <= 0 {
+                openMiniAppId(fallbackMiniShopId)
+            } else {
+                resetShopUserDefaultsToDefaults()
+                showMenu = true
+            }
+        }
+
+        selectedIndex = index(of: selectedFilter)
+    }
+
+    private func handleMiniAppChange(_ newValue: Int) {
+        guard newValue != 0 else { return }
+
+        print("🎯 HomeView saw miniAppId change → \(newValue)")
+
+        shopId = String(newValue)
+        resetShopUserDefaultsToDefaults()
+
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
+            showMenu = true
+        }
+    }
+
+    // MARK: - Menu Cover
+
+    @ViewBuilder
+    private func MenuCover() -> some View {
+        @AppStorage("deliveryLoc") var deliveryLoc: String = ""
+
+        let isRtlDirection = (UserDefaults.standard.string(forKey: "direction") == "rtl")
+        let forceDark = !deliveryLoc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+
+        Group {
+            if isRtlDirection {
+                ForceRTL {
+                    NavigationStack {
+                        menuView()
+                            .environment(\.isRtl, true)
+                            .navigationBarTitleDisplayMode(.inline)
+                            .environment(\.layoutDirection, .rightToLeft)
+                    }
+                }
+            } else {
+                NavigationStack {
+                    menuView()
+                        .environment(\.isRtl, false)
+                        .navigationBarTitleDisplayMode(.inline)
+                        .environment(\.layoutDirection, .leftToRight)
+                }
+            }
+        }
+        .preferredColorScheme(forceDark ? .dark : nil)
+    }
+
+    // MARK: - Referrals Persistence
+
     private func saveCurrentMiniToHomeReferrals(kind: MiniKind = .fastlane) {
         guard miniAppId > 0 else { return }
         guard let suite = UserDefaults(suiteName: "group.minis") else { return }
@@ -252,30 +287,24 @@ struct HomeView: View {
             subtitle: kind.displayTitle,
             miniAppId: miniAppId,
             imageURL: nil,
-            sharedAt: Date(),          // ✅ Date, not TimeInterval
+            sharedAt: Date(),
             kind: kind
         )
 
-        // 1) Save lastMiniReferralJSON
         if let data = try? JSONEncoder().encode(referral) {
             suite.set(data, forKey: "lastMiniReferralJSON")
         }
 
-        // 2) Save into miniReferralsJSON array
         var arr: [MiniReferral] = []
         if let data = suite.data(forKey: "miniReferralsJSON"),
            let decoded = try? JSONDecoder().decode([MiniReferral].self, from: data) {
             arr = decoded
         }
 
-        // de-dupe by miniAppId + kind
         arr.removeAll { $0.miniAppId == referral.miniAppId && $0.kind == referral.kind }
         arr.insert(referral, at: 0)
 
-        // cap list
-        if arr.count > 30 {
-            arr = Array(arr.prefix(30))
-        }
+        if arr.count > 30 { arr = Array(arr.prefix(30)) }
 
         if let data = try? JSONEncoder().encode(arr) {
             suite.set(data, forKey: "miniReferralsJSON")
@@ -284,17 +313,9 @@ struct HomeView: View {
         suite.synchronize()
         print("✅ HomeView saved referral → miniAppId=\(miniAppId), kind=\(kind.rawValue)")
     }
-    private func defaultReferral() -> MiniReferral? {
-        // Prefer Fastlane if available
-        if let fastlane = referrals.first(where: { $0.kind == .fastlane }) {
-            return fastlane
-        }
-        // Fall back to the very first referral
-        return referrals.first
-    }
 
     private func reloadReferrals() {
-        self.referrals = loadAllMiniReferralsFromAppGroup()
+        referrals = loadAllMiniReferralsFromAppGroup()
         selectedIndex = index(of: selectedFilter)
     }
 
@@ -312,6 +333,8 @@ struct HomeView: View {
         provisionalReloadCancellable = nil
     }
 }
+
+// MARK: - Tabs Bar
 
 private struct TabsBarView: View {
     let tabs: [TabFilter]
@@ -367,6 +390,8 @@ private struct TabsBarView: View {
             }
 
             Spacer(minLength: 8)
+
+            // QR button intentionally commented out (keeping your original)
             /*
             Button { showQR = true } label: {
                 Image(systemName: "qrcode.viewfinder")
@@ -377,13 +402,15 @@ private struct TabsBarView: View {
             .buttonStyle(.plain)
             .padding(.trailing, 10)
             .padding(.top, -10)
-             */
+            */
         }
         .padding(.horizontal, 10)
         .background(Color(.systemBackground))
         .animation(.interactiveSpring(response: 0.35, dampingFraction: 0.9), value: selectedIndex)
     }
 }
+
+// MARK: - Page
 
 private struct TabPageView: View {
     let items: [MiniReferral]
@@ -411,24 +438,25 @@ private struct TabPageView: View {
     }
 }
 
+// MARK: - Card
+
 private struct RoundedCorners: Shape {
     var tl: CGFloat = 0
     var tr: CGFloat = 0
     var bl: CGFloat = 0
     var br: CGFloat = 0
-    
+
     func path(in rect: CGRect) -> Path {
         var path = Path()
-
         let w = rect.width
         let h = rect.height
 
-        let tr = min(min(self.tr, h/2), w/2)
-        let tl = min(min(self.tl, h/2), w/2)
-        let bl = min(min(self.bl, h/2), w/2)
-        let br = min(min(self.br, h/2), w/2)
+        let tr = min(min(self.tr, h / 2), w / 2)
+        let tl = min(min(self.tl, h / 2), w / 2)
+        let bl = min(min(self.bl, h / 2), w / 2)
+        let br = min(min(self.br, h / 2), w / 2)
 
-        path.move(to: CGPoint(x: w/2.0, y: 0))
+        path.move(to: CGPoint(x: w / 2.0, y: 0))
         path.addLine(to: CGPoint(x: w - tr, y: 0))
         path.addArc(center: CGPoint(x: w - tr, y: tr), radius: tr,
                     startAngle: Angle(degrees: -90), endAngle: Angle(degrees: 0), clockwise: false)
@@ -449,36 +477,21 @@ private struct RoundedCorners: Shape {
     }
 }
 
-
-
 private struct ReferralCardView: View {
     let referral: MiniReferral
     let onOpen: (MiniReferral) -> Void
 
     var body: some View {
-        Button {
-            onOpen(referral)
-        } label: {
+        Button { onOpen(referral) } label: {
             VStack(spacing: 0) {
-                if let s = referral.imageURL, let url = URL(string: s) {
-                    KFImage(url)
-                        .placeholder { Color(.systemGray5) }
-                        .resizable()
-                        .scaledToFill()
-                        .frame(height: 210)
-                        .clipShape(RoundedCorners(tl: 18, tr: 18, bl: 0, br: 0))
-                        .clipped()
-                } else {
-                    Color(.systemGray5)
-                        .frame(height: 210)
-                        .clipShape(RoundedCorners(tl: 18, tr: 18, bl: 0, br: 0))
-                }
+                headerImage
 
                 HStack(alignment: .center, spacing: 12) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(referral.title)
                             .font(.system(size: 20, weight: .bold))
                             .foregroundColor(.primary)
+
                         Text(referral.subtitle)
                             .font(.system(size: 15))
                             .foregroundColor(.primary)
@@ -488,7 +501,7 @@ private struct ReferralCardView: View {
                     Spacer()
                 }
                 .padding(16)
-                .background( Color(.systemGray6))
+                .background(Color(.systemGray6))
                 .clipShape(RoundedCorners(tl: 0, tr: 0, bl: 18, br: 18))
             }
             .background(
@@ -499,7 +512,26 @@ private struct ReferralCardView: View {
         }
         .buttonStyle(.plain)
     }
+
+    @ViewBuilder
+    private var headerImage: some View {
+        if let s = referral.imageURL, let url = URL(string: s) {
+            KFImage(url)
+                .placeholder { Color(.systemGray5) }
+                .resizable()
+                .scaledToFill()
+                .frame(height: 210)
+                .clipShape(RoundedCorners(tl: 18, tr: 18, bl: 0, br: 0))
+                .clipped()
+        } else {
+            Color(.systemGray5)
+                .frame(height: 210)
+                .clipShape(RoundedCorners(tl: 18, tr: 18, bl: 0, br: 0))
+        }
+    }
 }
+
+// MARK: - App Group Load
 
 private func loadAllMiniReferralsFromAppGroup() -> [MiniReferral] {
     let defaults = UserDefaults(suiteName: "group.minis")
@@ -508,12 +540,17 @@ private func loadAllMiniReferralsFromAppGroup() -> [MiniReferral] {
        var arr = try? JSONDecoder().decode([MiniReferral].self, from: data),
        !arr.isEmpty {
         arr.sort { $0.sharedAt > $1.sharedAt }
+
         var seen = Set<String>()
         var unique: [MiniReferral] = []
         unique.reserveCapacity(arr.count)
+
         for r in arr {
             let key = "\(r.miniAppId)#\(r.kind.rawValue)#\(r.title)"
-            if !seen.contains(key) { seen.insert(key); unique.append(r) }
+            if !seen.contains(key) {
+                seen.insert(key)
+                unique.append(r)
+            }
         }
         return unique
     }
@@ -522,10 +559,11 @@ private func loadAllMiniReferralsFromAppGroup() -> [MiniReferral] {
        let single = try? JSONDecoder().decode(MiniReferral.self, from: data) {
         return [single]
     }
+
     return []
 }
 
-
+// MARK: - RTL Helper
 
 struct ForceRTL<Content: View>: View {
     let content: Content
@@ -538,22 +576,20 @@ struct ForceRTL<Content: View>: View {
     }
 
     private struct SemanticHost: UIViewControllerRepresentable {
-        func makeUIViewController(context: Context) -> UIViewController {
-            Controller()
-        }
+        func makeUIViewController(context: Context) -> UIViewController { Controller() }
         func updateUIViewController(_ uiViewController: UIViewController, context: Context) {}
+
         final class Controller: UIViewController {
             override func viewDidAppear(_ animated: Bool) {
                 super.viewDidAppear(animated)
                 view.semanticContentAttribute = .forceRightToLeft
                 navigationController?.view.semanticContentAttribute = .forceRightToLeft
             }
+
             override func viewWillDisappear(_ animated: Bool) {
                 super.viewWillDisappear(animated)
                 navigationController?.view.semanticContentAttribute = .unspecified
             }
         }
     }
-    
-    
 }

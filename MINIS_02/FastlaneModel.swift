@@ -1317,7 +1317,7 @@ enum OrderAPI {
                 func clean(_ s: String?) -> String {
                     (s ?? "")
                         .trimmingCharacters(in: .whitespacesAndNewlines)
-                        .lowercased()
+                      
                 }
 
                 let locFromSuite = clean(suite?.string(forKey: "deliveryLoc"))
@@ -3287,7 +3287,7 @@ struct OrderBasketLineDTO: Decodable {
     let unitPrice: Double
     let modifiers: String?
     let isOth: Bool?
-    let isCancelled: Bool?   // ✅ ADD THIS
+    let isCancelled: Int?   // instead of Bool?
 }
 
 struct OrderTotalsDTO: Decodable {
@@ -3797,9 +3797,9 @@ func nextMenuTicketNumber() -> Int {
 }
 
 struct AdminOrderLineItem: Identifiable, Hashable {
-    let id: Int               // SwiftUI identity (can stay itemId)
+    let id: Int
     let productId: Int?
-    let basketLineId: Int?    // ✅ THIS is basket.lineId from Metadata
+    let basketLineId: Int?
 
     var name: String
     var quantity: Int
@@ -3808,6 +3808,8 @@ struct AdminOrderLineItem: Identifiable, Hashable {
     var modifiersText: String?
     var updatedAt: Date?
     var printer: String?
+
+    var isCancelled: Bool = false   // ✅ ADD (default false)
 
     var rowTotal: Double { Double(quantity) * unitPrice }
 }

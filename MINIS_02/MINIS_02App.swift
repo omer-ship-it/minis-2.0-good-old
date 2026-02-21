@@ -62,16 +62,47 @@ struct MINIS_02App: App {
     }
 
     init() {
+
+        // 🔒 Hide back button text globally (no SwiftUI Table/toolbars involved)
+        do {
+            let appearance = UINavigationBarAppearance()
+              appearance.configureWithTransparentBackground()   // ✅ THIS makes it transparent
+              appearance.backgroundColor = .clear
+              appearance.shadowColor = .clear   // removes bottom hairline
+
+
+            appearance.backButtonAppearance.normal.titleTextAttributes = [
+                .foregroundColor: UIColor.clear
+            ]
+            appearance.backButtonAppearance.highlighted.titleTextAttributes = [
+                .foregroundColor: UIColor.clear
+            ]
+
+            UINavigationBar.appearance().standardAppearance = appearance
+            UINavigationBar.appearance().scrollEdgeAppearance = appearance
+            UINavigationBar.appearance().compactAppearance = appearance
+
+            // Extra safety: push title off-screen (covers some edge cases)
+            UIBarButtonItem.appearance().setBackButtonTitlePositionAdjustment(
+                UIOffset(horizontal: -1000, vertical: 0),
+                for: .default
+            )
+        }
+
+        // ✅ Keep your existing init logic
         UserDefaults.standard.removeObject(forKey: "printers.config.shop13")
+
         if let ip = detectLANIPv4() {
             print("🌐 LAN IP detected:", ip)
         } else {
             print("🌐 LAN IP detected: none")
         }
-       
-        UserDefaults.standard.set(13, forKey: "miniAppId")
-        UserDefaults.standard.set("13", forKey: "shopId")
-        
+
+        // ⚠️ If you *always* want to force shop 12 on every launch, keep these lines.
+        // If not, remove them and rely only on the "savedMini" logic below.
+        UserDefaults.standard.set(12, forKey: "miniAppId")
+        UserDefaults.standard.set("12", forKey: "shopId")
+
         STPAPIClient.shared.publishableKey =
         "pk_live_51H5URzFZIwZSNufssK4R7BjLhpqxHVcfmEZVH8Tg74MAHMA20RfkYhIfbwFjDWJ55KzHWkOhEcqVWhIO2VShjOcU00Tslmi1XT"
 
@@ -80,6 +111,7 @@ struct MINIS_02App: App {
         seg.setTitleTextAttributes([.foregroundColor: UIColor.label], for: .selected)
         seg.selectedSegmentTintColor = UIColor.tertiarySystemFill
 
+        // ✅ Clear drafts on launch (as you wanted)
         UserDefaults.standard.removeObject(forKey: "posSavedName")
         UserDefaults.standard.removeObject(forKey: "posSavedPhone")
 
@@ -96,7 +128,6 @@ struct MINIS_02App: App {
             shopId = UserDefaults.standard.string(forKey: "shopId") ?? String(savedMini)
         }
     }
-    
     var body: some Scene {
         WindowGroup {
             Group {
@@ -111,12 +142,14 @@ struct MINIS_02App: App {
                                .environment(\.layoutDirection, .rightToLeft)
                                .environment(\.locale, Locale(identifier: "he_IL"))
                                .preferredColorScheme(.dark)
+                           
                        } else {
                            HomeView()
                                .tint(.primary)
                                .environment(\.layoutDirection, .leftToRight)
                                .preferredColorScheme(.dark)
                        }
+                
             }
             .environment(\.isRtl, direction == "rtl")
             .environment(\.layoutDirection, direction == "rtl" ? .rightToLeft : .leftToRight)

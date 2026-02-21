@@ -9,20 +9,20 @@ import Darwin
 enum OneShotPrinter {
 
     private static let connectTimeout: TimeInterval = 4.0
-    private static let sendTimeout: TimeInterval = 9.0
-    private static let drainDelaySmall: TimeInterval = 0.45
-    private static let drainDelayLarge: TimeInterval = 0.9
+    private static let sendTimeout: TimeInterval = 5.0
+    private static let drainDelaySmall: TimeInterval = 0.25
+    private static let drainDelayLarge: TimeInterval = 0.45
 
-    private static let fastAttempts = 2
-    private static let fastRetryDelayBase: TimeInterval = 0.35
-    private static let fastRetryJitterMax: TimeInterval = 0.25
+    private static let fastAttempts = 8
+    private static let fastRetryDelayBase: TimeInterval = 0.18
+    private static let fastRetryJitterMax: TimeInterval = 0.12
 
     // Slow retry window (per job)
-    private static let slowRetryEvery: TimeInterval = 5.0
-    private static let slowRetryMaxWindow: TimeInterval = 60.0   // 1 minute total
+    private static let slowRetryEvery: TimeInterval = 1.0
+    private static let slowRetryMaxWindow: TimeInterval = 35.0   // 1 minute total
 
     // Pending pump
-    private static let pendingPumpInterval: TimeInterval = 5.0
+    private static let pendingPumpInterval: TimeInterval = 1.0
 
     // ✅ RETRY LOG THROTTLE
     private static let slowRetryLogEvery: Int = 3
@@ -106,7 +106,24 @@ enum OneShotPrinter {
         }
         return nil
     }
+    private static func flushAllPendingNow() {
+        // Snapshot keys to avoid holding the lock while draining
+        let keys: [String] = {
+            lock.lock(); defer { lock.unlock() }
+            return Array(pendingOrder.keys)
+        }()
 
+        for pk in keys {
+            let parts = pk.split(separator: ":", maxSplits: 1).map(String.init)
+            guard parts.count == 2,
+                  let p = UInt16(parts[1]) else { continue }
+            let h = parts[0]
+
+            queue(for: h, port: p).async {
+                drainIfNeeded(host: h, port: p)
+            }
+        }
+    }
     private static func isOnPrinterLan(_ ip: String?) -> Bool {
         guard let ip else { return false }
         return ip.hasPrefix("10.100.10.")
@@ -139,6 +156,7 @@ enum OneShotPrinter {
 
         if up && !lastPrinterLanUp && total > 0 {
             log("ONLINE ip=\(ip ?? "?") → FLUSH pending=\(total)")
+            flushAllPendingNow()   // ✅ NEW: wake drains immediately
         }
 
         lastPrinterLanUp = up
@@ -365,7 +383,12 @@ enum OneShotPrinter {
         sendImpl(host: host, port: port, data: job.data, attempt: 1, maxAttempts: fastAttempts, tag: job.dedupeKey) { ok in
             if ok { completion(.success(job)); return }
 
-            let deadline = job.createdAt.addingTimeInterval(slowRetryMaxWindow)
+            let ip = currentLANIPv4()
+            let onLan = isOnPrinterLan(ip)
+
+            // ✅ Keep strong retries only while on printer LAN
+            let ttl: TimeInterval = onLan ? slowRetryMaxWindow : 5.0
+            let deadline = job.createdAt.addingTimeInterval(ttl)
 
             func slowTick(_ current: Job) {
                 if Date() >= deadline {
@@ -2681,7 +2704,13 @@ extension PrinterManager {
         URLSession.shared.dataTask(with: req).resume()
     }
     // ✅ STEP: make this return a real ACK so OrdersAutoPrinter can decide markPrinted()
-
+    @inline(__always)
+    private func gapMs(_ ms: Int) async {
+        // tiny stagger between printers to reduce burst/connect collisions
+        let n = UInt64(max(0, ms)) * 1_000_000
+        try? await Task.sleep(nanoseconds: n)
+    }
+    
     func printCashPointSplit(
         orderNumber: Int,
         entries: [BasketEntry],
@@ -2690,6 +2719,15 @@ extension PrinterManager {
         customerName: String?,
         customerPhone: String?
     ) async -> Bool {
+
+        // ✅ tiny stagger between printers (reduces burst/connect collisions)
+        @inline(__always)
+        func gapMs(_ ms: Int) async {
+            let n = UInt64(max(0, ms)) * 1_000_000
+            try? await Task.sleep(nanoseconds: n)
+        }
+
+        let gap = 200   // ✅ 150–250ms recommended. Start with 200ms.
 
         let lines: [KDSOrderLine] = entries.map { entry in
             KDSOrderLine(
@@ -2740,21 +2778,22 @@ extension PrinterManager {
 
         // ✅ KITCHEN
         if !kitchenLines.isEmpty {
+            let dk = "bone|\(order.id)|kitchen"
             let job = makeJob(order: order, lines: kitchenLines, rotated: fam.supportsRotation, family: fam, lineWidth: 42)
             let ok = await OneShotPrinter.sendAwait(
                 host: activeKitchenIP,
                 port: port,
                 data: job,
-                tag: "bone|\(order.id)|kitchen",
-                dedupeKey: "bone|\(order.id)|kitchen"
+                tag: dk,
+                dedupeKey: dk
             )
             results.append(.init(name: "Kitchen", ok: ok))
+            await gapMs(gap)
         }
 
         // ✅ KITCHENBACK (toast only)
         if !toastLines.isEmpty {
             let dk = "bone|\(order.id)|kitchenback|toast"
-
             let job = makeJob(
                 order: order,
                 lines: toastLines,
@@ -2762,7 +2801,6 @@ extension PrinterManager {
                 family: kitchenBackFamily,
                 lineWidth: kitchenBackLineWidth
             )
-
             let ok = await OneShotPrinter.sendAwait(
                 host: KitchenBackPrinterIP,
                 port: port,
@@ -2770,14 +2808,13 @@ extension PrinterManager {
                 tag: dk,
                 dedupeKey: dk
             )
-
             results.append(.init(name: "KitchenBack", ok: ok))
+            await gapMs(gap)
         }
 
         // ✅ BAKERY
         if !bakeryLines.isEmpty {
             let dk = "bone|\(order.id)|bakery"
-
             let job = makeJob(
                 order: order,
                 lines: bakeryLines,
@@ -2785,7 +2822,6 @@ extension PrinterManager {
                 family: fam,
                 lineWidth: 42
             )
-
             let ok = await OneShotPrinter.sendAwait(
                 host: activeBakeryIP,
                 port: port,
@@ -2793,9 +2829,10 @@ extension PrinterManager {
                 tag: dk,
                 dedupeKey: dk
             )
-
             results.append(.init(name: "Bakery", ok: ok))
+            await gapMs(gap)
         }
+
         // ✅ BAR
         if !barLines.isEmpty {
             let dk = "bone|\(order.id)|bar"
@@ -2806,7 +2843,6 @@ extension PrinterManager {
                 family: fam,
                 lineWidth: 42
             )
-
             let ok = await OneShotPrinter.sendAwait(
                 host: activeBarIP,
                 port: port,
@@ -2814,8 +2850,8 @@ extension PrinterManager {
                 tag: dk,
                 dedupeKey: dk
             )
-
             results.append(.init(name: "Bar", ok: ok))
+            // no need to gap after last one
         }
 
         let failed = results.filter { !$0.ok }.map(\.name)

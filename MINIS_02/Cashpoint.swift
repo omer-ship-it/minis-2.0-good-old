@@ -34,9 +34,11 @@ struct CashPointView: View {
     @State private var hasChosenServiceMode: Bool = false
     @State private var showLastInvoicePrompt: Bool = false
     @State private var zRestoreMode: Bool = false
+    @State private var showZeroStockConfirm = false
     @AppStorage(AppSettings.Key.cashPointMode) private var cashPointMode: Bool = AppSettings.Defaults.cashPointMode
     @State private var zRestoreDate: Date = Calendar.current.date(byAdding: .day, value: -1, to: Date()) ?? Date()
     @StateObject private var net = NetworkMonitor.shared
+    @State private var printInFlight = false
     private var isTeamTabMode: Bool { activeTeamTab != nil }
     @State private var pendingFinishAfterSubmit: Bool = false
     @State private var showClearStockConfirm = false
@@ -48,6 +50,28 @@ struct CashPointView: View {
     @StateObject private var stockToggles = StockToggleStore(
         shopId: 12   // 👈 hard-coded miniAppId
     )
+    
+    
+    @MainActor
+    private func backToCashpointFromTeamTab() {
+        // close side menu first (nice UX)
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+            showSideMenu = false
+        }
+
+        // close any overlays/sheets related to ordering
+        showBasketSheetPhone = false
+        showOrderFlow = false
+
+        // start a clean order (this already sets activeTeamTab=nil etc)
+        startNewOrderFromPayLater()
+
+        Haptics.success()
+    }
+    
+    private var isAnyStockEditing: Bool {
+        isStockEditMode || editingStockProductId != nil
+    }
     @State private var stockCommitInFlight = false
     @State private var stockCommitError: String? = nil
     @State private var mobileIsOpen: Bool = true           // current server value
@@ -57,6 +81,19 @@ struct CashPointView: View {
     @State private var priceText: String = "0"
     @State private var isNegative: Bool = false
 
+    private func clearSavedContactAndService() {
+        posSavedName = ""
+        posSavedPhone = ""
+       
+    }
+    
+    @MainActor
+    private func applyLocalAvailabilityFromStock(productId: Int) {
+        let qty = stockAdjustments[productId]   // Int?  nil = ∞
+        let on = (qty == nil) ? true : ((qty ?? 0) > 0)
+        stockToggles.setLocalOn(productId, on)
+    }
+    
     var signedValue: Double {
         let v = Double(priceText.replacingOccurrences(of: ",", with: ".")) ?? 0
         return isNegative ? -v : v
@@ -64,6 +101,36 @@ struct CashPointView: View {
     @State private var pricePulseLineId: Int? = nil
     @State private var pricePulseScale: CGFloat = 1.0
     @AppStorage("admin.pickupLocation") private var adminPickupLocation: String = "cafeteria" // default
+    
+    @MainActor
+    private func cleanupLineStateForCurrentBasket() {
+        let live = Set(basket.keys)
+
+        noteDrafts = noteDrafts.filter { live.contains($0.key) }
+        optionSelections = optionSelections.filter { live.contains($0.key) }
+        additionSelections = additionSelections.filter { live.contains($0.key) }
+        basketSwipeOffsets = basketSwipeOffsets.filter { live.contains($0.key) }
+        lineSessionTime = lineSessionTime.filter { live.contains($0.key) }
+
+        lockedLineIds = lockedLineIds.intersection(live)
+
+        if let e = expandedBasketLineId, !live.contains(e) { expandedBasketLineId = nil }
+        if let p = pricePulseLineId, !live.contains(p) { pricePulseLineId = nil }
+    }
+    
+    @MainActor
+    private func applyOrderToLocalStock(entries: [BasketEntry]) {
+        // sum qty per product
+        var qtyByProduct: [Int: Int] = [:]
+        for e in entries {
+            qtyByProduct[e.item.id, default: 0] += e.quantity
+        }
+
+        for (pid, usedQty) in qtyByProduct {
+            guard let current = stockAdjustments[pid] else { continue } // nil = ∞ / not tracked
+            stockAdjustments[pid] = max(0, current - usedQty)
+        }
+    }
     
     @MainActor
     private func pulsePrice(for lineId: Int) {
@@ -125,7 +192,7 @@ struct CashPointView: View {
                         Haptics.success()
                         print("✅ miniApp IsOpen updated:", text)
                         // optional: refresh cached menu json
-                        api.load(skipCache: true)
+                        safeReloadMenu(reason: "toggle isOpen")
                     } else {
                         Haptics.error()
                         print("❌ miniApp open toggle failed HTTP \(code):", text)
@@ -195,6 +262,8 @@ struct CashPointView: View {
         stockCommitInFlight = false
 
         if ok {
+            applyLocalAvailabilityFromStock(productId: productId)
+
             dirtyStockIds.remove(productId)
             stockText[productId] = nil
 
@@ -205,7 +274,7 @@ struct CashPointView: View {
             }
 
             // refresh canonical menu state (optional but matches your global flow)
-            api.load(skipCache: true)
+            safeReloadMenu(reason: "toggle isOpen")
             Haptics.success()
         } else {
             stockCommitError = "שמירת מלאי נכשלה"
@@ -297,6 +366,7 @@ struct CashPointView: View {
         var failed: Set<Int> = []
 
         for pid in ids {
+            
             let ok = await StockQuantityAPI.setStock(productId: pid, quantity: stockAdjustments[pid])
             if !ok { failed.insert(pid) }
         }
@@ -309,7 +379,7 @@ struct CashPointView: View {
             for pid in ids { stockText[pid] = nil }
 
             // ✅ refresh canonical JSON immediately after successful writes
-            api.load(skipCache: true)
+            safeReloadMenu(reason: "toggle isOpen")
 
             withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
                 isStockEditMode = false
@@ -357,6 +427,7 @@ struct CashPointView: View {
             .replacingOccurrences(of: "\u{00A0}", with: " ") // non-breaking space
             .replacingOccurrences(of: "  ", with: " ")
     }
+    
     
     @State private var showZReportDialog = false
 
@@ -463,12 +534,22 @@ struct CashPointView: View {
     @State private var firstPendingAtBar: Date? = nil
     @State private var firstPendingAtBakery: Date? = nil
 
-    @State private var backlogPoll = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
+    @State private var backlogPoll = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
 
     private var printerPort: UInt16 {
         let raw = UserDefaults.standard.integer(forKey: "kds.printer.port")
         let p = UInt16(exactly: raw) ?? 0
         return p == 0 ? 9100 : p
+    }
+    
+    private func safeReloadMenu(reason: String) {
+        if showOrderFlow { return }
+        if !basket.isEmpty { return }
+        if printInFlight { return }
+        if isStockEditMode { return }
+        if stockCommitInFlight { return }
+        if !dirtyStockIds.isEmpty { return }
+        api.load(skipCache: true)
     }
 
     private func updatePendingBacklog() {
@@ -672,10 +753,7 @@ struct CashPointView: View {
 
         // ✅ 4) keep notes last
         merged.removeAll(where: { $0 == "✏️ הערות" })
-        if cashPointMode {
-            merged.append("✏️ הערות")
-        }
-
+        merged.append("✏️ הערות")   // ✅ always show notes
         categoryOrder = merged
 
         // ✅ optional: persist the server truth so your rail stays correct across launches
@@ -761,7 +839,7 @@ struct CashPointView: View {
                     lockedLineIds.removeAll()
                     lineSessionTime.removeAll()
                     basket.removeAll()
-                    nextBasketLineId = 1
+                 //   nextBasketLineId = 1
                     Haptics.success()
                 case .failure(let err):
                     print("❌ close tab failed:", err)
@@ -777,14 +855,17 @@ struct CashPointView: View {
         if trimmed.isEmpty {
             stockAdjustments[productId] = nil   // ∞
         } else if let value = Int(trimmed), value >= 0 {
-            stockAdjustments[productId] = value // 0..n
+            stockAdjustments[productId] = value
         } else {
             let current = remainingStock(for: ShellMenuItem(id: productId, name: "", price: 0, category: "", modifiers: nil, imageURL: nil, description: nil))
             stockText[productId] = current.map { String($0) } ?? ""
             return
         }
 
-        dirtyStockIds.insert(productId)   // ✅ local only; commit on Done
+        dirtyStockIds.insert(productId)
+
+        // ✅ NEW: make it immediately orderable / sortable
+        applyLocalAvailabilityFromStock(productId: productId)
     }
     
     private func printUpdatedUnpaidOrder() {
@@ -873,6 +954,7 @@ struct CashPointView: View {
 
         // Print only the new lines
         Task {
+            await MainActor.run { printInFlight = true }
             let ok = await PrinterManager.shared.printCashPointSplit(
                 orderNumber: existingId,
                 entries: newEntries,
@@ -881,6 +963,7 @@ struct CashPointView: View {
                 customerName: nameSnapshot,
                 customerPhone: phoneSnapshot
             )
+            await MainActor.run { printInFlight = false }
 
             await MainActor.run {
                 if ok {
@@ -915,6 +998,8 @@ struct CashPointView: View {
             orderType: activeTeamTab == nil ? nil : "teamTab",
             tabKey: activeTeamTab?.rawValue
         ) { result in
+            clearSavedContactAndService()
+
             DispatchQueue.main.async {
                 if case .failure(let err) = result {
                     // You can keep this minimal or add a small toast
@@ -990,7 +1075,7 @@ struct CashPointView: View {
                 )
         }
     }
-    @State private var productPoll = Timer.publish(every: 10, on: .main, in: .common).autoconnect()
+    @State private var productPoll = Timer.publish(every: 20, on: .main, in: .common).autoconnect()
     @State private var showDiscountPanel = false
     @State private var discountMode: DiscountMode = .none
     @State private var discountAllSelected = true
@@ -1578,19 +1663,26 @@ struct CashPointView: View {
                                 }
                             }
                         } label: {
+                            let enabled = !basketIsEmpty
+
                             Text(mainActionButtonTitle)
                                 .font(.system(size: 18, weight: .bold))
-                                .foregroundColor(.white)
-                                .frame(width: 180, height: 48)
-                                .background(basketIsEmpty
-                                    ? Color.gray.opacity(0.4)
-                                    : (colorScheme == .dark ? Color(red: 1.0, green: 0.192, blue: 0.251) : .black)
+                                .foregroundColor(
+                                    enabled
+                                        ? (colorScheme == .dark ? .black : .white)
+                                        : .white
+                                )
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 48)
+                                .background(
+                                    enabled
+                                        ? (colorScheme == .dark ? .white : .black)
+                                        : Color.gray.opacity(0.4)
                                 )
                                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                         }
                         .buttonStyle(.plain)
                         .disabled(basketIsEmpty)
-
                     } else {
 
                         Button {
@@ -1859,7 +1951,7 @@ struct CashPointView: View {
 
             // Optional: reload menu from server so CashPoint reflects the canonical state
             await MainActor.run {
-                api.load(skipCache: true)
+                safeReloadMenu(reason: "toggle isOpen")
             }
         } catch let MinisProductAPI.APIError.badResponse(code, body) {
             print("❌ Admin upsert bad response: HTTP \(code)\n\(body)")
@@ -2216,6 +2308,8 @@ struct CashPointView: View {
                 stockAdjustments[item.id] = nil
                 stockText[item.id] = nil
                 dirtyStockIds.insert(item.id)
+                applyLocalAvailabilityFromStock(productId: item.id)
+
             }
         } else {
             // ✅ אפס
@@ -2223,6 +2317,8 @@ struct CashPointView: View {
                 stockAdjustments[item.id] = 0
                 stockText[item.id] = nil
                 dirtyStockIds.insert(item.id)
+                applyLocalAvailabilityFromStock(productId: item.id)
+
             }
         }
 
@@ -2250,7 +2346,7 @@ struct CashPointView: View {
         // ✅ write once
         stockAdjustments[productId] = currentOpt
         dirtyStockIds.insert(productId)
-
+        applyLocalAvailabilityFromStock(productId: productId)
         // ✅ IMPORTANT: if TextField is showing, it reads stockText first — update it!
         if editingStockProductId == productId || isStockEditMode {
             if let v = currentOpt {
@@ -2556,9 +2652,7 @@ struct CashPointView: View {
 
         // 3) keep notes last
         out.removeAll(where: { $0 == "✏️ הערות" })
-        if cashPointMode {
-            out.append("✏️ הערות")
-        }
+        out.append("✏️ הערות")   // ✅ always show notes
 
         return out
     }
@@ -2594,7 +2688,7 @@ struct CashPointView: View {
                         .font(.system(size: 17, weight: .bold))
                 }
                 .foregroundColor(.white)
-                .frame(height: 46)
+                .frame(height: 48)
                 .padding(.horizontal, 16)
                 .background(Color.black)
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -2641,7 +2735,7 @@ struct CashPointView: View {
 
         hasChosenServiceMode = false
         basket.removeAll()
-        nextBasketLineId = 1
+   //     nextBasketLineId = 1
 
         // 🔥 Clear saved customer info
         posSavedName = ""
@@ -2679,8 +2773,11 @@ struct CashPointView: View {
     }
     
     private var showCategoryRailOnPhone: Bool {
-        !(isPhoneLayout && isStockEditMode)
+        if !isPhoneLayout { return true }
+        if selectedCategory == "✏️ הערות" { return true }   // ✅ keep notes accessible
+        return !isStockEditMode
     }
+    
     private struct BasketSection: Identifiable {
         let id: Int
         let headerTime: String?   // e.g. "8:32" or "הוספה"
@@ -2774,7 +2871,7 @@ struct CashPointView: View {
         activeTeamTab = nil   // ✅ ADD THIS (important)
 
         basket.removeAll()
-        nextBasketLineId = 1
+      //  nextBasketLineId = 1
         lockedLineIds.removeAll()
         lineSessionTime.removeAll()
         unpaidOrderId = order.id
@@ -3032,12 +3129,17 @@ struct CashPointView: View {
 
                 
 
-                let isOut =
-                selectedCategory != "✏️ הערות"
-                && (
-                    (isStockEditMode ? !derivedOnFromQty : !stockToggles.isOn(item.id))
-                    || (remainingForItem ?? 1) <= 0
-                )
+                let isOut: Bool = {
+                    guard selectedCategory != "✏️ הערות" else { return false }
+
+                    // ✅ If we have a stock number locally, it wins immediately
+                    if let q = stockAdjustments[item.id] {
+                        return q <= 0
+                    }
+
+                    // ✅ Otherwise fall back to the legacy on/off toggle + remaining
+                    return (!stockToggles.isOn(item.id)) || ((remainingForItem ?? 1) <= 0)
+                }()
                 let canAdd = remaining > 0 && !isOut && selectedCategory != "✏️ הערות"
                 let canRemove = quantityInBasket(for: item) > 0
 
@@ -3140,16 +3242,12 @@ struct CashPointView: View {
 
         let base = api.items.filter { $0.category == selectedCategory }
 
-        if isStockEditMode {
-            return applyFrozenOrder(base)       // ✅ keep frozen order
+        if isAnyStockEditing {
+            return applyFrozenOrder(base)
         }
-       
         return base.sorted { productSortKey($0) < productSortKey($1) }
        }
-    // MARK: - Side menu
-
-    // MARK: - Side menu (animated)
-    // MARK: - Side menu (iOS-style)
+  
 
     @ViewBuilder
     private func sideMenuContainer() -> some View {
@@ -3320,6 +3418,17 @@ struct CashPointView: View {
                             .padding(.trailing, isRtl ? 32 : 0)
                         }
                     }
+                    if isTeamTabMode {
+                        SideMenuRow(title: "קופה", systemImage: "cart") {
+                            Task { @MainActor in
+                                backToCashpointFromTeamTab()
+                            }
+                        }
+
+                        Divider()
+                            .padding(.vertical, 6)
+                    }
+                    
                     SideMenuRow(title: "הזמנות", systemImage: "list.bullet.rectangle") {
                         showSideMenu = false
                         showOrdersAdmin = true
@@ -3492,21 +3601,21 @@ struct CashPointView: View {
                                 ProgressView().scaleEffect(0.8)
                             } else {
                                 Toggle("", isOn: Binding(
-                                    get: { mobileIsOpen },
+                                    get: { api.isOpen },
                                     set: { newVal in
-                                        // ✅ if turning OFF -> confirm first
                                         if newVal == false {
                                             confirmCloseMobile = true
                                             return
                                         }
 
-                                        // ✅ turning ON -> immediate
-                                        mobileIsOpen = true
+                                        // optimistic
+                                        api.isOpen = true
                                         Haptics.light()
                                         setMiniAppOpen(true)
                                     }
                                 ))
                                 .labelsHidden()
+                                .tint(.blue)
                             }
                         }
                         .padding(.horizontal, 16)
@@ -3799,62 +3908,72 @@ struct CashPointView: View {
 
                                         Spacer()
 
-                                        if cashPointMode {
+                                
                                             HStack(spacing: 8) {
+
+                                                // ✅ Category-wide אפס / אינסוף (same as iPad branch)
                                                 if isStockEditMode,
                                                    !selectedCategory.isEmpty,
                                                    selectedCategory != "✏️ הערות" {
+
+                                                    let isZeroed = isCategoryZeroed(selectedCategory)
+
                                                     Button {
-                                                        toggleStockForSelectedCategory()
+                                                        let items = api.items.filter { $0.category == selectedCategory }
+                                                        guard !items.isEmpty else { return }
+
+                                                        if isZeroed {
+                                                            // אינסוף
+                                                            for item in items {
+                                                                stockAdjustments[item.id] = nil
+                                                                stockText[item.id] = nil
+                                                                dirtyStockIds.insert(item.id)
+                                                                applyLocalAvailabilityFromStock(productId: item.id)
+                                                            }
+                                                        } else {
+                                                            // אפס
+                                                            for item in items {
+                                                                stockAdjustments[item.id] = 0
+                                                                stockText[item.id] = nil
+                                                                dirtyStockIds.insert(item.id)
+                                                                applyLocalAvailabilityFromStock(productId: item.id)
+                                                            }
+                                                        }
+
+                                                        Haptics.light()
                                                     } label: {
-                                                        Text("אפס")
+                                                        Text(isZeroed ? "אינסוף" : "אפס")
                                                             .font(.system(size: 14, weight: .semibold))
                                                             .padding(.horizontal, 10)
                                                             .padding(.vertical, 6)
                                                             .background(Color(.systemGray5))
                                                             .clipShape(Capsule())
                                                     }
+                                                    .buttonStyle(.plain)
                                                 }
 
+                                                // ✅ מלאי / סיים
                                                 Button {
                                                     if isStockEditMode {
-                                                        // ✅ exit stock mode = commit
                                                         Task { await flushDirtyStockAndExit() }
                                                     } else {
-                                                        withAnimation(nil) {
-                                                            isStockEditMode = true
-                                                        }
+                                                        var t = Transaction()
+                                                        t.disablesAnimations = true
+                                                        withTransaction(t) { isStockEditMode = true }
                                                     }
                                                 } label: {
-                                                    HStack(spacing: 6) {
-                                                        Text(isRtl ? (isStockEditMode ? "סיים" : "מלאי")
-                                                                   : (isStockEditMode ? "Done" : "Stock"))
-
-                                                        // ✅ tiny dirty badge
-                                                        if isStockEditMode && !dirtyStockIds.isEmpty {
-                                                            Text("\(dirtyStockIds.count)")
-                                                                .font(.system(size: 12, weight: .bold))
-                                                                .padding(.horizontal, 6)
-                                                                .padding(.vertical, 3)
-                                                                .background(Color(.systemBackground))
-                                                                .clipShape(Capsule())
-                                                        }
-
-                                                        // ✅ saving indicator
-                                                        if stockCommitInFlight {
-                                                            ProgressView()
-                                                                .scaleEffect(0.7)
-                                                        }
-                                                    }
-                                                    .font(.system(size: 14, weight: .semibold))
-                                                    .padding(.horizontal, 12)
-                                                    .padding(.vertical, 6)
-                                                    .background(Color(.systemGray5))
-                                                    .clipShape(Capsule())
+                                                    Text(isRtl ? (isStockEditMode ? "סיים" : "מלאי")
+                                                               : (isStockEditMode ? "Done" : "Stock"))
+                                                        .font(.system(size: 14, weight: .semibold))
+                                                        .padding(.horizontal, 12)
+                                                        .padding(.vertical, 6)
+                                                        .background(Color(.systemGray5))
+                                                        .clipShape(Capsule())
                                                 }
+                                                .buttonStyle(.plain)
                                                 .disabled(stockCommitInFlight)
                                             }
-                                        }
+                                        
                                     }
 
                                     // ✅ centered "nav bar" title
@@ -4104,6 +4223,7 @@ struct CashPointView: View {
                                             .background(Color(.systemGray5))
                                             .clipShape(Capsule())
                                     }
+                                    .padding(.trailing, 50)
                                 }
                                 // Stock mode toggle
                                 Button {
@@ -4162,7 +4282,10 @@ struct CashPointView: View {
                                 )
                                 if isPad{
                                     VStack(spacing: 8) {
-                                        printBacklogHUD()
+                                        if !isMiniApp13 {
+                                            
+                                            printBacklogHUD()
+                                        }
                                         
                                         if showLastInvoicePrompt,
                                            let title = lastInvoicePromptTitle(),
@@ -4208,12 +4331,17 @@ struct CashPointView: View {
                                             }()
                                             let remainingForItem = maxAdditionalQuantity(for: item)
 
-                                            let isOut =
-                                            selectedCategory != "✏️ הערות"
-                                            && (
-                                                !stockToggles.isOn(item.id)
-                                                || (remainingForItem ?? 1) <= 0
-                                            )
+                                            let isOut: Bool = {
+                                                guard selectedCategory != "✏️ הערות" else { return false }
+
+                                                // ✅ If we have a stock number locally, it wins immediately
+                                                if let q = stockAdjustments[item.id] {
+                                                    return q <= 0
+                                                }
+
+                                                // ✅ Otherwise fall back to the legacy on/off toggle + remaining
+                                                return (!stockToggles.isOn(item.id)) || ((remainingForItem ?? 1) <= 0)
+                                            }()
 
                                             let stockAmount = stockAdjustments[item.id]
                                             let isEditingStock = editingStockProductId == item.id
@@ -4272,7 +4400,7 @@ struct CashPointView: View {
 
                                                                 // Reset fields
                                                                 messageText = ""
-                                                                messagePrice = "0"
+                                                                messagePrice = ""
 
                                                                 // ✅ kill any focus/keyboard BEFORE presenting the sheet
                                                                 dismissKeyboard()
@@ -4458,12 +4586,17 @@ struct CashPointView: View {
                                             let qty   = quantityInBasket(for: item)
                                             let remainingForItem = maxAdditionalQuantity(for: item)
 
-                                            let isOut =
-                                            selectedCategory != "✏️ הערות"
-                                            && (
-                                                !stockToggles.isOn(item.id)
-                                                || (remainingForItem ?? 1) <= 0
-                                            )
+                                            let isOut: Bool = {
+                                                guard selectedCategory != "✏️ הערות" else { return false }
+
+                                                // ✅ If we have a stock number locally, it wins immediately
+                                                if let q = stockAdjustments[item.id] {
+                                                    return q <= 0
+                                                }
+
+                                                // ✅ Otherwise fall back to the legacy on/off toggle + remaining
+                                                return (!stockToggles.isOn(item.id)) || ((remainingForItem ?? 1) <= 0)
+                                            }()
 
                                             let stockAmount = stockAdjustments[item.id]
                                             let isEditingStock = editingStockProductId == item.id
@@ -4678,10 +4811,12 @@ struct CashPointView: View {
            
            // .transaction { $0.disablesAnimations = true }
             .onReceive(backlogPoll) { _ in
+                if printInFlight { return }
                 updatePendingBacklog()
             }
             
             .onAppear {
+                clearSavedContactAndService()
                 let sid = UserDefaults.standard.string(forKey: "shopId") ?? "12"
                    if let cfg = loadSavedPrinters(shopId: sid) {
                        print("🎯 TEST prefix =", cfg.netPrefix ?? "nil")
@@ -4697,7 +4832,7 @@ struct CashPointView: View {
                     api.load(skipCache: false)   // allow UserDefaults/file cache
                 } else {
                     // Already have items (e.g. returning to view) – just try a network refresh
-                    api.load(skipCache: true)
+                    safeReloadMenu(reason: "toggle isOpen")
                 }
             }
             .onChange(of: focusedStockProductId) { newVal in
@@ -4746,6 +4881,7 @@ struct CashPointView: View {
                 }
             }
             .onChange(of: basket.count) { _ in
+                Task { @MainActor in cleanupLineStateForCurrentBasket() }
                 let currentIds = Set(basket.keys)
                 discountedLineIds = discountedLineIds.intersection(currentIds)
                 if discountAllSelected {
@@ -4940,9 +5076,10 @@ struct CashPointView: View {
                 if stockCommitInFlight { return }
                 if !stockToggles.pending.isEmpty { return }   // status toggle sync in-flight
 
-                if !showOrderFlow && basket.isEmpty {
-                    api.load(skipCache: true)
-                }
+                if showOrderFlow { return }
+                if !basket.isEmpty { return }          // ✅ stronger than “basket empty only”
+                if printInFlight { return }            // ✅ add this flag
+                safeReloadMenu(reason: "toggle isOpen")
             }
             .onChange(of: isPayLaterMode) { print("isPayLaterMode =", $0) }
             .fullScreenCover(isPresented: $showOrderFlow) {
@@ -4980,6 +5117,8 @@ struct CashPointView: View {
 
                         // 🖨️ PRINT – once
                         Task {
+                            await MainActor.run { printInFlight = true }
+
                             let ok = await PrinterManager.shared.printCashPointSplit(
                                 orderNumber: ticketNumber,
                                 entries: entriesArray,
@@ -4988,6 +5127,8 @@ struct CashPointView: View {
                                 customerName: safeNameForPrint,
                                 customerPhone: posSavedPhone
                             )
+                            await MainActor.run { printInFlight = false }
+
 
                             await MainActor.run {
                                 if ok {
@@ -5030,6 +5171,8 @@ struct CashPointView: View {
                             orderType: (activeTeamTab == nil) ? nil : "teamTab",
                             tabKey: activeTeamTab?.rawValue
                         ) { submitResult in
+                            clearSavedContactAndService()
+
                             DispatchQueue.main.async {
                                 switch submitResult {
                                 case .success(let serverOrderId):
@@ -5073,7 +5216,7 @@ struct CashPointView: View {
 
                         // Keep your reset in ONE place (here)
                         basket.removeAll()
-                        nextBasketLineId = 1
+                       // nextBasketLineId = 1
 
                         // reset modifiers/edit UI state (safe)
                         expandedBasketLineId = nil
@@ -5458,6 +5601,8 @@ struct CashPointView: View {
             """)
 
             Task {
+                await MainActor.run { printInFlight = true }
+
                 let ok = await PrinterManager.shared.printCashPointSplit(
                     orderNumber: ticketNumber,
                     entries: printerEntries,
@@ -5466,6 +5611,8 @@ struct CashPointView: View {
                     customerName: nameSnapshot,
                     customerPhone: phoneSnapshot
                 )
+                await MainActor.run { printInFlight = false }
+
 
                 await MainActor.run {
                     if ok {
@@ -5519,7 +5666,7 @@ struct CashPointView: View {
             // showOrderFlow = false
 
             basket.removeAll()
-            nextBasketLineId = 1
+          //  nextBasketLineId = 1
 
             expandedBasketLineId = nil
             noteDrafts.removeAll()
@@ -5575,6 +5722,9 @@ struct CashPointView: View {
             DispatchQueue.main.async {
                 switch result {
                 case .success(let serverOrderId):
+                    clearSavedContactAndService()
+
+                    applyOrderToLocalStock(entries: entriesArray)
                     posSavedName  = ""
                     posSavedPhone = ""
 
@@ -5793,7 +5943,7 @@ struct CashPointView: View {
         lockedLineIds.removeAll()
         lineSessionTime.removeAll()
         unpaidOrderId = nil
-        nextBasketLineId = 1
+      //  nextBasketLineId = 1
 
         let miniAppId = resolvedMiniAppId
 
@@ -5850,7 +6000,7 @@ struct CashPointView: View {
 
         // 🔥🔥 CLEAR CURRENT BASKET BEFORE REFUNDING — NEW LINE
         basket.removeAll()
-        nextBasketLineId = 1
+       // nextBasketLineId = 1
 
         var i = 0
         let lines = bone.items
@@ -6349,7 +6499,7 @@ struct CashPointView: View {
         @FocusState private var messageFocused: Bool
         @FocusState private var priceFocused: Bool
 
-        // ✅ NEW: sign toggle (because decimalPad has no minus on iPad)
+        // ✅ sign toggle (because decimalPad has no minus on iPad)
         @State private var isNegative: Bool = false
 
         private var title: String {
@@ -6362,18 +6512,24 @@ struct CashPointView: View {
             }
         }
 
-        // ✅ Parse absolute numeric value from priceText (digits only)
-        private var parsedAbsPrice: Double? {
-            let raw = priceText
-                .replacingOccurrences(of: ",", with: ".")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+        private var trimmedPrice: String {
+            priceText.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
 
-            if raw.isEmpty { return 0 }   // default 0
+        private var hasTypedPrice: Bool {
+            !trimmedPrice.isEmpty
+        }
+
+        // ✅ Parse numeric value; empty = 0 (so you can add note without typing price)
+        private var parsedAbsPrice: Double? {
+            let raw = trimmedPrice
+                .replacingOccurrences(of: ",", with: ".")
+
+            if raw.isEmpty { return 0 } // ✅ allow empty => 0
             guard let d = Double(raw) else { return nil }
             return abs(d)
         }
 
-        // ✅ Final signed price uses the toggle (works on iPad numeric keyboard)
         private var parsedPrice: Double? {
             guard let v = parsedAbsPrice else { return nil }
             return isNegative ? -v : v
@@ -6385,10 +6541,10 @@ struct CashPointView: View {
             !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
 
-        // ✅ show minus sign next to the field (visual feedback)
+        // ✅ show preview ONLY if user typed something (so you don't see 0.00)
         private var signedPreview: String {
+            guard hasTypedPrice else { return "" }
             let v = (parsedAbsPrice ?? 0)
-            // keep it simple (you can format decimals if you want)
             let num = String(format: "%.2f", v)
             return (isNegative ? "-" : "") + num
         }
@@ -6420,7 +6576,7 @@ struct CashPointView: View {
                         }
                     }
 
-                    // ✅ PRICE ROW: +/- toggle + decimalPad (no minus key needed)
+                    // ✅ PRICE ROW: +/- toggle + placeholder-only "0"
                     HStack(spacing: 10) {
 
                         Button {
@@ -6436,45 +6592,63 @@ struct CashPointView: View {
                         }
                         .buttonStyle(.plain)
 
-                        TextField(isRtl ? "סכום" : "Amount", text: Binding(
-                            get: { priceText },
-                            set: { newValue in
-                                // ✅ keep only digits + one dot (optional)
-                                // allows fast paste / typing while staying numeric-safe
-                                var s = newValue
-                                    .replacingOccurrences(of: ",", with: ".")
-                                    .trimmingCharacters(in: .whitespacesAndNewlines)
-
-                                // remove leading "-"
-                                if s.hasPrefix("-") { s.removeFirst() }
-
-                                // keep only digits and "."
-                                s = s.filter { $0.isNumber || $0 == "." }
-
-                                // allow only one "."
-                                if let firstDot = s.firstIndex(of: ".") {
-                                    let after = s.index(after: firstDot)
-                                    let rest = s[after...].replacingOccurrences(of: ".", with: "")
-                                    s = String(s[..<after]) + rest
-                                }
-
-                                priceText = s
+                        // ✅ Placeholder "0" drawn only when empty
+                        ZStack(alignment: isRtl ? .trailing : .leading) {
+                            if trimmedPrice.isEmpty {
+                                Text("0")
+                                    .foregroundColor(.secondary)
+                                    .padding(.horizontal, 10)
+                                    .frame(maxWidth: .infinity,
+                                           alignment: isRtl ? .trailing : .leading)
+                                    .allowsHitTesting(false)
                             }
-                        ))
-                        .keyboardType(.decimalPad)
-                        .padding(10)
-                        .background(Color(.secondarySystemBackground))
-                        .cornerRadius(10)
-                        .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
-                        .focused($priceFocused)
-                        // ✅ DO NOT auto-select-all or auto-focus (prevents annoying popup focus)
-                        // .onChange(of: priceFocused) { ... }  // removed
 
-                        // ✅ tiny live preview (optional but nice)
-                        Text(signedPreview)
-                            .font(.system(size: 13, weight: .semibold, design: .monospaced))
-                            .foregroundColor(.secondary)
-                            .frame(width: 88, alignment: .trailing)
+                            TextField("", text: Binding(
+                                get: { priceText },
+                                set: { newValue in
+                                    var s = newValue
+                                        .replacingOccurrences(of: ",", with: ".")
+                                        .trimmingCharacters(in: .whitespacesAndNewlines)
+
+                                    // remove leading "-"
+                                    if s.hasPrefix("-") { s.removeFirst() }
+
+                                    // keep only digits and "."
+                                    s = s.filter { $0.isNumber || $0 == "." }
+
+                                    // allow only one "."
+                                    if let firstDot = s.firstIndex(of: ".") {
+                                        let after = s.index(after: firstDot)
+                                        let rest = s[after...].replacingOccurrences(of: ".", with: "")
+                                        s = String(s[..<after]) + rest
+                                    }
+
+                                    priceText = s
+                                }
+                            ))
+                            .keyboardType(.decimalPad)
+                            .padding(10)
+                            .background(Color(.secondarySystemBackground))
+                            .cornerRadius(10)
+                            .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
+                            .focused($priceFocused)
+                            .overlay(alignment: isRtl ? .trailing : .leading) {
+                                if priceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                    Text("0")
+                                        .foregroundColor(.secondary)
+                                        .padding(.horizontal, 10)
+                                        .allowsHitTesting(false)
+                                }
+                            }
+                        }
+
+                        // ✅ preview only after typing (otherwise empty)
+                        if hasTypedPrice {
+                            Text(signedPreview)
+                                .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                                .foregroundColor(.secondary)
+                                .frame(width: 88, alignment: .trailing)
+                        }
                     }
 
                     // SAVE BUTTON – text can be empty
@@ -6487,10 +6661,10 @@ struct CashPointView: View {
                     } label: {
                         Text(isRtl ? "הוסף להזמנה" : "Add to order")
                             .font(.system(size: 18, weight: .bold))
-                            .foregroundColor(.white)
+                            .foregroundColor(.black)
                             .frame(maxWidth: .infinity)
                             .frame(height: 52)
-                            .background(canSubmit ? .black : Color.gray.opacity(0.4))
+                            .background(canSubmit ? .white : Color.gray.opacity(0.4))
                             .cornerRadius(16)
                     }
                     .disabled(!canSubmit)
@@ -6512,12 +6686,12 @@ struct CashPointView: View {
                     }
                 }
                 .onAppear {
-                    // default price to 0 so waiter can just type note or nothing
-                    if priceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        priceText = "0"
+                    // ✅ IMPORTANT: do NOT force "0"
+                    if priceText.trimmingCharacters(in: .whitespacesAndNewlines) == "0" {
+                        priceText = ""
                     }
 
-                    // ✅ prevent auto-focus on appear
+                    // prevent auto-focus
                     messageFocused = false
                     priceFocused = false
                     DispatchQueue.main.async {
@@ -7809,14 +7983,30 @@ struct CashPointView: View {
             !trimmedText.isEmpty
         }
 
+        private var placeholder: String {
+            isRtl ? "הוסף הערה..." : "Add a note…"
+        }
+
         var body: some View {
             NavigationStack {
                 VStack(spacing: 16) {
-                    // Text field + inline clear button
-                    ZStack(alignment: .topTrailing) {
-                        TextField(isRtl ? "הוסף הערה..." : "Add a note…",
-                                  text: $text,
-                                  axis: .vertical)
+
+                    // ✅ Text field with REAL placeholder (no default "0")
+                    ZStack(alignment: isRtl ? .topTrailing : .topLeading) {
+
+                        // Placeholder layer (only when empty)
+                        if trimmedText.isEmpty {
+                            Text(placeholder)
+                                .foregroundColor(.secondary)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 14)
+                                .frame(maxWidth: .infinity,
+                                       alignment: isRtl ? .topTrailing : .topLeading)
+                                .allowsHitTesting(false)
+                        }
+
+                        // Actual editor
+                        TextField("", text: $text, axis: .vertical)
                             .lineLimit(2...4)
                             .padding(12)
                             .background(Color(.secondarySystemBackground))
@@ -7824,10 +8014,9 @@ struct CashPointView: View {
                             .focused($focused)
                             .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
 
+                        // Clear button
                         if hasText {
-                            Button {
-                                text = ""
-                            } label: {
+                            Button { text = "" } label: {
                                 Image(systemName: "xmark.circle.fill")
                                     .font(.system(size: 16, weight: .semibold))
                                     .foregroundColor(.secondary)
@@ -7857,9 +8046,7 @@ struct CashPointView: View {
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
-                        Button {
-                            onCancel()
-                        } label: {
+                        Button { onCancel() } label: {
                             Image(systemName: "xmark")
                                 .font(.system(size: 16, weight: .bold))
                                 .padding(8)
@@ -7869,7 +8056,12 @@ struct CashPointView: View {
                     }
                 }
                 .onAppear {
-                    text = initialText
+                    // ✅ Treat "0" as empty so placeholder shows
+                    let cleaned = initialText
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    text = (cleaned == "0") ? "" : cleaned
+
+                    // focus after present
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                         focused = true
                     }
@@ -8226,6 +8418,8 @@ struct POSProductSheet: View {
             .background(Color(.systemBackground))
         }
         .onAppear {
+   
+
             if let groups = item.modifiers {
                 for g in groups where g.type == .options {
                     if selectedOptions[g.title] == nil,
@@ -8449,6 +8643,8 @@ enum CashpointOrderQueue {
             ) { result in
                 switch result {
                 case .success:
+                
+
                     var updated = load()
                     if index < updated.count {
                         updated.remove(at: index)
@@ -8472,6 +8668,12 @@ final class StockToggleStore: ObservableObject {
     private let prefix: String
     private let shopId: Int
 
+    @MainActor
+    func setLocalOn(_ productId: Int, _ on: Bool) {
+        state[productId] = on
+        UserDefaults.standard.set(on, forKey: prefix + String(productId))
+        objectWillChange.send()
+    }
     init(shopId: Int) {
         self.shopId = shopId
         self.prefix = "stock.toggle.\(shopId)."

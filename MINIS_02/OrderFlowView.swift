@@ -17,7 +17,225 @@ struct OrderFlowView: View {
     @State private var didInit = false
     @State private var confirmationAutoResetTask: Task<Void, Never>? = nil
     @State private var splitCardTapLocked = false
+    @State private var splitBaseTotal: Double? = nil
+    @AppStorage("miniAppId") private var storedMiniAppId: Int = 0   // only if you already store it
+    @State private var nameKbMode: NameKbMode = .he                 // runtime toggle
+    @State private var partialPayToken: String = ""
+    @AppStorage("nameKbMode13") private var nameKbMode13Raw: String = "he" // persist per shop
+    private enum NameKbMode: String { case he, ar }
+    private var hasSavedName: Bool {
+        !posSavedName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+    private var hasProgress: Bool {
+        round2(remainingToPay) < round2(initialPaymentTarget) - 0.01
+    }
+    private func dbg(_ msg: String) {
+        print("🟦[PartialPay] \(msg)")
+    }
+
+    private func dbgDumpStore(prefix: String = "") {
+        let ud = UserDefaults.standard
+        let card = ud.double(forKey: PartialPayStore.card)
+        let cash = ud.double(forKey: PartialPayStore.cash)
+        let rem  = ud.double(forKey: PartialPayStore.remaining)
+        let tot  = ud.double(forKey: PartialPayStore.total)
+        let ts   = ud.double(forKey: PartialPayStore.ts)
+        let token = ud.string(forKey: PartialPayStore.token) ?? ""
+        let mini = ud.integer(forKey: PartialPayStore.mini)
+
+        dbg("\(prefix)store: card=\(card) cash=\(cash) rem=\(rem) total=\(tot) ts=\(ts) age=\(ts > 0 ? Int(Date().timeIntervalSince1970 - ts) : -1)s mini=\(mini) token=\(token.prefix(8))…")
+    }
+
+    private enum PartialPayStore {
+        static let card = "pos.partialPay.card"
+        static let cash = "pos.partialPay.cash"
+        static let remaining = "pos.partialPay.remaining"
+        static let total = "pos.partialPay.total"
+
+        // ✅ fingerprint
+        static let ts = "pos.partialPay.ts"         // TimeInterval since 1970
+        static let token = "pos.partialPay.token"   // random per flow
+        static let mini = "pos.partialPay.miniId"   // optional but cheap
+    }
+
+
+    @MainActor
+    private func persistPartialPaySnapshot() {
+        if partialPayToken.isEmpty {
+            partialPayToken = UUID().uuidString
+        }
+
+        let now = Date().timeIntervalSince1970
+
+        UserDefaults.standard.set(cardPaidTotal, forKey: PartialPayStore.card)
+        UserDefaults.standard.set(cashPaidTotal, forKey: PartialPayStore.cash)
+        UserDefaults.standard.set(remainingToPay, forKey: PartialPayStore.remaining)
+        UserDefaults.standard.set(round2(initialPaymentTarget), forKey: PartialPayStore.total)
+
+        UserDefaults.standard.set(now, forKey: PartialPayStore.ts)
+        UserDefaults.standard.set(partialPayToken, forKey: PartialPayStore.token)
+        UserDefaults.standard.set(MenuTheme.miniId, forKey: PartialPayStore.mini)
+
+      
+        dbg("PERSIST ✅ token=\(partialPayToken.prefix(8))… now=\(Int(now)) totalNow=\(round2(initialPaymentTarget)) hasAnyPayment=\(hasAnyPayment) remaining=\(remainingToPay)")
+        dbgDumpStore(prefix: "after persist: ")
+        
+    }
+
+  
+   
+    @MainActor
+    private func restorePartialPaySnapshotIfAny() {
+        #if DEBUG
+        dbg("RESTORE attempt… totalNow=\(round2(initialPaymentTarget)) miniNow=\(MenuTheme.miniId)")
+        dbgDumpStore(prefix: "before restore: ")
+        #endif
+
+        let ud = UserDefaults.standard
+
+        let card       = ud.double(forKey: PartialPayStore.card)
+        let cash       = ud.double(forKey: PartialPayStore.cash)
+        let rem        = ud.double(forKey: PartialPayStore.remaining)
+        let savedTotal = ud.double(forKey: PartialPayStore.total)
+
+        let savedTs    = ud.double(forKey: PartialPayStore.ts)
+        let savedToken = ud.string(forKey: PartialPayStore.token) ?? ""
+        let savedMini  = ud.integer(forKey: PartialPayStore.mini)
+
+        guard (card + cash) > 0.01 else {
+            #if DEBUG
+            dbg("RESTORE skip: nothing meaningful saved (card+cash=\(card+cash))")
+            #endif
+            return
+        }
+
+        // 1) total guard
+        let nowTotal = round2(initialPaymentTarget)
+        if savedTotal > 0.01, abs(savedTotal - nowTotal) > 0.01 {
+            #if DEBUG
+            dbg("RESTORE CLEAR: total mismatch saved=\(savedTotal) now=\(nowTotal)")
+            #endif
+            clearPartialPaySnapshot()
+            return
+        }
+
+        // 2) freshness guard (5 minutes)
+        let maxAge: TimeInterval = 15 * 60
+        let nowTs = Date().timeIntervalSince1970
+        let age = nowTs - savedTs
+        if savedTs <= 0 || age < 0 || age > maxAge {
+            #if DEBUG
+            dbg("RESTORE CLEAR: age invalid savedTs=\(savedTs) age=\(Int(age))s max=\(Int(maxAge))s")
+            #endif
+            clearPartialPaySnapshot()
+            return
+        }
+
+        // 3) mini guard
+        if savedMini != 0 && savedMini != MenuTheme.miniId {
+            #if DEBUG
+            dbg("RESTORE CLEAR: mini mismatch savedMini=\(savedMini) nowMini=\(MenuTheme.miniId)")
+            #endif
+            clearPartialPaySnapshot()
+            return
+        }
+
+        if !savedToken.isEmpty {
+            partialPayToken = savedToken
+        }
+
+        cardPaidTotal = card
+        cashPaidTotal = cash
+
+        if rem > 0.001 {
+            remainingToPay = rem
+        } else {
+            recomputeRemainingFromTotals()
+        }
+
+      
+        dbg("RESTORE ✅ token=\(partialPayToken.prefix(8))… restored card=\(cardPaidTotal) cash=\(cashPaidTotal) remaining=\(remainingToPay)")
+       
+    }
+
+    @MainActor
+    private func clearPartialPaySnapshot() {
+        #if DEBUG
+        dbg("CLEAR 🧹 (before)")
+        dbgDumpStore(prefix: "")
+        #endif
+
+        UserDefaults.standard.removeObject(forKey: PartialPayStore.card)
+        UserDefaults.standard.removeObject(forKey: PartialPayStore.cash)
+        UserDefaults.standard.removeObject(forKey: PartialPayStore.remaining)
+        UserDefaults.standard.removeObject(forKey: PartialPayStore.total)
+
+        UserDefaults.standard.removeObject(forKey: PartialPayStore.ts)
+        UserDefaults.standard.removeObject(forKey: PartialPayStore.token)
+        UserDefaults.standard.removeObject(forKey: PartialPayStore.mini)
+
+        partialPayToken = ""
+
+       
+        dbg("CLEAR ✅ (after)")
+        dbgDumpStore(prefix: "")
+      
+    }
     
+    
+    @MainActor
+    private func pushFlowAndLandOn(_ last: Route) {
+        // Build the logical sequence
+        var seq: [Route] = []
+
+        if isMini13 {
+            seq.append(.name)              // no service for mini13
+        } else {
+            seq.append(.service)
+            seq.append(.name)
+        }
+
+        if mustAskPhone {
+            seq.append(.phone)
+        }
+
+        seq.append(.charge)
+
+        // If you ever want to land somewhere else:
+        // (e.g. last == .phone), just truncate up to that point.
+        if let idx = seq.firstIndex(of: last) {
+            seq = Array(seq.prefix(idx + 1))
+        }
+
+        // Reset stack
+        path = NavigationPath()
+        root = seq.first ?? .charge
+
+        // Push the rest with animations disabled
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            for r in seq.dropFirst() {
+                path.append(r)
+            }
+        }
+    }
+    private var hasSavedPhone: Bool {
+        let d = posSavedPhone.filter(\.isNumber)
+        return d.count == 10 && d.first == "0"
+    }
+    
+   
+    @MainActor
+    private func hydrateDraftFromStorageIfNeeded() {
+        if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            name = posSavedName
+        }
+        if phoneDigits.filter(\.isNumber).isEmpty {
+            phoneDigits = posSavedPhone
+        }
+    }
+    private var isMini13: Bool { MenuTheme.miniId == 13 }
     @AppStorage("cashPointMode") private var cashPointMode: Bool = false
     @Environment(\.colorScheme) private var colorScheme
     @State private var restartWork: DispatchWorkItem? = nil
@@ -129,6 +347,8 @@ struct OrderFlowView: View {
     @State private var root: Route = .service
     
     private func push(_ r: Route) {
+        if isMini13 && r == .service { return }
+
         path.append(r)
     }
 
@@ -137,8 +357,13 @@ struct OrderFlowView: View {
     }
 
     private func goToNextAfterService_push() {
-        // ✅ ALWAYS ask name first (both kiosk + cashpoint)
-        push(.name)
+        if !hasSavedName {
+            push(.name)
+        } else if mustAskPhone && !hasSavedPhone {
+            push(.phone)
+        } else {
+            push(.charge)
+        }
     }
 
     private func goToChargeFromName_push() {
@@ -162,7 +387,8 @@ struct OrderFlowView: View {
         // ✅ also persist so printing never loses it mid-flow
         if let n = nameParam { posSavedName = n }
         if let p = phoneParam { posSavedPhone = p.filter(\.isNumber) }
-
+        
+        persistPartialPaySnapshot()
         onPartialUpdate(phoneParam, nameParam, summary, discountOff, tipOff)
     }
     
@@ -187,7 +413,7 @@ struct OrderFlowView: View {
     private func submitPayLaterNow() {
         guard !didSubmitThisFlow && !isSubmittingNow else { return }
         isSubmittingNow = true
-
+        clearPartialPaySnapshot()
         let phoneParam = phoneDigits.trimmedIsEmpty ? nil : phoneDigits
         let nameParam  = cleanName.isEmpty ? nil : cleanName
 
@@ -225,11 +451,11 @@ struct OrderFlowView: View {
 
         // ✅ Ensure remaining is initialized at least once
         if remainingToPay <= 0.001 {
-            remainingToPay = baseTotal
+            recomputeRemainingFromTotals()
         }
 
         let phoneParam = phoneDigits.trimmedIsEmpty ? nil : phoneDigits
-        let nameParam = cleanName.isEmpty ? nil : cleanName
+        let nameParam  = cleanName.isEmpty ? nil : cleanName
 
         // ✅ Decide "due now" based on mode (single source of truth)
         let dueNow: Double = {
@@ -265,10 +491,15 @@ struct OrderFlowView: View {
         if let manual = manualCashTargetAmount {
             // Pay-on-the-bill (manual)
             let manualDue = round2(max(manual, 0))
-            let applied = round2(min(cashThis, manualDue))
+            let applied   = round2(min(cashThis, manualDue))
 
             remainingToPay = round2(max(remainingToPay - applied, 0))
-            acceptedCash = applied >= 0.01
+            acceptedCash   = applied >= 0.01
+
+            // ✅ persist partial state for mid-flow dismiss
+            if acceptedCash {
+                persistPartialPaySnapshot()
+            }
 
             // clear manual mode after applying
             manualCashTargetAmount = nil
@@ -279,13 +510,16 @@ struct OrderFlowView: View {
                   splitParts.indices.contains(idx) {
 
             // Split-row cash: must cover the part to mark it paid
-            let partDue = round2(Double(splitParts[idx].amount))
+            let partDue    = round2(Double(splitParts[idx].amount))
             let coversPart = cashThis >= partDue - 0.001
 
             if coversPart {
                 // ✅ mark the split row as paid (markPartPaid recomputes remainingToPay)
                 markPartPaid(idx)
                 acceptedCash = true
+
+                // ✅ persist partial state for mid-flow dismiss
+                persistPartialPaySnapshot()
 
                 activeSplitIndex = nil
                 manualCashTargetAmount = nil
@@ -301,6 +535,9 @@ struct OrderFlowView: View {
             // Normal cash
             remainingToPay = round2(max(remainingToPay - cashThis, 0))
             acceptedCash = true
+
+            // ✅ persist partial state for mid-flow dismiss
+            persistPartialPaySnapshot()
         }
 
         // ✅ IMPORTANT: stamp lastCashPaidAt ONLY if we actually accepted cash
@@ -315,10 +552,10 @@ struct OrderFlowView: View {
         let fullyPaid = remainingToPay <= 0.001
 
         if fullyPaid {
-            // ✅ FINAL submit
+            clearPartialPaySnapshot() // ✅ add
+
             onCompleted(phoneParam, nameParam, summary, discountOff, tipOff)
             return true
-
         } else {
             // ✅ PARTIAL submit (no close / no reset)
             onPartialUpdate(phoneParam, nameParam, summary, discountOff, tipOff)
@@ -526,7 +763,7 @@ struct OrderFlowView: View {
     // SPLIT MODEL
     struct SplitPart: Identifiable, Equatable {
         let id: Int          // index
-        var amount: Int      // integer currency units
+        var amount: Double     // integer currency units
         var isPaid: Bool
     }
 
@@ -688,7 +925,19 @@ struct OrderFlowView: View {
     }
 
     
+    private func setNameKbMode(_ m: NameKbMode) {
+        nameKbMode = m
+        if isMini13 { nameKbMode13Raw = m.rawValue }
+    }
     
+    private var arabicRowsWide: [[String]] {
+        [
+            ["ض","ص","ث","ق","ف","غ","ع","ه","خ","ح","ج","د","⌫"],
+            ["ش","س","ي","ب","ل","ا","ت","ن","م","ك","ط"],
+            ["ئ","ء","ؤ","ر","لا","ى","ة","و","ز","ظ","'"],
+            ["مسافة"] // keep your existing space label so your width logic stays identical
+        ]
+    }
     private func tapBill(_ value: Int) {
         // Take only digits from current text
         let digitsOnly = cashInput.filter(\.isNumber)
@@ -795,7 +1044,7 @@ struct OrderFlowView: View {
                     case .charge:
                         chargeStep
                             .safeAreaInset(edge: .bottom) {
-                                if cashPointMode {
+                                if cashPointMode && 1==2 {
                                     HStack {
                                         Spacer()
                                         CashPointView.SwipeToSendOrderView(
@@ -840,25 +1089,82 @@ struct OrderFlowView: View {
                 .environment(\.layoutDirection, .rightToLeft)
                 .environment(\.locale, Locale(identifier: "he_IL"))
             }
+            .onChange(of: remainingToPay) { v in
+                dbg("remainingToPay -> \(round2(v)) (paid=\(round2(cardPaidTotal + cashPaidTotal)) totalNow=\(round2(initialPaymentTarget)))")
+            }
+            .onChange(of: cardPaidTotal) { v in
+                dbg("cardPaidTotal -> \(round2(v)) (remaining=\(round2(remainingToPay)))")
+            }
+            .onChange(of: cashPaidTotal) { v in
+                dbg("cashPaidTotal -> \(round2(v)) (remaining=\(round2(remainingToPay)))")
+            }
+            .onDisappear {
+                let shouldPersist = cashPointMode && remainingToPay > 0.001 && (hasAnyPayment || hasProgress)
+                print("🟦[PartialPay] onDisappear: cashPointMode=\(cashPointMode) hasAnyPayment=\(hasAnyPayment) hasProgress=\(hasProgress) remaining=\(round2(remainingToPay)) shouldPersist=\(shouldPersist)")
+                if shouldPersist {
+                    persistPartialPaySnapshot()
+                }
+            }
             .onAppear {
+                dbg("onAppear: didInit=\(didInit) cashPointMode=\(cashPointMode) remaining=\(round2(remainingToPay)) paid=\(round2(cardPaidTotal + cashPaidTotal)) totalNow=\(round2(initialPaymentTarget))")
+
+                // ✅ Always attempt restore in POS mode (even if view instance is reused)
+                if cashPointMode {
+                    restorePartialPaySnapshotIfAny()
+                    dbg("onAppear AFTER restore: remaining=\(round2(remainingToPay)) paid=\(round2(cardPaidTotal + cashPaidTotal)) totalNow=\(round2(initialPaymentTarget))")
+                }
+
+                // ✅ Keep the “init once” logic only for stack-building / navigation setup
                 guard !didInit else { return }
                 didInit = true
 
-                if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    name = posSavedName
-                }
+                if partialPayToken.isEmpty { partialPayToken = UUID().uuidString }
+                if isMini13 { nameKbMode = NameKbMode(rawValue: nameKbMode13Raw) ?? .he }
+
+                if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { name = posSavedName }
                 phoneDigits = posSavedPhone
 
-                if remainingToPay == 0 {
-                    remainingToPay = initialPaymentTarget
-                }
+                if remainingToPay == 0 { recomputeRemainingFromTotals() }
 
-                root = startAtCharge ? .charge : .service
+                let land: Route = {
+                    if startAtCharge { return .charge }
+                    if !hasSavedName { return isMini13 ? .name : .service }
+                    if mustAskPhone && !hasSavedPhone { return .phone }
+                    return .charge
+                }()
+
+                Task { @MainActor in
+                    hydrateDraftFromStorageIfNeeded()
+                    pushFlowAndLandOn(land)
+                }
             }
 
             // keep your sheets/covers exactly the same:
             .fullScreenCover(isPresented: $payingWithCash) { cashFullScreen }
             .sheet(isPresented: $showSplitSheet) { splitSheetView }
+            .onChange(of: showSplitSheet) { v in
+                print("🟣 showSplitSheet -> \(v)")
+            }
+            .onChange(of: showSplitAmountPad) { v in
+                print("🟣 showSplitAmountPad -> \(v), idx=\(String(describing: splitAmountPadIndex))")
+            }
+            .onChange(of: showOnBillPad) { v in
+                print("🟣 showOnBillPad -> \(v)")
+            }
+            .onChange(of: payingWithCash) { v in
+                print("🟣 payingWithCash -> \(v)")
+            }
+            .onChange(of: showTipSheet) { v in
+                print("🟣 showTipSheet -> \(v)")
+            }
+            .onChange(of: isSplitMode) { v in
+                print("🟣 isSplitMode -> \(v), parts=\(splitParts.count)")
+            }
+            .onChange(of: showTipSheet) { presented in
+                // When the tip sheet closes, tipPercent / tipFixedAmount has already been updated.
+                guard presented == false else { return }
+                restartPaymentAfterTipChangeIfNeeded()
+            }
             .fullScreenCover(isPresented: $showTipSheet) {
                 TipSheetView(
                     isRtl: isRtl,
@@ -967,6 +1273,7 @@ struct OrderFlowView: View {
                 .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
             }
         }
+        
     }
 
     
@@ -1004,9 +1311,10 @@ struct OrderFlowView: View {
 
                     Button {
                         isSplitMode = false
-                        splitParts.removeAll()
-                        remainingToPay = 0
-                        activeSplitIndex = nil
+                           splitParts.removeAll()
+                           activeSplitIndex = nil
+                           splitBaseTotal = nil
+                           recomputeRemainingFromTotals()
                     } label: {
                         Text(isRtl ? "בטל" : "Cancel")
                             .font(.system(size: 14, weight: .semibold))
@@ -1033,7 +1341,7 @@ struct OrderFlowView: View {
                                     onBillInput = String(Int(amount.rounded()))
                                     showOnBillPad = true
                                 } label: {
-                                    Text(String(format: "\(currency)%.0f", amount))
+                                    Text(String(format: "\(currency)%.2f", amount))
                                         .font(.system(size: 24, weight: .bold))
                                         .foregroundColor(.primary)
                                 }
@@ -1049,19 +1357,23 @@ struct OrderFlowView: View {
                             } else {
                                 // Credit card for this split row
                                 Button {
-                                    // 1️⃣ Cancel current ZCredit transaction immediately
-                                    if !AppConfig.isDemoMode {
-                                        ZCreditPaymentHandler.shared.cancelCurrent()
-                                    }
+                                    // ✅ prevent double tap / overlapping start
+                                    guard !isPaying, !splitCardTapLocked else { return }
+                                    splitCardTapLocked = true
 
-                                    // 2️⃣ Prepare new split payment state
-                                    activeSplitIndex = idx
+                                    // ✅ do NOT cancel right before pay (causes instant failure)
                                     payError = nil
+                                    activeSplitIndex = idx
 
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                                    // ✅ small settle delay helps terminal state transitions
+                                    let settleDelay: TimeInterval = {
+                                        guard let t = lastCashPaidAt else { return 0.15 }
+                                        return (Date().timeIntervalSince(t) < 2.0) ? 0.9 : 0.15
+                                    }()
+
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + settleDelay) {
                                         startCardForSplitPart(index: idx)
                                     }
-
                                 } label: {
                                     Text(isRtl ? "אשראי" : "Credit card")
                                         .font(.system(size: 16, weight: .semibold))
@@ -1114,11 +1426,15 @@ struct OrderFlowView: View {
             isSplitMode = false
             splitParts.removeAll()
             activeSplitIndex = nil
+            splitBaseTotal = nil
+            // DO NOT force remainingToPay = 0 (let recompute handle it)
+            recomputeRemainingFromTotals()
             // don't touch remainingToPay – it keeps whatever is still outstanding
         } else {
             // Turn ON split – base on outstanding, or full total if first time
             isSplitMode = true
-                    // if 0, sets remainingToPay = total
+            recomputeRemainingFromTotals()
+            splitBaseTotal = remainingToPay > 0 ? remainingToPay : initialPaymentTarget
             splitCount = 2
             splitParts = buildSplitParts()
         }
@@ -1197,12 +1513,12 @@ struct OrderFlowView: View {
               activeSplitIndex == nil
         else {
             // In other flows just update remaining, and let cashier trigger payment manually
-            remainingToPay = initialPaymentTarget
+            recomputeRemainingFromTotals()
             return
         }
 
         // 4) Reset remainingToPay to the new total WITH tip
-        remainingToPay = initialPaymentTarget
+        recomputeRemainingFromTotals()
 
         // 5) Restart ZCredit once (debounced)
         paymentStarted = true
@@ -1292,30 +1608,48 @@ struct OrderFlowView: View {
 
         studentDiscountActive.toggle()
 
+        // 1) Cancel any in-flight ZCredit transaction
         if !AppConfig.isDemoMode {
             ZCreditPaymentHandler.shared.cancelCurrent()
         }
 
+        // 2) Reset payment UI state
         isPaying = false
         payError = nil
 
         // ✅ In the clean full-card flow, update remaining and restart once
         if !isSplitMode, manualCashTargetAmount == nil, activeSplitIndex == nil {
-            remainingToPay = initialPaymentTarget
+            recomputeRemainingFromTotals()
         }
 
+        // Only auto-restart for clean full-card flow
         guard !payingWithCash,
               !isSplitMode,
               manualCashTargetAmount == nil,
               activeSplitIndex == nil
         else { return }
 
+        // 3) Mark started so nothing else auto-starts during the wait
         paymentStarted = true
 
-        let work = DispatchWorkItem { self.startPayment() }
+        // 4) ✅ Wait 3 seconds after cancel, then start again
+        // 4) ✅ Wait 3 seconds after cancel, then start again
+        let work = DispatchWorkItem {
+            // If something changed during the wait, don’t start
+            guard !isPaying,
+                  !payingWithCash,
+                  !isSplitMode,
+                  manualCashTargetAmount == nil,
+                  activeSplitIndex == nil
+            else { return }
+
+            startPayment()
+        }
+
         restartWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0, execute: work)
     }
+    
     private func retryZCreditNow() {
         // same behavior as "תשלום באשראי"
         startCardForRemainingNow()
@@ -1356,6 +1690,7 @@ struct OrderFlowView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
             self.startPayment()
         }
+
     }
     
     private var isCashEnough: Bool {
@@ -1365,131 +1700,216 @@ struct OrderFlowView: View {
     }
     
     private var chargeStep: some View {
-        let terminalActive =
-            isPaying && !payingWithCash
+        let terminalActive = isPaying && !payingWithCash
+
         // ✅ Amount logic (single source of truth for display)
         let baseWithTip: Double = totalWithTip
         let alreadyPaid: Double = cardPaidTotal + cashPaidTotal
         let displayAmount: Double = max(baseWithTip - alreadyPaid, 0)
 
         let studentDiscountValue: Double = max(total - effectiveTotal, 0)
-        let isPhone = UIDevice.current.userInterfaceIdiom == .phone
 
-        // ✅ fixed slots so layout never jumps
-        let ringSlotH: CGFloat = 86
+        // iPhone 8 / small phones
+        let isSmallPhone: Bool = {
+            guard UIDevice.current.userInterfaceIdiom == .phone else { return false }
+            return UIScreen.main.bounds.height <= 667   // iPhone 8 / SE2 / SE3 height class
+        }()
+
+        let isPhone = UIDevice.current.userInterfaceIdiom == .phone
         let errorSlotH: CGFloat = 28
 
-        return VStack {
-            Spacer()
+        return GeometryReader { geo in
+            ScrollView(.vertical, showsIndicators: false) {
 
-            VStack(spacing: 24) {
+                VStack(spacing: 24) {
 
-                // Title
-                Text(isRtl ? "הסכום לתשלום" : "Amount to charge")
-                    .font(kioskFont(20, weight: .medium))
-                    .foregroundColor(.secondary)
-
-                // 🔢 Big amount + discount/tip lines
-                VStack(spacing: 4) {
-                    Text(String(format: "%.2f", displayAmount))
-                        .font(kioskFont(50, weight: .heavy))
-
-
-                    if studentDiscountActive, studentDiscountValue > 0 {
-                        Text(
-                            isRtl
-                            ? String(format: "הנחת סטודנט 10%%  -\(currency)%.2f", studentDiscountValue)
-                            : String(format: "Student 10%% discount  -\(currency)%.2f", studentDiscountValue)
-                        )
-                        .font(.system(size: 13))
+                    // Title
+                    Text(isRtl ? "הסכום לתשלום" : "Amount to charge")
+                        .font(kioskFont(20, weight: .medium))
                         .foregroundColor(.secondary)
-                    }
 
-                    if tipAmount > 0 {
-                        Text(
-                            String(
-                                format: isRtl ? "טיפ: \(currency)%.2f" : "Tip: \(currency)%.2f",
-                                tipAmount
+                    // 🔢 Big amount + discount/tip lines
+                    VStack(spacing: 4) {
+                        Text(String(format: "%.2f", displayAmount))
+                            .font(kioskFont(50, weight: .heavy))
+
+                        if studentDiscountActive, studentDiscountValue > 0 {
+                            Text(
+                                isRtl
+                                ? String(format: "הנחת סטודנט 10%%  -\(currency)%.2f", studentDiscountValue)
+                                : String(format: "Student 10%% discount  -\(currency)%.2f", studentDiscountValue)
                             )
-                        )
-                        .font(.system(size: 13))
-                        .foregroundColor(.secondary)
+                            .font(.system(size: 13))
+                            .foregroundColor(.secondary)
+                        }
+
+                        if tipAmount > 0 {
+                            Text(
+                                String(
+                                    format: isRtl ? "טיפ: \(currency)%.2f" : "Tip: \(currency)%.2f",
+                                    tipAmount
+                                )
+                            )
+                            .font(.system(size: 13))
+                            .foregroundColor(.secondary)
+                        }
                     }
-                }
-                if cashPointMode{
-                    Group {
-                        if isPhone {
-                            VStack(spacing: 10) {
-                                
-                                HStack(spacing: 10) {
-                                    // Split
+
+                    // ✅ CashPoint controls (Tip / Split / Partial / Student)
+                    if cashPointMode {
+                        Group {
+                            if isPhone {
+                                VStack(spacing: 10) {
+
+                                    HStack(spacing: 10) {
+                                        // Split
+                                        Button { toggleSplitMode() } label: {
+                                            HStack(spacing: 8) {
+                                                Image(systemName: "plus.circle.fill")
+                                                    .font(.system(size: 19, weight: .semibold))
+                                                Text(isRtl ? "פיצול שווה" : "Split")
+                                                    .font(.system(size: 18, weight: .semibold))
+                                                    .lineLimit(1)
+                                                    .minimumScaleFactor(0.85)
+                                            }
+                                            .padding(.horizontal, 16)
+                                            .padding(.vertical, 10)
+                                            .frame(maxWidth: .infinity)
+                                            .background(Color(.secondarySystemBackground))
+                                            .clipShape(Capsule())
+                                        }
+                                        .disabled(total <= 0)
+
+                                        // Pay on the bill
+                                        Button {
+                                            if !AppConfig.isDemoMode { ZCreditPaymentHandler.shared.cancelCurrent() }
+                                            isSplitMode = false
+                                            splitParts.removeAll()
+                                            activeSplitIndex = nil
+                                            splitBaseTotal = nil
+                                            onBillInput = ""
+                                            payError = nil
+                                            isPaying = false
+                                            showOnBillPad = true
+                                        } label: {
+                                            HStack(spacing: 6) {
+                                                Image(systemName: "rectangle.split.2x1.fill")
+                                                Text(isRtl ? "תשלום חלקי" : "Pay on the bill")
+                                                    .font(.system(size: 18, weight: .semibold))
+                                                    .lineLimit(1)
+                                                    .minimumScaleFactor(0.85)
+                                            }
+                                            .padding(.horizontal, 16)
+                                            .padding(.vertical, 10)
+                                            .frame(maxWidth: .infinity)
+                                            .background(Color(.secondarySystemBackground))
+                                            .clipShape(Capsule())
+                                        }
+                                        .disabled(total <= 0)
+                                    }
+
+                                    HStack(spacing: 10) {
+                                        // Student 10% discount
+                                        Button { toggleStudentDiscount() } label: {
+                                            HStack(spacing: 6) {
+                                                Image(systemName: "graduationcap.fill")
+                                                    .font(.system(size: 16, weight: .semibold))
+                                                Text(isRtl ? "הנחת סטודנט 10%" : "Student 10%")
+                                                    .font(.system(size: 18, weight: .semibold))
+                                                    .lineLimit(1)
+                                                    .minimumScaleFactor(0.85)
+                                            }
+                                            .padding(.horizontal, 12)
+                                            .padding(.vertical, 8)
+                                            .frame(maxWidth: .infinity)
+                                            .background(studentDiscountActive
+                                                        ? Color.black.opacity(0.15)
+                                                        : Color(.secondarySystemBackground))
+                                            .foregroundColor(studentDiscountActive ? .black : .primary)
+                                            .clipShape(Capsule())
+                                        }
+                                        .disabled(total <= 0 || isSplitMode || pricingLocked)
+
+                                        // Tip
+                                        Button {
+                                            guard !isSplitMode else { return }
+                                            showTipSheet = true
+                                        } label: {
+                                            HStack(spacing: 6) {
+                                                Image(systemName: "figure.surfing")
+                                                    .font(.system(size: 17, weight: .semibold))
+                                                Text(isRtl ? "טיפ" : "Tip")
+                                                    .font(.system(size: 18, weight: .semibold))
+                                                    .lineLimit(1)
+                                                    .minimumScaleFactor(0.85)
+                                            }
+                                            .padding(.horizontal, 12)
+                                            .padding(.vertical, 8)
+                                            .frame(maxWidth: .infinity)
+                                            .background(Color(.secondarySystemBackground))
+                                            .foregroundColor(.primary)
+                                            .clipShape(Capsule())
+                                        }
+                                        .disabled(total <= 0 || isSplitMode || pricingLocked)
+                                    }
+                                }
+
+                            } else {
+                                // iPad / big screens
+                                HStack(spacing: 12) {
+
                                     Button { toggleSplitMode() } label: {
                                         HStack(spacing: 8) {
                                             Image(systemName: "plus.circle.fill")
                                                 .font(.system(size: 19, weight: .semibold))
                                             Text(isRtl ? "פיצול שווה" : "Split")
                                                 .font(.system(size: 18, weight: .semibold))
-                                                .lineLimit(1)
-                                                .minimumScaleFactor(0.85)
                                         }
                                         .padding(.horizontal, 16)
                                         .padding(.vertical, 10)
-                                        .frame(maxWidth: .infinity)
                                         .background(Color(.secondarySystemBackground))
                                         .clipShape(Capsule())
                                     }
                                     .disabled(total <= 0)
-                                    
-                                    // Pay on the bill
+
                                     Button {
                                         if !AppConfig.isDemoMode { ZCreditPaymentHandler.shared.cancelCurrent() }
                                         isSplitMode = false
                                         splitParts.removeAll()
                                         activeSplitIndex = nil
+                                        splitBaseTotal = nil
                                         onBillInput = ""
                                         payError = nil
                                         isPaying = false
                                         showOnBillPad = true
-                                        
                                     } label: {
                                         HStack(spacing: 6) {
                                             Image(systemName: "rectangle.split.2x1.fill")
                                             Text(isRtl ? "תשלום חלקי" : "Pay on the bill")
                                                 .font(.system(size: 18, weight: .semibold))
-                                                .lineLimit(1)
-                                                .minimumScaleFactor(0.85)
                                         }
                                         .padding(.horizontal, 16)
                                         .padding(.vertical, 10)
-                                        .frame(maxWidth: .infinity)
                                         .background(Color(.secondarySystemBackground))
                                         .clipShape(Capsule())
                                     }
                                     .disabled(total <= 0)
-                                }
-                                
-                                HStack(spacing: 10) {
-                                    // Student 10% discount
+
                                     Button { toggleStudentDiscount() } label: {
                                         HStack(spacing: 6) {
                                             Image(systemName: "graduationcap.fill")
                                                 .font(.system(size: 16, weight: .semibold))
-                                            Text(isRtl ? "הנחת סטוד2נט 10%" : "Student 10%")
+                                            Text(isRtl ? "הנחת סטודנט 10%" : "Student 10%")
                                                 .font(.system(size: 18, weight: .semibold))
-                                                .lineLimit(1)
-                                                .minimumScaleFactor(0.85)
                                         }
                                         .padding(.horizontal, 12)
                                         .padding(.vertical, 8)
-                                        .frame(maxWidth: .infinity)
-                                        .background(studentDiscountActive ? Color.black.opacity(0.15)
-                                                    : Color(.secondarySystemBackground))
-                                        .foregroundColor(studentDiscountActive ? .black : .primary)
+                                        .background(studentDiscountActive ? chipActiveBackground : chipBackground)
+                                        .foregroundColor(chipForeground)
                                         .clipShape(Capsule())
                                     }
-                                    .disabled(total <= 0 || isSplitMode)
-                                    
-                                    // Tip
+                                    .disabled(total <= 0 || isSplitMode || pricingLocked)
+
                                     Button {
                                         guard !isSplitMode else { return }
                                         showTipSheet = true
@@ -1499,12 +1919,9 @@ struct OrderFlowView: View {
                                                 .font(.system(size: 17, weight: .semibold))
                                             Text(isRtl ? "טיפ" : "Tip")
                                                 .font(.system(size: 18, weight: .semibold))
-                                                .lineLimit(1)
-                                                .minimumScaleFactor(0.85)
                                         }
                                         .padding(.horizontal, 12)
                                         .padding(.vertical, 8)
-                                        .frame(maxWidth: .infinity)
                                         .background(Color(.secondarySystemBackground))
                                         .foregroundColor(.primary)
                                         .clipShape(Capsule())
@@ -1512,264 +1929,115 @@ struct OrderFlowView: View {
                                     .disabled(total <= 0 || isSplitMode || pricingLocked)
                                 }
                             }
-                            
+                        }
+                        .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
+                    }
+
+                    // Inline split panel
+                    if isSplitMode {
+                        splitPanel
+                    }
+
+                    // Main prompt
+                    Text(isRtl ? "הכנס או הצמד כרטיס" : "Insert or tap card")
+                        .font(kioskFont(24, weight: .bold))
+                        .padding(.top, 8)
+
+                    // Terminal indicator slot
+                    Group {
+                        if terminalActive {
+                            TerminalActivityRing(
+                                isActive: true,
+                                label: isRtl ? "" : "Waiting for terminal…"
+                            )
+                            .padding(.top, 40)
                         } else {
-                            // iPad / big screens: original single-row layout
-                            HStack(spacing: 12) {
-                                
-                                Button { toggleSplitMode() } label: {
-                                    HStack(spacing: 8) {
-                                        Image(systemName: "plus.circle.fill")
-                                            .font(.system(size: 19, weight: .semibold))
-                                        Text(isRtl ? "פיצול שווה" : "Split")
-                                            .font(.system(size: 18, weight: .semibold))
-                                    }
-                                    .padding(.horizontal, 16)
-                                    .padding(.vertical, 10)
-                                    .background(Color(.secondarySystemBackground))
-                                    .clipShape(Capsule())
-                                }
-                                .disabled(total <= 0)
-                                
-                                Button {
-                                    if !AppConfig.isDemoMode { ZCreditPaymentHandler.shared.cancelCurrent() }
-                                    isSplitMode = false
-                                    splitParts.removeAll()
-                                    activeSplitIndex = nil
-                                    onBillInput = ""
-                                    payError = nil
-                                    isPaying = false
-                                    showOnBillPad = true
-                                } label: {
-                                    HStack(spacing: 6) {
-                                        Image(systemName: "rectangle.split.2x1.fill")
-                                        Text(isRtl ? "תשלום חלקי" : "Pay on the bill")
-                                            .font(.system(size: 18, weight: .semibold))
-                                    }
-                                    .padding(.horizontal, 16)
-                                    .padding(.vertical, 10)
-                                    .background(Color(.secondarySystemBackground))
-                                    .clipShape(Capsule())
-                                }
-                                .disabled(total <= 0)
-                                
-                                Button { toggleStudentDiscount() } label: {
-                                    HStack(spacing: 6) {
-                                        Image(systemName: "graduationcap.fill")
-                                            .font(.system(size: 16, weight: .semibold))
-                                        Text(isRtl ? "הנחת סטודנט 10%" : "Student 10%")
-                                            .font(.system(size: 18, weight: .semibold))
-                                    }
-                                    
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 8)
-                                    .background(studentDiscountActive ? chipActiveBackground : chipBackground)
-                                    .foregroundColor(chipForeground)
-                                    .clipShape(Capsule())
-                                    .scaleEffect(studentDiscountActive ? 1.03 : 1.0)
-                                        .animation(.spring(response: 0.25, dampingFraction: 0.85),
-                                                   value: studentDiscountActive)
-                                }
-                                .disabled(total <= 0 || isSplitMode || pricingLocked)
-                                
-                                Button {
-                                    guard !isSplitMode else { return }
-                                    showTipSheet = true
-                                } label: {
-                                    HStack(spacing: 6) {
-                                        Image(systemName: "figure.surfing")
-                                            .font(.system(size: 17, weight: .semibold))
-                                        Text(isRtl ? "טיפ" : "Tip")
-                                            .font(.system(size: 18, weight: .semibold))
-                                    }
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 8)
-                                    .background(Color(.secondarySystemBackground))
-                                    .foregroundColor(.primary)
-                                    .clipShape(Capsule())
-                                }
-                                .disabled(total <= 0 || isSplitMode || pricingLocked)
-                            }
+                            Spacer().frame(height: 44)
                         }
                     }
-                    .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
-                }
+                    .frame(height: 72)
 
-                // Inline split panel (gray block)
-                if isSplitMode {
-                    splitPanel
-                }
+                    // Error slot
+                    Group {
+                        if let payError, !payError.isEmpty {
+                            VStack(spacing: 15) {
+                                Text(isRtl ? "התשלום נכשל" : "Payment failed")
+                                    .font(kioskFont(20, weight: .semibold))
+                                    .multilineTextAlignment(.center)
 
-                // Main prompt
-                // Main prompt
-                Text(isRtl ? "הכנס או הצמד כרטיס" : "Insert or tap card")
-                    .font(kioskFont(24, weight: .bold))
-
-                    .padding(.top, 8)
-
-                // ✅ INLINE terminal indicator slot (always occupies space)
-                Group {
-                    if terminalActive {
-                        TerminalActivityRing(
-                            isActive: true,
-                            label: isRtl ? "" : "Waiting for terminal…"
-                        )
-                        .padding(.top, 40)
-                    } else {
-                        Spacer().frame(height: 44)
+                                if !cashPointMode {
+                                    Button { retryZCreditNow() } label: {
+                                        Text(isRtl ? "נסה שוב" : "Try again")
+                                            .font(kioskFont(18, weight: .bold))
+                                            .foregroundColor(.white)
+                                            .frame(width: 220, height: 48)
+                                            .background(isPaying ? Color.gray.opacity(0.4) : MenuTheme.buttonBackground)
+                                            .clipShape(RoundedRectangle(cornerRadius: 16))
+                                    }
+                                    .disabled(isPaying)
+                                }
+                            }
+                            .padding(.horizontal, 40)
+                        } else {
+                            Spacer().frame(height: 22)
+                        }
                     }
-                }
-                .frame(height: 72)
+                    .frame(height: cashPointMode ? errorSlotH : 90)
+                    .frame(maxWidth: .infinity)
 
-                // ✅ Error slot (also fixed height)
-                Group {
-                    if let payError, !payError.isEmpty {
+                    // Card / Cash / Pay later (POS)
+                    if cashPointMode {
+                        VStack(spacing: 12) {
 
-                        VStack(spacing: 15) {
-                            Text(isRtl ? "התשלום נכשל" : "Payment failed")
-                                .font(kioskFont(20, weight: .semibold))
-                                .multilineTextAlignment(.center)
-
-                            // ✅ Only in kiosk/customer mode (!cashPointMode)
-                            if !cashPointMode {
-                                Button {
-                                    
-                                    retryZCreditNow()
-                                } label: {
-                                    Text(isRtl ? "נסה שוב" : "Try again")
-                                        .font(kioskFont(18, weight: .bold))
+                            if shouldShowCardButton {
+                                Button { startCardForRemainingNow() } label: {
+                                    Text(isRtl ? "תשלום באשראי" : "Pay by card")
+                                        .font(.system(size: 18, weight: .semibold))
                                         .foregroundColor(.white)
-                                        .frame(width: 220, height: 48)
-                                        .background(isPaying ? Color.gray.opacity(0.4) : cashPointMode ? .black : MenuTheme.buttonBackground)
-                                        .clipShape(RoundedRectangle(cornerRadius: 16))
+                                        .frame(width: 240, height: 50)
+                                        .background(terminalActive ? Color.gray.opacity(0.4) : Color.gray.opacity(0.4))
+                                        .clipShape(RoundedRectangle(cornerRadius: 18))
                                 }
-                                .disabled(isPaying)
+                                .disabled(terminalActive || (hasApprovedCardPayment && isOrderFullyPaid))
                             }
-                        }
-                        .padding(.horizontal, 40)
 
-                    } else {
-                        Spacer().frame(height: 22)
-                    }
-                }
-                .frame(height: cashPointMode ? errorSlotH : 90)   // give room for the button in kiosk mode
-                .frame(maxWidth: .infinity)
-                
-                if cashPointMode{
-                    // Card / Cash buttons
-                    VStack(spacing: 12) {
-                        
-                        if shouldShowCardButton {
                             Button {
-                                startCardForRemainingNow()
+                                payingWithCash = true
+                                payError = nil
+                                isPaying = false
+                                paymentStarted = false
+                                cashInput = ""
+                                manualCashTargetAmount = nil
+                                if !AppConfig.isDemoMode { ZCreditPaymentHandler.shared.cancelCurrent() }
                             } label: {
-                                Text(isRtl ? "תשלום באשראי" : "Pay by card")
+                                Text(isRtl ? "תשלום במזומן" : "Pay with cash")
                                     .font(.system(size: 18, weight: .semibold))
-                                    .foregroundColor(.white)
-                                    .frame(width: 240, height: 50)
-                                    .background(
-                                        terminalActive
-                                        ? Color.gray.opacity(0.4)
-                                        : Color.black
-                                    )
+                                    .foregroundColor(.primary)
+                                    .frame(width: 220, height: 48)
+                                    .background(Color(.systemGray5))
                                     .clipShape(RoundedRectangle(cornerRadius: 18))
                             }
-                            .disabled(terminalActive || (hasApprovedCardPayment && isOrderFullyPaid))
-                            .animation(.easeInOut(duration: 0.2), value: terminalActive)
-                            .simultaneousGesture(
-                                LongPressGesture(minimumDuration: 1.2, maximumDistance: 14)
-                                    .onEnded { _ in
-                                        if !AppConfig.isDemoMode { ZCreditPaymentHandler.shared.cancelCurrent() }
-                                        payError = nil
-                                        paymentStarted = false
-                                        isPaying = false
-                                        showManualCardEntry = true
-                                        Haptics.medium()
-                                    }
-                            )
-                        }
-                        
-                        if hasApprovedCardPayment && isOrderFullyPaid {
-                            Text(isRtl ? "כבר התקבל אישור באשראי להזמנה זו"
-                                 : "Card payment already approved for this order")
-                            .font(.system(size: 13))
-                            .foregroundColor(.secondary)
-                        }
-                        
-                        Button {
-                            payingWithCash = true
-                            payError = nil
-                            isPaying = false
-                            paymentStarted = false
-                            cashInput = ""
-                            manualCashTargetAmount = nil
-                            
-                            if !AppConfig.isDemoMode { ZCreditPaymentHandler.shared.cancelCurrent() }
-                        } label: {
-                            Text(isRtl ? "תשלום במזומן" : "Pay with cash")
-                                .font(.system(size: 18, weight: .semibold))
-                                .foregroundColor(.primary)
-                                .frame(width: 220, height: 48)
-                                .background(Color(.systemGray5))
-                                .clipShape(RoundedRectangle(cornerRadius: 18))
-                        }
-                        
-                        if allowPayLater {
-                            Button { submitPayLaterNow() } label: {
-                                Text(isRtl ? "תשלום מאוחר יותר" : "Pay later")
-                                    .font(.system(size: 16, weight: .semibold))
-                                    .foregroundColor(.secondary)
-                                    .frame(width: 220, height: 44)
+
+                            if allowPayLater {
+                                Button { submitPayLaterNow() } label: {
+                                    Text(isRtl ? "תשלום מאוחר יותר" : "Pay later")
+                                        .font(.system(size: 16, weight: .semibold))
+                                        .foregroundColor(.secondary)
+                                        .frame(width: 220, height: 44)
+                                }
+                                .disabled(didSubmitThisFlow || isSubmittingNow)
+                                .padding(.bottom, isSmallPhone ? 14 : 0) // ✅ extra breathing room on iPhone 8
                             }
-                            .disabled(didSubmitThisFlow || isSubmittingNow)
                         }
+                        .padding(.top, 4)
                     }
-                    .padding(.top, 4)
                 }
+                .padding(.horizontal, 28)
+                .padding(.top, isSmallPhone ? 18 : 80)     // ✅ push up on iPhone 8
+                .padding(.bottom, isSmallPhone ? 26 : 24)  // ✅ ensures Pay later can scroll into view
+                .frame(minHeight: geo.size.height - 20, alignment: .center) // ✅ center on big screens
             }
-            .padding(.horizontal, 28)
-            .padding(.top, 80)
-            .sheet(isPresented: $showManualCardEntry) {
-
-                let baseTotal = initialPaymentTarget
-                let amountToCharge = (remainingToPay > 0) ? remainingToPay : baseTotal
-
-                CashPointZCreditHostedCheckoutSheet(
-                    isRtl: isRtl,
-                    amount: amountToCharge,
-                    currency: currency,
-                    onClose: { showManualCardEntry = false },
-                    onResult: { result in
-                        showManualCardEntry = false
-
-                        switch result.state {
-                        case .success:
-                            hasApprovedCardPayment = (remainingToPay <= 0.001)
-                            cardPaidTotal += amountToCharge
-                            remainingToPay = max(remainingToPay - amountToCharge, 0)
-                            lastZCreditReference = result.reference
-
-                            if remainingToPay <= 0 {
-                                playSuccessAndCompleteOrder()
-                            }
-
-                        case .failure:
-                            payError = isRtl ? "התשלום נדחה. נסה שוב." : "Payment declined. Try again."
-
-                        case .unknown:
-                            payError = isRtl ? "מצב העסקה לא ברור. בדוק במסוף/במערכת."
-                                             : "Payment status unclear. Check terminal/backoffice."
-                        }
-                    }
-                )
-                .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
-            }
-
-            Spacer()
         }
-        .padding(.top, cashPointMode ? 0 : -150)
-        // ✅ keep transitions smooth but subtle
-        .animation(.spring(response: 0.25, dampingFraction: 0.9), value: isPaying)
     }
 
     // MARK: - Split sheet (rows)
@@ -1793,8 +2061,9 @@ struct OrderFlowView: View {
                             withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
                                 isSplitMode = false
                                 splitParts.removeAll()
-                                remainingToPay = 0
                                 activeSplitIndex = nil
+                                splitBaseTotal = nil
+                                recomputeRemainingFromTotals()
                             }
                             showSplitSheet = false
                         } label: {
@@ -1825,7 +2094,7 @@ struct OrderFlowView: View {
                                         splitAmountInput = String(part.amount)
                                         showSplitAmountPad = true
                                     } label: {
-                                        Text(String(format: "\(currency)%.0f", amount))
+                                        Text(String(format: "\(currency)%.2f", amount))
                                             .font(.system(size: 26, weight: .bold))
                                             .foregroundColor(.primary)
                                             .frame(minWidth: 120, alignment: .leading)
@@ -1960,24 +2229,39 @@ struct OrderFlowView: View {
     // MARK: - Split helpers
 
     private func buildSplitParts() -> [SplitPart] {
-        // Use outstanding if we have it, otherwise full total
-        let baseTotal = remainingToPay > 0 ? remainingToPay : initialPaymentTarget
-        let totalInt  = Int(baseTotal.rounded())
-        guard splitCount > 0 else { return [] }
+        // ✅ Prefer locked base when split was started (prevents drift)
+        let baseTotal = splitBaseTotal ?? ((remainingToPay > 0.001) ? remainingToPay : initialPaymentTarget)
+        let total = round2(max(baseTotal, 0))
 
-        let base     = totalInt / splitCount
-        let remainder = totalInt % splitCount
+        guard splitCount > 0, total > 0.001 else { return [] }
 
-        return (0..<splitCount).map { idx in
-            let amount = idx < remainder ? base + 1 : base
-            return SplitPart(id: idx, amount: amount, isPaid: false)
+        let even = round2(total / Double(splitCount))
+
+        var parts: [SplitPart] = []
+        parts.reserveCapacity(splitCount)
+
+        var acc: Double = 0
+
+        for idx in 0..<splitCount {
+            let isLast = (idx == splitCount - 1)
+            let amt = isLast ? round2(total - acc) : even
+            acc = round2(acc + amt)
+            parts.append(.init(id: idx, amount: max(0, amt), isPaid: false))
         }
+
+        // ✅ exact sum safety
+        let diff = round2(total - parts.map(\.amount).reduce(0, +))
+        if abs(diff) >= 0.01, let last = parts.indices.last {
+            parts[last].amount = round2(max(0, parts[last].amount + diff))
+        }
+
+        return parts
     }
 
     private func ensureSplitParts() {
         if splitParts.isEmpty {
             splitParts = buildSplitParts()
-            remainingToPay = initialPaymentTarget
+            recomputeRemainingFromTotals()
         }
     }
     
@@ -1987,12 +2271,10 @@ struct OrderFlowView: View {
 
         splitParts[index].isPaid = true
 
-        // ✅ recompute remaining from unpaid parts (prevents drift)
         remainingToPay = round2(
-            splitParts
-                .filter { !$0.isPaid }
-                .map { Double($0.amount) }
-                .reduce(0, +)
+            splitParts.filter { !$0.isPaid }
+                      .map { $0.amount }
+                      .reduce(0, +)
         )
     }
     
@@ -2250,38 +2532,65 @@ struct OrderFlowView: View {
 
     /// Two-row style amount application (for now).
     private func applySplitAmount(newValue: String, index: Int) {
-        let totalInt = Int(round2(initialPaymentTarget).rounded())
+        // ✅ total (includes tip) — keep 2dp
+        let total = round2(max(splitBaseTotal ?? initialPaymentTarget, 0))
+
+        // ✅ digits only -> whole currency units (e.g. "37" -> 37.0)
         let filtered = newValue.filter(\.isNumber)
-        let entered = Int(filtered) ?? 0
-        let clamped = max(0, min(entered, totalInt))
+        let enteredInt = Int(filtered) ?? 0
+        var entered = round2(Double(enteredInt))
+
+        // ✅ clamp to [0, total]
+        entered = min(max(entered, 0), total)
 
         guard splitParts.indices.contains(index) else { return }
 
-        if index == 0 {
-            splitParts[0].amount = clamped
-            let remaining = max(totalInt - clamped, 0)
-
-            if splitParts.count > 1 {
-                splitParts[1].amount = remaining
-            } else {
-                splitParts.append(SplitPart(id: 1, amount: remaining, isPaid: false))
-            }
-        } else {
-            if splitParts.count > 1 {
-                let second = clamped
-                let first  = max(totalInt - second, 0)
-                splitParts[1].amount = second
-                splitParts[0].amount = first
-            }
+        // ✅ ensure we have at least 2 parts (since this editor is "two-row style")
+        if splitParts.count < 2 {
+            splitParts = [
+                SplitPart(id: 0, amount: round2(total / 2), isPaid: false),
+                SplitPart(id: 1, amount: round2(total - round2(total / 2)), isPaid: false)
+            ]
         }
 
-        remainingToPay = splitParts
-            .enumerated()
-            .filter { !$0.element.isPaid }
-            .map { Double($0.element.amount) }
-            .reduce(0, +)
-    }
+        // ✅ keep paid rows untouched (don’t let edits break history)
+        // If either of the first two rows is already paid, refuse edits silently
+        // (you can show a haptic/alert if you want)
+        if splitParts[0].isPaid || splitParts[1].isPaid {
+            Haptics.error()
+            return
+        }
 
+        if index == 0 {
+            // user edits first -> second is remainder
+            let first = entered
+            let second = round2(max(total - first, 0))
+
+            splitParts[0].amount = first
+            splitParts[1].amount = second
+
+        } else {
+            // user edits second -> first is remainder
+            let second = entered
+            let first = round2(max(total - second, 0))
+
+            splitParts[1].amount = second
+            splitParts[0].amount = first
+        }
+
+        // ✅ recompute remaining based on unpaid parts (exact)
+        remainingToPay = round2(
+            splitParts
+                .filter { !$0.isPaid }
+                .map(\.amount)
+                .reduce(0, +)
+        )
+
+        // ✅ if we’re currently targeting a split row, keep it consistent
+        if let idx = activeSplitIndex, splitParts.indices.contains(idx) {
+            // no-op, but this is a good place to add UI refresh logic if needed
+        }
+    }
     // MARK: - Pay on bill helpers
 
     private func payOnBillWithCard(
@@ -2398,7 +2707,7 @@ struct OrderFlowView: View {
                 let tipOff = max(0, tipAmount)
 
                 print("✅ SUCCESS → submitting. method=\(summary.method.rawValue) totalWithTip=\(totalWithTip)")
-
+                clearPartialPaySnapshot()
                 // 1) ✅ submit up to parent (parent can print / save metadata)
                 onCompleted(phoneParam, nameParam, summary, discountOff, tipOff)
 
@@ -2433,13 +2742,19 @@ struct OrderFlowView: View {
             return
         }
 
-        // at root, only allow back if not on service
+        // mini 13: no service step to go back to
+        if isMini13 { return }
+
+        // normal apps: return to service
         if root != .service {
             root = .service
         }
     }
 
     private func cancelAll() {
+        if cashPointMode && hasAnyPayment && remainingToPay > 0.001 {
+            persistPartialPaySnapshot()
+        }
         didInit = false
         cancelPendingRestart()   // ✅ add
 
@@ -2454,7 +2769,7 @@ struct OrderFlowView: View {
             ZCreditPaymentHandler.shared.cancelCurrent()
         }
 
-        clearDraftContact()   // ✅ add this
+     
         onCancel()
     }
 
@@ -2719,7 +3034,7 @@ struct OrderFlowView: View {
 
         // 3️⃣ Simple non-split cash (may be partial)
         if remainingToPay == 0 {
-            remainingToPay = initialPaymentTarget
+            recomputeRemainingFromTotals()
         }
 
         remainingToPay = max(remainingToPay - thisCash, 0)
@@ -3324,8 +3639,17 @@ struct OrderFlowView: View {
     @FocusState private var nameFocused: Bool
     
     
+    // ✅ Name step with HE/AR toggle ONLY for miniAppId == 13
     private var nameStep: some View {
-        VStack(spacing: 24) {
+        // ✅ detect shop 13 (use MenuTheme.miniId as you do elsewhere)
+        let isMini13 = (MenuTheme.miniId == 13)
+
+        // ✅ IMPORTANT: fallback display uses saved value if local `name` is still empty
+        let saved = posSavedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let displayName = cleanName.isEmpty ? saved : cleanName
+        let displayValid = displayName.trimmingCharacters(in: .whitespacesAndNewlines).count >= 2
+
+        return VStack(spacing: 24) {
             Text(isRtl ? "מה השם שלך?" : "What’s your name?")
                 .font(kioskFont(26, weight: .bold))
                 .multilineTextAlignment(.center)
@@ -3336,24 +3660,51 @@ struct OrderFlowView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 32)
 
-            // ✅ DISPLAY BOX (NO TextField, NO keyboard)
+            // ✅ NEW: HE/AR toggle (only for mini 13)
+            if isMini13 {
+                HStack {
+                    Spacer()
+
+                    Button {
+                        setNameKbMode(nameKbMode == .he ? .ar : .he)
+                        Haptics.light()
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "keyboard")
+                                .font(.system(size: 14, weight: .bold))
+
+                            Text(nameKbMode == .he ? "HE" : "AR")
+                                .font(.system(size: 14, weight: .bold, design: .rounded))
+                        }
+                        .foregroundColor(.primary)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color(.systemGray5))
+                        .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+                .frame(width: 300)
+            }
+
+            // ✅ DISPLAY BOX (NO TextField, NO system keyboard)
             HStack(spacing: 10) {
-                Text(cleanName.isEmpty ? (isRtl ? "" : "Enter name…") : cleanName)
+                Text(displayName.isEmpty ? (isRtl ? "" : "Enter name…") : displayName)
                     .font(kioskFont(22, weight: .semibold))
-                    .foregroundColor(cleanName.isEmpty ? .secondary : .primary)
+                    .foregroundColor(displayName.isEmpty ? .secondary : .primary)
                     .lineLimit(1)
                     .frame(maxWidth: .infinity, alignment: .center)
-                
-                if !name.isEmpty {
+
+                if !displayName.isEmpty {
                     Button {
-                        print("✅ CLEAR tapped")           // <-- keep for 1 test
+                        print("✅ CLEAR tapped")
                         name = ""
                         posSavedName = ""
                         didConfirmNameThisSession = false
                     } label: {
                         Image(systemName: "xmark.circle.fill")
                             .foregroundColor(.secondary)
-                            .frame(width: 44, height: 44) // ✅ big guaranteed hit area
+                            .frame(width: 44, height: 44)
                     }
                     .buttonStyle(.plain)
                 }
@@ -3369,31 +3720,29 @@ struct OrderFlowView: View {
 
             VStack(spacing: 10) {
                 Button {
-                    posSavedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-                    posSavedName = cleanName
+                    // ✅ persist the visible name (fallback-safe)
+                    let final = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    posSavedName = final
+                    name = final
 
                     didConfirmNameThisSession = true
-                    goToChargeFromName_push()   // ✅ name → phone (if required) else → charge
+                    goToChargeFromName_push()
                 } label: {
                     Text(isRtl ? "המשך" : "Continue to payment")
                         .font(kioskFont(18, weight: .bold))
                         .frame(width: 300, height: 52)
-                        .background(
-                            nameValid
-                            ? ( Color.primary )
-                            : Color.gray.opacity(0.4)
-                        )
+                        .background(displayValid ? Color.primary : Color.gray.opacity(0.4))
                         .foregroundColor(
-                            nameValid
+                            displayValid
                             ? Color(UIColor.systemBackground)
                             : Color(UIColor.systemBackground).opacity(0.9)
                         )
                         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                 }
-                .disabled(!nameValid)
+                .disabled(!displayValid)
 
-                // ✅ SKIP (no keyboard to dismiss)
-                if cashPointMode && 1==2{
+                // (keep your skip disabled)
+                if cashPointMode && 1 == 2 {
                     Button {
                         didConfirmNameThisSession = false
                         push(requiresPhoneStep ? .phone : .charge)
@@ -3408,9 +3757,14 @@ struct OrderFlowView: View {
                 }
             }
         }
+        .onAppear {
+            // ✅ sync local state once so keyboard edits continue naturally
+            if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               !posSavedName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                name = posSavedName
+            }
+        }
     }
-    
-    
   
 
     private var nameKeyboard: some View {
@@ -3420,7 +3774,13 @@ struct OrderFlowView: View {
         let iPadMaxWidth: CGFloat = 600
         let maxWidth = isPhone ? phoneMaxWidth : iPadMaxWidth
 
-        let rows = isRtl ? hebrewRowsWide : hebrewRowsWide
+        let rows: [[String]] = {
+            if isMini13 {
+                return (nameKbMode == .ar) ? arabicRowsWide : hebrewRowsWide
+            } else {
+                return hebrewRowsWide
+            }
+        }()
 
         return VStack(spacing: isPhone ? 10 : 12) {
             ForEach(rows.indices, id: \.self) { idx in
@@ -3520,19 +3880,19 @@ struct OrderFlowView: View {
     }
 
     private func tapNameKey(_ key: String) {
-        // ✅ if name is visually empty (only spaces/newlines), reset so typing doesn't resurrect old text
         if cleanName.isEmpty { name = "" }
 
         switch key {
         case "⌫":
             if !name.isEmpty { name.removeLast() }
 
-        case "Space", "רווח":
+        case "Space", "רווח", "مسافة":
             if !name.hasSuffix(" ") { name.append(" ") }
 
         default:
             if name.count < 32 { name.append(key) }
         }
+
         posSavedName = cleanName
     }
 
@@ -3601,18 +3961,34 @@ struct OrderFlowView: View {
         }
     }
 
+    private func recomputeRemainingFromTotals() {
+        // ✅ In split mode, remainingToPay is owned by splitParts math.
+        if isSplitMode { return }
+
+        let base = round2(initialPaymentTarget) // includes discount + tip
+        let paid = round2(cardPaidTotal + cashPaidTotal)
+        remainingToPay = round2(max(base - paid, 0))
+    }
     // MARK: - Split card helper
     private func startCardForSplitPart(index: Int) {
         cancelPendingRestart()
         guard splitParts.indices.contains(index),
-              !splitParts[index].isPaid else { return }
+              !splitParts[index].isPaid else {
+            splitCardTapLocked = false
+            return
+        }
 
         // ✅ integer split amount → round anyway for safety
-        let amount = round2(Double(splitParts[index].amount))
-        guard amount >= 0.01 else { return }
+        let amount = round2(splitParts[index].amount)
+        guard amount >= 0.01 else {
+            splitCardTapLocked = false
+            return
+        }
 
-        // Don’t allow overlapping charges
-        guard !isPaying else { return }
+        guard !isPaying else {
+            splitCardTapLocked = false
+            return
+        }
 
         // ✅ common helper (demo + real) — always on MainActor
         @MainActor
@@ -3644,6 +4020,7 @@ struct OrderFlowView: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 Task { @MainActor in
                     self.isPaying = false
+                    self.splitCardTapLocked = false
                     applyApprovedSplit(amount: amount)   // ✅ no "self."
                 }
             }
@@ -3653,7 +4030,8 @@ struct OrderFlowView: View {
         ZCreditPaymentHandler.shared.pay(amount: amount, orderId: nil) { result in
             Task { @MainActor in
                 self.isPaying = false
-
+                
+                self.splitCardTapLocked = false
                 switch result.status {
                 case .approved:
                     applyApprovedSplit(amount: amount)   // ✅ no "self."
@@ -3823,6 +4201,9 @@ struct OrderFlowView: View {
             scheduleConfirmationAutoReset()
         }
         .onDisappear {
+            if cashPointMode && hasAnyPayment && remainingToPay > 0.001 {
+                   persistPartialPaySnapshot()
+               }
             cancelPendingRestart()   // ✅ add
 
             didInit = false

@@ -37,7 +37,7 @@ struct SwipeUpCardCarousel: View {
     @AppStorage("kds.selectedStations") private var selectedStationsRaw: String = ""
     @AppStorage("kds.historyCardIds") private var historyCardIdsRaw: String = ""
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("admin.pickupLocation") private var adminPickupLocation: String = "cafeteria"
+    @AppStorage("admin.pickupLocation") private var adminPickupLocation: String = "humanity"
     enum Tab: String, CaseIterable { case active = "עכשיו", history = "היסטוריה" }
     @State private var showDrinkComic = false
     @State private var drinkComicPulse = false
@@ -45,7 +45,38 @@ struct SwipeUpCardCarousel: View {
     @State private var pastryComicPulse = false
     @State private var pastryComicToken = UUID()
     @State private var debugPlayer: AVPlayer? = nil
+    @AppStorage(ExperienceModeKeys.mode) private var experienceModeRaw: String = ExperienceMode.casual.rawValue
+    
+    private func cardStatusFromBackend(_ s: Int) -> Card.Status {
+        // ✅ Your rule: active only when status < 2
+        return (s < 2) ? .active : .history
+    }
+    
+    
+    private func normalizeModToken(_ s: String) -> String {
+        s.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "：", with: ":")
+            .replacingOccurrences(of: " ", with: "")
+    }
 
+    private func isDefaultHiddenModifier(_ stripped: String) -> Bool {
+        // Put here whatever you already hide as “default”
+        // (examples — tweak to YOUR defaults)
+        let t = stripped.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // If you already hide "רגיל", "סטנדרט", etc:
+        let hidden: Set<String> = ["רגיל", "סטנדרט", "ברירת מחדל"]
+
+        // NOTE: we intentionally DO NOT include "קטן" here anymore,
+        // because we will allow it only when it came from "גודל:קטן".
+        return hidden.contains(t)
+    }
+    
+    private func ensureDefaultExperienceMode() {
+        if UserDefaults.standard.string(forKey: ExperienceModeKeys.mode) == nil {
+            UserDefaults.standard.set(ExperienceMode.casual.rawValue, forKey: ExperienceModeKeys.mode)
+        }
+    }
     private func debugPlayBeepOnce() {
         // Try a few common filename variants
         let candidates: [(String, String)] = [
@@ -293,7 +324,7 @@ struct SwipeUpCardCarousel: View {
     }
 
     private let pollSeconds: Double
-    init(pollSeconds: Double = 5.0) {
+    init(pollSeconds: Double = 8.0) {
         self.pollSeconds = pollSeconds
     }
      struct PrintedTicketHeader: View {
@@ -440,6 +471,18 @@ struct SwipeUpCardCarousel: View {
         }
     }
 
+    private func stripModifierTitle(_ s: String) -> String {
+        let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return t }
+
+        // Support normal ":" and the full-width "：" (sometimes appears from copy/paste)
+        if let r = t.range(of: ":") ?? t.range(of: "：") {
+            let after = String(t[r.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            return after.isEmpty ? t : after
+        }
+
+        return t
+    }
     // MARK: - Cards
 
     // MARK: - Cards (ADD ONLY)
@@ -448,7 +491,7 @@ struct SwipeUpCardCarousel: View {
     private func applyFetchedOrdersAddOnly(_ fetched: [Order]) {
 
         // ✅ 0) PLAY BELL when a NEW ACTIVE order arrives (but NOT on first load)
-        let activeIdsNow = Set(fetched.filter { $0                  .backendStatus < 3 }.map(\.id))
+        let activeIdsNow = Set(fetched.filter { $0.backendStatus < 2 }.map(\.id))
         let newActiveIds = activeIdsNow.subtracting(seenActiveOrderIds)
 
         if didInitialPollLoad, !newActiveIds.isEmpty && miniAppId == 13{
@@ -469,16 +512,14 @@ struct SwipeUpCardCarousel: View {
         df.timeZone = TimeZone(identifier: "Asia/Jerusalem") ?? .current
         df.dateFormat = "HH:mm   dd/MM/yyyy"
 
-        let cutoff = Date().addingTimeInterval(-TimeInterval(40 * 60))
+      //  let cutoff = Date().addingTimeInterval(-TimeInterval(40 * 60))
 
         for order in fetched {
 
-            let isActive = order.backendStatus < 3
-            let backendStatus: Card.Status = isActive ? .active : .history
-
-            if backendStatus == .history, order.placedAt < cutoff {
-                continue
-            }
+            let backendStatus: Card.Status = cardStatusFromBackend(order.backendStatus)
+           // if backendStatus == .history, order.placedAt < cutoff {
+           //     continue
+           // }
 
             let grouped = Dictionary(grouping: order.items, by: { $0.station })
 
@@ -498,16 +539,43 @@ struct SwipeUpCardCarousel: View {
                                 .trimmingCharacters(in: .whitespacesAndNewlines)
                             guard !raw.isEmpty else { return [] }
 
-                            return raw
+                            let parts: [String] = raw
                                 .replacingOccurrences(of: "，", with: ",") // just in case
                                 .split { ch in
                                     ch == "," || ch == "\n" || ch == "\r\n"
                                 }
-                                .map {
-                                    String($0)
-                                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                                }
+                                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
                                 .filter { !$0.isEmpty }
+
+                            // ✅ Detect explicit small size in ORIGINAL tokens (before stripping title)
+                            let hasSmallSize = parts.contains { p in
+                                let normalized = p
+                                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                                    .replacingOccurrences(of: "：", with: ":")
+                                    .replacingOccurrences(of: " ", with: "")
+                                return normalized == "גודל:קטן"
+                            }
+
+                            // 1) Strip titles
+                            var lines: [String] = parts
+                                .map { stripModifierTitle($0) }
+                                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                                .filter { !$0.isEmpty }
+
+                            // 2) Hide defaults (your normal rule)
+                            lines = lines.filter { !isDefaultHiddenModifier($0) }
+
+                            // 3) ✅ Exception: if it's explicitly גודל:קטן, force-show it
+                            if hasSmallSize {
+                                let forced = "גודל: קטן"     // change to "קטן" if you prefer
+                                if !lines.contains(forced) {
+                                    lines.insert(forced, at: 0)
+                                }
+                                // avoid duplicates if "קטן" appears separately
+                                lines.removeAll { $0 == "קטן" }
+                            }
+
+                            return lines
                         }()
 
                         return ItemRow(
@@ -522,6 +590,7 @@ struct SwipeUpCardCarousel: View {
                 let forcedHistoryAt = historyMap[id]
 
                 if let idx = cards.firstIndex(where: { $0.id == id }) {
+                    cards[idx].orderNumber = order.number          // ✅ ADD
 
                     cards[idx].name = order.customerName
                     cards[idx].isTA = order.isTA
@@ -535,9 +604,13 @@ struct SwipeUpCardCarousel: View {
                         cards[idx].status = .history
                         cards[idx].completedAt = done
                     } else {
-                        if cards[idx].status == .active && backendStatus == .history {
-                            cards[idx].status = .history
-                            if cards[idx].completedAt == nil { cards[idx].completedAt = Date() }
+                        // ✅ follow backend
+                        cards[idx].status = backendStatus
+                        if backendStatus == .history {
+                            // give it a completion time if it just became history
+                            cards[idx].completedAt = cards[idx].completedAt ?? Date()
+                        } else {
+                            cards[idx].completedAt = nil
                         }
                     }
 
@@ -546,6 +619,8 @@ struct SwipeUpCardCarousel: View {
                         id: id,
                         orderId: order.id,
                         station: station,
+                        orderNumber: order.number,             // ✅ ADD
+
                         name: order.customerName,
                         isTA: order.isTA,
                         timeText: timeText,
@@ -573,11 +648,11 @@ struct SwipeUpCardCarousel: View {
             }
         }
 
-        trimCardsToMax(activeMax: 25, historyMax: 25)
+       // trimCardsToMax(activeMax: 25, historyMax: 25)
     }
     
     private func shouldExcludeCustomer(_ name: String) -> Bool {
-        name.contains("שולחן")
+        return false   // ✅ DEBUG: show EVERYTHING
     }
 
     // tiny helper for the insert case
@@ -665,7 +740,9 @@ struct SwipeUpCardCarousel: View {
         let placed = dto.placedAtDate ?? now
         let orderId = dto.id ?? dto.ticketNumber ?? 0
         let number = dto.ticketNumber ?? dto.number ?? dto.orderNumber ?? 0
-
+        if dto.id == 27452 || dto.id == 27440 || dto.ticketNumber == 1040 || dto.ticketNumber == 1032 {
+            print("🟦 KDS DEBUG HIT: id=\(dto.id ?? -1) ticket=\(dto.ticketNumber ?? -1) status=\(dto.status ?? -1) name=\(bestName(dto)) lines=\((dto.lines ?? dto.items ?? []).count)")
+        }
         let itemsDTO: [KDSAdminLineItemDTO] = dto.lines ?? dto.items ?? []
         let items = mapLineItems(itemsDTO, orderId: orderId)
 
@@ -690,7 +767,9 @@ struct SwipeUpCardCarousel: View {
         var out: [OrderItem] = []
         out.reserveCapacity(itemsDTO.count)
 
-        for li in itemsDTO {
+        var usedIds = Set<Int>()
+
+        for (idx, li) in itemsDTO.enumerated() {
             let st = stationFromPrinters(li.printers)
 
             let name = (li.name ?? "—")
@@ -698,24 +777,35 @@ struct SwipeUpCardCarousel: View {
 
             let qty = max(1, li.qty ?? li.quantity ?? 1)
 
-            let stableItemId =
-                li.itemId ??
-                "\(orderId)|\(name)|\(st)".hashValue
-
             let rawMods = (li.modifiers ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
 
+            // ✅ base candidate (may repeat!)
+            let candidate = li.itemId ?? 0
+
+            // ✅ force uniqueness per LINE if candidate repeats / is 0
+            let uniqueId: Int = {
+                if candidate != 0, !usedIds.contains(candidate) { return candidate }
+                // stable-ish per order, includes index + content
+                return "\(orderId)|\(idx)|\(name)|\(qty)|\(st.rawValue)|\(rawMods)".hashValue
+            }()
+
+            usedIds.insert(uniqueId)
+
             out.append(
                 OrderItem(
-                    id: stableItemId,
+                    id: uniqueId,
                     name: name.isEmpty ? "—" : name,
                     qty: qty,
                     station: st,
-                    modifiers: rawMods.isEmpty ? nil : rawMods   // ✅
+                    modifiers: rawMods.isEmpty ? nil : rawMods
                 )
             )
         }
-
+        let dups = Dictionary(grouping: out, by: \.id).filter { $1.count > 1 }
+        if !dups.isEmpty {
+            print("🟥 DUP ITEM IDS:", dups.map { "\($0.key): \($0.value.map{$0.name})" })
+        }
         return out
     }
 
@@ -794,6 +884,7 @@ struct SwipeUpCardCarousel: View {
                 }
             }
             .onAppear {
+                
                 shake = true
                 pop = true
             }
@@ -980,11 +1071,17 @@ struct SwipeUpCardCarousel: View {
                 }
             }
             .onAppear {
+                if adminPickupLocation == "cafeteria" {
+                    adminPickupLocation = "humanity"
+                }
                // debugPlayBeepOnce()   // ✅ TEMP DEBUG
 
                 AudioServicesPlaySystemSound(1057)
              //   BellPlayer.shared.play()
-                selectedStations = loadStationsFromStorage()
+                let restored = loadStationsFromStorage()
+                 selectedStations = restored
+                 saveStationsToStorage(restored) // optional, keeps raw normalized
+                
                 startPolling()
             }
             .onDisappear {
@@ -1265,17 +1362,14 @@ private struct StationRow: View {
                                     onDismiss: { onMoveToHistory($0) }
                                 )
                                 .id(card.id)
-                                .transition(.asymmetric(
-                                    insertion: .identity,
-                                    removal: .move(edge: .top).combined(with: .opacity)
-                                ))
+                              
                             }
                         }
                         .padding(.horizontal, 14)
                         .padding(.vertical, 2)
                        
                     }
-                    .frame(maxHeight: 380)
+                   
                     .onAppear {
                         lastActiveCount = activeCards.count
                     }
@@ -1324,7 +1418,7 @@ private func bonesItemsMaxHeight(for card: SwipeUpCardCarousel.Card) -> CGFloat 
     let lineCount = card.itemRows.count + ((card.note?.isEmpty == false) ? 1 : 0)
     let base: CGFloat = 70
     let perLine: CGFloat = 18
-    let cap: CGFloat = 170
+    let cap: CGFloat = 420
     let h = base + perLine * CGFloat(max(0, lineCount - 3))
     return min(cap, max(base, h))
 }
@@ -1339,18 +1433,24 @@ private struct PanCaptureView: UIViewRepresentable {
         let v = UIView()
         v.backgroundColor = .clear
 
-        let pan = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handle(_:)))
+        let pan = UIPanGestureRecognizer(target: context.coordinator,
+                                         action: #selector(Coordinator.handle(_:)))
         pan.delegate = context.coordinator
+        pan.cancelsTouchesInView = false  // ✅ helps prevent the scrollview from also moving
         v.addGestureRecognizer(pan)
-
         return v
     }
 
     func updateUIView(_ uiView: UIView, context: Context) {}
 
-    func makeCoordinator() -> Coordinator { Coordinator(onChanged: onChanged, onEnded: onEnded) }
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onChanged: onChanged, onEnded: onEnded)
+    }
 
     final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        enum Lock { case none, vertical, horizontal }
+        private var lock: Lock = .none
+
         let onChanged: (_ dx: CGFloat, _ dy: CGFloat) -> Void
         let onEnded: (_ dx: CGFloat, _ dy: CGFloat) -> Void
 
@@ -1360,10 +1460,23 @@ private struct PanCaptureView: UIViewRepresentable {
             self.onEnded = onEnded
         }
 
-        // ✅ allow the horizontal row scroll + inner vertical scroll to keep working
+        // ✅ Decide axis at the start using velocity
+        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            guard let pan = gestureRecognizer as? UIPanGestureRecognizer else { return true }
+            let v = pan.velocity(in: pan.view)
+            if abs(v.y) > abs(v.x) {
+                lock = .vertical
+            } else {
+                lock = .horizontal
+            }
+            return true
+        }
+
+        // ✅ Only allow simultaneous recognition when NOT vertical-locked
+        // This prevents the horizontal ScrollView from drifting sideways while you swipe up.
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                                shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-            true
+            return lock != .vertical
         }
 
         @objc func handle(_ gr: UIPanGestureRecognizer) {
@@ -1373,9 +1486,14 @@ private struct PanCaptureView: UIViewRepresentable {
 
             switch gr.state {
             case .changed:
-                onChanged(dx, dy)
+                if lock == .vertical {
+                    onChanged(dx, dy)
+                }
             case .ended, .cancelled, .failed:
-                onEnded(dx, dy)
+                if lock == .vertical {
+                    onEnded(dx, dy)
+                }
+                lock = .none
             default:
                 break
             }
@@ -1468,6 +1586,9 @@ private struct BonesCardActive: View {
     @State private var dragY: CGFloat = 0
     @State private var isDismissing = false
 
+    // ✅ NEW: collapse width to 0 before removing from data (prevents “gap/ghost slot” in LazyHStack)
+    @State private var isCollapsing = false
+
     // ✅ dynamic content height (measured from NON-scroll content)
     @State private var measuredItemsHeight: CGFloat = 0
 
@@ -1476,7 +1597,7 @@ private struct BonesCardActive: View {
     private let minCardHeight: CGFloat = 140
 
     // ✅ clamp + then scroll
-    private let itemsScrollCap: CGFloat = 170
+    private let itemsScrollCap: CGFloat = 670
     private let itemsMinHeight: CGFloat = 60
 
     var body: some View {
@@ -1493,13 +1614,14 @@ private struct BonesCardActive: View {
                     if abs(measuredItemsHeight - h) > 1 { measuredItemsHeight = h }
                 }
 
-        VStack(alignment: .center, spacing: 10) {
+        return VStack(alignment: .center, spacing: 10) {
 
             header
             if let b = waitBadge {
                 WaitBadgeView(badge: b)
                     .frame(maxWidth: .infinity, alignment: .center)
             }
+
             Text(sepText)
                 .font(.system(size: 12, weight: .regular, design: .monospaced))
                 .foregroundColor(.black.opacity(0.55))
@@ -1518,7 +1640,11 @@ private struct BonesCardActive: View {
             }
         }
         .padding(12)
-        .frame(width: cardWidth)
+
+        // ✅ KEY: collapse the layout slot instantly so neighbors squeeze in (no empty gap)
+        .frame(width: isCollapsing ? 0 : cardWidth)
+        .clipped() // important so content doesn’t “stick out” while width collapses
+
         .frame(minHeight: minCardHeight, alignment: .top)
         .background(
             RoundedRectangle(cornerRadius: radius, style: .continuous).fill(cardBG)
@@ -1527,17 +1653,18 @@ private struct BonesCardActive: View {
             RoundedRectangle(cornerRadius: radius, style: .continuous).strokeBorder(stroke, lineWidth: 1)
         )
         .contentShape(Rectangle())
+
         // ✅ UIKit pan overlay that works even over inner vertical ScrollView
         .overlay(
             PanCaptureView(
                 onChanged: { dx, dy in
-                    guard !isDismissing else { return }
+                    guard !isDismissing && !isCollapsing else { return }
                     // Only take over when it's clearly vertical
                     guard abs(dy) > abs(dx) else { return }
                     dragY = min(0, dy)
                 },
                 onEnded: { dx, dy in
-                    guard !isDismissing else { return }
+                    guard !isDismissing && !isCollapsing else { return }
 
                     // If it was mostly horizontal, don't do anything
                     guard abs(dy) > abs(dx) else {
@@ -1546,10 +1673,18 @@ private struct BonesCardActive: View {
                     }
 
                     if dy < -dismissThreshold {
-                        // ✅ instant remove from data (no "ghost frame")
                         isDismissing = true
-                        dragY = 0
-                        onDismiss(card)
+
+                        // ✅ 1) first collapse the width (squeezes neighbors immediately)
+                        withAnimation(.easeOut(duration: 0.14)) {
+                            dragY = 0
+                            isCollapsing = true
+                        }
+
+                        // ✅ 2) then remove from data after the collapse finishes
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.14) {
+                            onDismiss(card)
+                        }
                     } else {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) { dragY = 0 }
                     }
@@ -1558,7 +1693,7 @@ private struct BonesCardActive: View {
             .allowsHitTesting(true)
         )
         .offset(y: isDismissing ? -16 : dragY)
-        .opacity(isDismissing ? 0 : (1 - Double(progress) * 0.12))
+        .opacity(isCollapsing ? 0 : (1 - Double(progress) * 0.12))
         .scaleEffect(isDismissing ? 0.98 : (1 - progress * 0.02))
         .animation(.easeOut(duration: 0.16), value: isDismissing)
     }
@@ -1645,7 +1780,6 @@ private struct BonesCardHistory: View {
         return nil
     }
 
-    // ✅ Local call (no toast)
     private func callCustomer(_ card: SwipeUpCardCarousel.Card) {
         guard let toRaw = normalizeILPhoneToE164(card.customerPhone) else {
             print("📞 CALL DEBUG: missing phone, raw=", card.customerPhone ?? "nil")
@@ -1664,70 +1798,62 @@ private struct BonesCardHistory: View {
         req.httpBody = Data() // avoids IIS 411
         req.setValue("application/json", forHTTPHeaderField: "Accept")
 
-        print("📞 CALL DEBUG → POST", url.absoluteString)
-
         Task {
             do {
                 let (data, resp) = try await URLSession.shared.data(for: req)
-
                 let http = resp as? HTTPURLResponse
-                let code = http?.statusCode ?? -1
-                let body = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
-
-                print("📞 CALL DEBUG ← status:", code)
-                print("📞 CALL DEBUG ← body:", body)
+                print("📞 CALL DEBUG ← status:", http?.statusCode ?? -1)
+                print("📞 CALL DEBUG ← body:", String(data: data, encoding: .utf8) ?? "<\(data.count) bytes>")
             } catch {
                 print("📞 CALL DEBUG ❌ network error:", error.localizedDescription)
             }
         }
     }
 
+    private func ring() {
+        guard !ringing else { return }
+        ringing = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { ringing = false }
+    }
+
     private var shouldScroll: Bool {
-        card.itemRows.count > 5
+        card.itemRows.count > 5 || (card.note?.isEmpty == false)
+    }
+
+    private var canCall: Bool {
+        card.phoneLine != nil && normalizeILPhoneToE164(card.customerPhone) != nil
     }
 
     private let cardWidth: CGFloat = 260
-    private let minCardHeight: CGFloat = 100
+    private let minCardHeight: CGFloat = 120
 
     var body: some View {
         let itemsMaxHeight = bonesItemsMaxHeight(for: card)
 
         return ZStack(alignment: .bottomTrailing) {
 
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .center, spacing: 10) {
 
-                VStack(alignment: .leading, spacing: 6) {
+                // ✅ SAME printed header as ACTIVE (big number + phone line + TA + datetime)
+                PrintedTicketHeader(
+                    orderIdText: card.printedTopNumberText,
+                    customerName: card.name.isEmpty ? "—" : card.name,
+                    phone: card.phoneLine,
+                    isTA: card.isTA,
+                    dateTimeText: card.timeText,
+                    isTeamTable: card.isTeamTable
+                )
+                .frame(maxWidth: .infinity, alignment: .center)
 
-                    HStack(alignment: .firstTextBaseline) {
-                        Text(card.name.isEmpty ? "—" : card.name)
-                            .font(.system(size: 22, weight: .bold, design: .monospaced))
-                            .foregroundColor(.black)
-                            .lineLimit(1)
-
-                        Spacer()
-
-                        if card.isTA {
-                            Text("TA")
-                                .font(.system(size: 12, weight: .bold, design: .monospaced))
-                                .foregroundColor(.white)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(Capsule().fill(Color.black))
-                        }
-                    }
-
-                    Text(card.timeText)
-                        .font(.system(size: 15, weight: .regular, design: .monospaced))
-                        .foregroundColor(.black.opacity(0.7))
-                    
-                    if let b = waitBadge {
-                        WaitBadgeView(badge: b)
-                    }
+                if let b = waitBadge {
+                    WaitBadgeView(badge: b)
+                        .frame(maxWidth: .infinity, alignment: .center)
                 }
 
                 Text(sepText)
                     .font(.system(size: 12, weight: .regular, design: .monospaced))
                     .foregroundColor(.black.opacity(0.55))
+                    .frame(maxWidth: .infinity, alignment: .center)
 
                 Group {
                     if shouldScroll {
@@ -1742,66 +1868,73 @@ private struct BonesCardHistory: View {
             .frame(width: cardWidth)
             .frame(minHeight: minCardHeight, alignment: .top)
             .background(
-                RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .fill(cardBG)
+                RoundedRectangle(cornerRadius: radius, style: .continuous).fill(cardBG)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .strokeBorder(stroke, lineWidth: 1)
+                RoundedRectangle(cornerRadius: radius, style: .continuous).strokeBorder(stroke, lineWidth: 1)
             )
 
-            Button {
-                ring()
-                callCustomer(card)
-            } label: {
-                Image(systemName: "phone.fill")
-                    .font(.system(size: 14, weight: .bold))
-                    .foregroundColor(.white)
-                    .padding(10)
-                    .background(Circle().fill(Color.black))
+            // ✅ Only show call button when we actually have a callable phone
+            if canCall {
+                Button {
+                    ring()
+                    callCustomer(card)
+                } label: {
+                    Image(systemName: "phone.fill")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(.white)
+                        .padding(10)
+                        .background(Circle().fill(Color.black))
+                }
+                .buttonStyle(.plain)
+                .padding(10)
+                .rotationEffect(.degrees(ringing ? 12 : 0))
+                .offset(x: ringing ? 2 : 0, y: ringing ? -1 : 0)
+                .animation(
+                    ringing ? .linear(duration: 0.06).repeatCount(10, autoreverses: true) : .default,
+                    value: ringing
+                )
             }
-            .buttonStyle(.plain)
-            .padding(10)
-            .rotationEffect(.degrees(ringing ? 12 : 0))
-            .offset(x: ringing ? 2 : 0, y: ringing ? -1 : 0)
-            .animation(
-                ringing ? .linear(duration: 0.06).repeatCount(10, autoreverses: true) : .default,
-                value: ringing
-            )
         }
     }
 
+    // ✅ SAME item rendering as ACTIVE (qty + name + modifier lines + note)
     @ViewBuilder
     private var itemsContent: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 8) {
             ForEach(card.itemRows) { row in
-                HStack(spacing: 8) {
-                    Text("\(row.qty)")
-                        .font(.system(size: 14, weight: .bold, design: .monospaced))
-                        .frame(minWidth: 18, alignment: .leading)
+                VStack(alignment: .leading, spacing: 4) {
 
-                    Text(row.name)
-                        .font(.system(size: 14, weight: .semibold, design: .monospaced))
-                        .lineLimit(1)
+                    HStack(spacing: 8) {
+                        Text("\(row.qty)")
+                            .font(.system(size: 18, weight: .bold, design: .monospaced))
 
-                    Spacer(minLength: 0)
+                        Text(row.name)
+                            .font(.system(size: 18, weight: .bold, design: .monospaced))
+                            .lineLimit(1)
+
+                        Spacer(minLength: 0)
+                    }
+                    .foregroundColor(.black)
+
+                    ForEach(row.modifierLines, id: \.self) { m in
+                        Text("  " + m)
+                            .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                            .foregroundColor(.black.opacity(0.75))
+                            .lineLimit(2)
+                    }
+                    .padding(.top, 2)
                 }
-                .foregroundColor(.black.opacity(0.85))
             }
 
             if let note = card.note, !note.isEmpty {
                 Text(note)
-                    .font(.system(size: 13, weight: .regular, design: .monospaced))
-                    .foregroundColor(.black.opacity(0.65))
-                    .padding(.top, 4)
+                    .font(.system(size: 14, weight: .regular, design: .monospaced))
+                    .foregroundColor(.black.opacity(0.75))
+                    .padding(.top, 6)
             }
         }
-    }
-
-    private func ring() {
-        guard !ringing else { return }
-        ringing = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { ringing = false }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
