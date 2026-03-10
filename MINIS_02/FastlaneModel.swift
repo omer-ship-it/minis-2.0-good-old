@@ -11,6 +11,10 @@ enum DeviceKeys {
     static let apnsToken = "apns.token.v1"
 }
 
+enum MenuDecodeContext {
+    static var isAdminMode: Bool = true
+}
+
 func loadApnsToken() -> String {
     // Prefer App Group if available
     if let suite = UserDefaults(suiteName: "group.minis") {
@@ -49,7 +53,10 @@ final class MenuApiModel: ObservableObject {
     private var clockTimer: AnyCancellable?
     @Published private var allItems: [ShellMenuItem] = []
     @Published var isOpen: Bool = true
-    
+    private var isAdminMode: Bool {
+        return true
+       // UserDefaults.standard.bool(forKey: "admin")
+    }
     // ✅ ADD
       private var isOpenDebugCancellable: AnyCancellable?
       private var lastIsOpenDebug: Bool?
@@ -386,7 +393,7 @@ final class MenuApiModel: ObservableObject {
     }
     
     private func parseAndApply(data: Data) async {
-
+       
         // 0️⃣ First, extract customization (title, subtitle, image, font, direction, currency)
         applyMiniCustomization(from: data)
 
@@ -499,10 +506,22 @@ final class MenuApiModel: ObservableObject {
     private func apply(_ newItems: [ShellMenuItem]) async {
         await MainActor.run {
             items = newItems
-            if let first = newItems.first {
-               // print("🧪 mapped ShellMenuItem printer:", first.name, "→", first.printer ?? "nil")
+
+            // ✅ DEBUG BUNDLE CHECK
+            if let it = newItems.first(where: { $0.id == 837 }) {
+                print("✅ 837 exists. name=\(it.name) hasBundle=\(it.bundle != nil)")
+            } else {
+                print("❌ 837 product not in newItems. count=\(newItems.count)")
             }
-            MenuCatalog.shared.update(items: newItems)   // ✅ add
+            if let b = newItems.first(where: { $0.id == 837 })?.bundle {
+                print("🍳 bundle for 837 ids=", b.cleanedIds,
+                      "max=", b.maxFree,
+                      "strategy=", b.normalizedStrategy)
+            } else {
+                print("⚠️ bundle for 837 NOT FOUND")
+            }
+
+            MenuCatalog.shared.update(items: newItems)
             isLoading = false
             version &+= 1
         }
@@ -513,6 +532,7 @@ final class MenuApiModel: ObservableObject {
             ShellMenuItem(
                 id: $0.productId,
                 name: $0.name,
+                nameI18n: $0.nameI18n,
                 price: $0.price,
                 category: $0.category,
                 modifiers: mapModifiers(from: $0.modifiers),
@@ -520,37 +540,66 @@ final class MenuApiModel: ObservableObject {
                 description: $0.description,
                 status: $0.status,
                 stockQuantity: $0.stockQuantity,
+                isArchived: $0.isArchived,
                 printer: $0.printer,
                 printers: $0.printers,
                 activeFrom: $0.activeFrom,
                 activeTo: $0.activeTo,
-
-                // ✅ NEW
-                isPhone: $0.isPhone
+                isPhone: $0.isPhone,
+                bundle: $0.bundle
             )
         }
     }
+    
+    
     
     private func mapModifiers(from apiGroups: [ApiModifierGroup]?) -> [ModifierGroup]? {
         guard let apiGroups, !apiGroups.isEmpty else { return nil }
 
         let groups = apiGroups.compactMap { g -> ModifierGroup? in
             let items = (g.items ?? [])
-                .map { ModifierItem(name: $0.optionName ?? "", extraPrice: $0.extraPrice ?? 0) }
-                .filter { !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                .map {
+                    ModifierItem(
+                        name: ($0.optionName ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+                        extraPrice: $0.extraPrice ?? 0,
+                        status: $0.status,
+                        linkedProductId: $0.linkedProductId
+                    )
+                }
+                .filter { !$0.name.isEmpty }
 
-            guard !items.isEmpty else { return nil } // ✅ critical
+            guard !items.isEmpty else { return nil }
 
-            let rawType       = g.type?.lowercased()
-            let selectionMode = g.selection?.mode?.lowercased()
+            let rawType = g.type?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let selectionMode = g.selection?.mode?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 
             let type: ModifierGroup.GroupType
-            if rawType == "additions" { type = .additions }
-            else if rawType == "options" { type = .options }
-            else if selectionMode == "multi" { type = .additions }
-            else { type = .options }
+            if rawType == "additions" {
+                type = .additions
+            } else if rawType == "options" {
+                type = .options
+            } else if selectionMode == "multi" {
+                type = .additions
+            } else {
+                type = .options
+            }
 
-            return ModifierGroup(type: type, title: g.title ?? "Choose", items: items)
+            let selection = ModifierSelection(
+                mode: g.selection?.mode,
+                min: g.selection?.min,
+                max: g.selection?.max,
+                required: g.selection?.required,
+                defaultFirst: g.selection?.defaultFirst
+            )
+
+           
+            return ModifierGroup(
+                type: type,
+                title: (g.title ?? "Choose").trimmingCharacters(in: .whitespacesAndNewlines),
+                items: items,
+                groupId: UUID().uuidString,
+                selection: selection
+            )
         }
 
         return groups.isEmpty ? nil : groups
@@ -672,9 +721,65 @@ struct ShopPrinterStationPayload: Codable, Identifiable {
     let status: Int?
 }
 
+// ✅ Add this somewhere above ProductPayload (or in same file)
+struct LocalizedTextDto: Decodable {
+    let he: String?
+    let ar: String?
+    let en: String?
+}
+
+struct ProductBundlePayload: Decodable {
+    let setProductIds: [Int]
+    let maxFreeQty: Int?
+    let strategy: String?
+
+    enum CodingKeys: String, CodingKey {
+        case setProductIds = "SetProductIds"
+        case maxFreeQty    = "MaxFreeQty"
+        case strategy      = "Strategy"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+
+        // ✅ tolerant: missing -> []
+        setProductIds = (try? c.decodeIfPresent([Int].self, forKey: .setProductIds)) ?? []
+
+        // ✅ tolerant: Int or String
+        if let i = try? c.decodeIfPresent(Int.self, forKey: .maxFreeQty) {
+            maxFreeQty = i
+        } else if let s = try? c.decodeIfPresent(String.self, forKey: .maxFreeQty),
+                  let i = Int(s.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            maxFreeQty = i
+        } else {
+            maxFreeQty = nil
+        }
+
+        strategy = try? c.decodeIfPresent(String.self, forKey: .strategy)
+    }
+
+    var cleanedIds: [Int] {
+        Array(Set(setProductIds)).filter { $0 > 0 }
+    }
+
+    var maxFree: Int { max(1, maxFreeQty ?? 1) }
+
+    var normalizedStrategy: String {
+        let s = (strategy ?? "cheapest")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if s == "most_expensive" || s == "cheapest" || s == "first_added" { return s }
+        return "cheapest"
+    }
+}
+
 struct ProductPayload: Decodable {
     let productId: Int
     let name: String
+
+    // ✅ multilingual name object from JSON ("nameI18n": {he,ar,en})
+    let nameI18n: LocalizedTextDto?
+
     let price: Double
     let category: String
     let status: Int?
@@ -684,19 +789,26 @@ struct ProductPayload: Decodable {
     let modifiers: [ApiModifierGroup]?
     let printer: String?
 
-    // ✅ NEW: multi printers from JSON
+    // ✅ multi printers from JSON
     let printers: [String]?
 
-    // ✅ NEW
+    // ✅ active window
     let activeFrom: Int?
     let activeTo: Int?
 
-    // ✅ NEW: ask phone (from published JSON "isPhone")
+    // ✅ ask phone (from published JSON "isPhone")
     let isPhone: Bool?
+
+    // ✅ bundle pricing rule
+    let bundle: ProductBundlePayload?
+
+    // ✅ admin-only archive flag
+    let isArchived: Bool?
 
     enum CodingKeys: String, CodingKey {
         case productId       = "ProductId"
         case name            = "Name"
+        case nameI18n        = "nameI18n"
         case price           = "Price"
         case category        = "Category"
         case status          = "Status"
@@ -707,24 +819,27 @@ struct ProductPayload: Decodable {
         case printer         = "Printer"
         case printerLower    = "printer"
 
-        // ✅ NEW: array in published JSON
         case printers        = "Printers"
-        case printerIdsAlt   = "PrinterIds"   // (optional compatibility)
+        case printerIdsAlt   = "PrinterIds"
 
         case activeFrom      = "ActiveFrom"
         case activeFromLower = "activeFrom"
         case activeTo        = "ActiveTo"
         case activeToLower   = "activeTo"
 
-        // ✅ NEW: ask phone (published by C# as "isPhone")
         case isPhoneP        = "isPhone"
-        case isPhoneC        = "IsPhone"      // tolerate
+        case isPhoneC        = "IsPhone"
 
         case modifierGroups  = "ModifierGroups"
         case legacyModifiers = "Modifiers"
+
+        case bundle          = "Bundle"
+
+        // ✅ only this key, exactly as you wanted
+        case isArchivedP     = "isArchived"
     }
 
-    // ✅ robust bool reader: supports Bool / Int 1/0 / String "1"/"true"/"yes"
+    // ✅ supports Bool / Int / String
     private static func decodeBoolFlex(_ c: KeyedDecodingContainer<CodingKeys>, _ key: CodingKeys) -> Bool? {
         if let b = try? c.decodeIfPresent(Bool.self, forKey: key) { return b }
         if let i = try? c.decodeIfPresent(Int.self, forKey: key) { return i != 0 }
@@ -739,16 +854,20 @@ struct ProductPayload: Decodable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
 
-        productId      = try c.decode(Int.self,    forKey: .productId)
-        name           = try c.decode(String.self, forKey: .name)
-        price          = try c.decode(Double.self, forKey: .price)
-        category       = try c.decode(String.self, forKey: .category)
-        status         = try c.decodeIfPresent(Int.self, forKey: .status)
-        stockQuantity  = try c.decodeIfPresent(Int.self, forKey: .stockQuantity)
-        image          = try c.decodeIfPresent(String.self, forKey: .image)
-        description    = try c.decodeIfPresent(String.self, forKey: .description)
+        productId = try c.decode(Int.self, forKey: .productId)
+        name      = try c.decode(String.self, forKey: .name)
 
-        // ✅ legacy single printer (keep)
+        // ✅ multilingual name
+        nameI18n = try? c.decodeIfPresent(LocalizedTextDto.self, forKey: .nameI18n)
+
+        price         = try c.decode(Double.self, forKey: .price)
+        category      = try c.decode(String.self, forKey: .category)
+        status        = try c.decodeIfPresent(Int.self, forKey: .status)
+        stockQuantity = try c.decodeIfPresent(Int.self, forKey: .stockQuantity)
+        image         = try c.decodeIfPresent(String.self, forKey: .image)
+        description   = try c.decodeIfPresent(String.self, forKey: .description)
+
+        // ✅ legacy single printer
         let p =
             (try? c.decodeIfPresent(String.self, forKey: .printer)) ??
             (try? c.decodeIfPresent(String.self, forKey: .printerLower))
@@ -757,7 +876,7 @@ struct ProductPayload: Decodable {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
 
-        // ✅ NEW: decode printers[] from JSON and normalize
+        // ✅ printers[]
         let rawPrinters =
             (try? c.decodeIfPresent([String].self, forKey: .printers)) ??
             (try? c.decodeIfPresent([String].self, forKey: .printerIdsAlt))
@@ -766,9 +885,9 @@ struct ProductPayload: Decodable {
             let cleaned = rawPrinters
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty }
-            self.printers = cleaned.isEmpty ? nil : cleaned
+            printers = cleaned.isEmpty ? nil : cleaned
         } else {
-            self.printers = nil
+            printers = nil
         }
 
         activeFrom =
@@ -779,15 +898,26 @@ struct ProductPayload: Decodable {
             (try? c.decodeIfPresent(Int.self, forKey: .activeTo)) ??
             (try? c.decodeIfPresent(Int.self, forKey: .activeToLower))
 
-        // ✅ NEW: isPhone (flex)
+        // ✅ isPhone
         isPhone =
             Self.decodeBoolFlex(c, .isPhoneP) ??
             Self.decodeBoolFlex(c, .isPhoneC)
 
+        // ✅ bundle
+        bundle = try? c.decodeIfPresent(ProductBundlePayload.self, forKey: .bundle)
+
+        // ✅ modifiers
         if let groups = try c.decodeIfPresent([ApiModifierGroup].self, forKey: .modifierGroups) {
             modifiers = groups
         } else {
             modifiers = try c.decodeIfPresent([ApiModifierGroup].self, forKey: .legacyModifiers)
+        }
+
+        // ✅ admin-only parse
+        if MenuDecodeContext.isAdminMode {
+            isArchived = Self.decodeBoolFlex(c, .isArchivedP)
+        } else {
+            isArchived = nil
         }
     }
 }
@@ -796,6 +926,41 @@ struct ApiSelection: Decodable {
     let mode: String?
     let min: Int?
     let max: Int?
+    let required: Int?
+    let defaultFirst: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case mode
+        case min
+        case max
+        case required
+        case defaultFirst
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+
+        mode = try? c.decodeIfPresent(String.self, forKey: .mode)
+
+        func decodeFlexibleInt(_ key: CodingKeys) -> Int? {
+            if let i = try? c.decodeIfPresent(Int.self, forKey: key) {
+                return i
+            }
+            if let s = try? c.decodeIfPresent(String.self, forKey: key) {
+                let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                return Int(t)
+            }
+            if let b = try? c.decodeIfPresent(Bool.self, forKey: key) {
+                return b ? 1 : 0
+            }
+            return nil
+        }
+
+        min = decodeFlexibleInt(.min)
+        max = decodeFlexibleInt(.max)
+        required = decodeFlexibleInt(.required)
+        defaultFirst = decodeFlexibleInt(.defaultFirst)
+    }
 }
 
 struct ApiModifierGroup: Decodable {
@@ -842,17 +1007,61 @@ struct ApiModifierGroup: Decodable {
 struct ApiModifierItem: Decodable {
     let optionName: String?
     let extraPrice: Double?
+    let status: Int?
+    let linkedProductId: Int?
 
     enum CodingKeys: String, CodingKey {
         case optionName = "OptionName"
         case extraPrice = "ExtraPrice"
+        case status = "Status"
+        case linkedProductId = "LinkedProductId"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+
+        optionName = try? c.decodeIfPresent(String.self, forKey: .optionName)
+
+        if let d = try? c.decodeIfPresent(Double.self, forKey: .extraPrice) {
+            extraPrice = d
+        } else if let i = try? c.decodeIfPresent(Int.self, forKey: .extraPrice) {
+            extraPrice = Double(i)
+        } else if let s = try? c.decodeIfPresent(String.self, forKey: .extraPrice) {
+            let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: ",", with: ".")
+            extraPrice = Double(trimmed)
+        } else {
+            extraPrice = nil
+        }
+
+        if let i = try? c.decodeIfPresent(Int.self, forKey: .status) {
+            status = i
+        } else if let s = try? c.decodeIfPresent(String.self, forKey: .status) {
+            status = Int(s.trimmingCharacters(in: .whitespacesAndNewlines))
+        } else {
+            status = nil
+        }
+
+        if let i = try? c.decodeIfPresent(Int.self, forKey: .linkedProductId) {
+            linkedProductId = i
+        } else if let s = try? c.decodeIfPresent(String.self, forKey: .linkedProductId) {
+            linkedProductId = Int(s.trimmingCharacters(in: .whitespacesAndNewlines))
+        } else {
+            linkedProductId = nil
+        }
     }
 }
 
 
 struct ShellMenuItem: Identifiable {
     let id: Int
+
+    // ✅ Base (legacy) name from JSON "Name"
     let name: String
+
+    // ✅ NEW: i18n names from JSON "nameI18n"
+    let nameI18n: LocalizedTextDto?
+
     let price: Double
     let category: String
     let modifiers: [ModifierGroup]?
@@ -861,12 +1070,13 @@ struct ShellMenuItem: Identifiable {
     let status: Int?
     let stockQuantity: Int?
 
+    // ✅ NEW: keep original MiniAppId so archived products (-14 etc.) can be shown under "ארכיון"
+    let isArchived: Bool?
+
     // ✅ OLD (keep for safety / backward compat)
-    // - still used by current printing + routing
     let printer: String?
 
-    // ✅ NEW (multi route) — dynamic printers (station ids)
-    // - optional, because old JSON won’t have it yet
+    // ✅ NEW (multi route)
     let printers: [String]?
 
     // ✅ Active window
@@ -876,6 +1086,9 @@ struct ShellMenuItem: Identifiable {
     // ✅ NEW: ask phone (from JSON isPhone)
     let isPhone: Bool?
 
+    // ✅ NEW: Bundle (free drink set etc.)
+    let bundle: ProductBundlePayload?
+
     var img: URL? {
         if let s = imageURL, !s.isEmpty { return URL(string: s) }
         return nil
@@ -883,11 +1096,36 @@ struct ShellMenuItem: Identifiable {
 
     var priceLabel: String { String(format: "%.2f", price) }
 
-    /// ✅ Convenience: “effective” printer id to use when you want ONE route:
-    /// - prefer `printer` (old field)
-    /// - else fall back to first of `printers`
+    /// ✅ DEBUG: language-aware display name
+    var displayName: String {
+        let lang = (UserDefaults.standard.string(forKey: LangKeys.lang) ?? "he")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        func clean(_ s: String?) -> String {
+            (s ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        let he = clean(nameI18n?.he)
+        let ar = clean(nameI18n?.ar)
+        let en = clean(nameI18n?.en)
+        let base = name.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        switch lang {
+        case "ar":
+            return !ar.isEmpty ? ar : (!he.isEmpty ? he : (!en.isEmpty ? en : base))
+        case "en":
+            return !en.isEmpty ? en : (!he.isEmpty ? he : (!ar.isEmpty ? ar : base))
+        default: // "he"
+            return !he.isEmpty ? he : (!en.isEmpty ? en : (!ar.isEmpty ? ar : base))
+        }
+    }
+
+    /// ✅ ONE printer id convenience
     var effectivePrinterId: String? {
-        if let list = printers, let first = list.first?.trimmingCharacters(in: .whitespacesAndNewlines), !first.isEmpty {
+        if let list = printers,
+           let first = list.first?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !first.isEmpty {
             return first
         }
         if let p = printer?.trimmingCharacters(in: .whitespacesAndNewlines), !p.isEmpty {
@@ -899,9 +1137,17 @@ struct ShellMenuItem: Identifiable {
     /// ✅ Convenience: treat nil as false
     var requiresPhone: Bool { (isPhone ?? false) }
 
+    /// ✅ Archive helpers
+    var archived: Bool { isArchived ?? false }
+
+    // ✅ Bundle helpers (optional but useful)
+    var hasBundle: Bool { bundle?.cleanedIds.isEmpty == false }
+    var bundleEligibleDrinkIds: [Int] { bundle?.cleanedIds ?? [] }
+
     init(
         id: Int,
         name: String,
+        nameI18n: LocalizedTextDto? = nil,
         price: Double,
         category: String,
         modifiers: [ModifierGroup]?,
@@ -909,6 +1155,9 @@ struct ShellMenuItem: Identifiable {
         description: String?,
         status: Int? = nil,
         stockQuantity: Int? = nil,
+
+        // ✅ NEW
+        isArchived: Bool? = nil,
 
         // ✅ old
         printer: String? = nil,
@@ -920,10 +1169,15 @@ struct ShellMenuItem: Identifiable {
         activeTo: Int? = nil,
 
         // ✅ NEW
-        isPhone: Bool? = nil
+        isPhone: Bool? = nil,
+
+        // ✅ NEW
+        bundle: ProductBundlePayload? = nil
     ) {
         self.id = id
         self.name = name
+        self.nameI18n = nameI18n
+
         self.price = price
         self.category = category
         self.modifiers = modifiers
@@ -931,8 +1185,9 @@ struct ShellMenuItem: Identifiable {
         self.description = description
         self.status = status
         self.stockQuantity = stockQuantity
+        self.isArchived = isArchived
 
-        // Normalize stored values a bit (keeps JSON clean too)
+        // Normalize stored values a bit
         let p1 = printer?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.printer = (p1?.isEmpty ?? true) ? nil : p1
 
@@ -947,9 +1202,10 @@ struct ShellMenuItem: Identifiable {
 
         self.activeFrom = activeFrom
         self.activeTo = activeTo
-
-        // ✅ NEW
         self.isPhone = isPhone
+
+        // ✅ bundle
+        self.bundle = bundle
     }
 }
 
@@ -960,25 +1216,175 @@ extension ShellMenuItem {
             return false
         }
         // Optional: also hide if stockQuantity is known and <= 0
-        if let stock = stockQuantity, stock <= 1 {
+        if let stock = stockQuantity, stock <= 0 {
             return false
         }
         return true
     }
 }
 
-struct ModifierGroup: Identifiable {
-    enum GroupType { case options, additions }
-    let id = UUID()
+
+struct ModifierSelection: Codable, Hashable, Equatable {
+    var mode: String?
+    var min: Int?
+    var max: Int?
+    var required: Int?
+    var defaultFirst: Int?
+}
+
+struct ModifierItem: Identifiable, Codable, Hashable, Equatable {
+    var id: String {
+        if let linkedProductId {
+            return "\(name)_\(linkedProductId)"
+        }
+        return name
+    }
+
+    let name: String
+    let extraPrice: Double
+    let status: Int?
+    let linkedProductId: Int?
+
+    init(
+        name: String,
+        extraPrice: Double,
+        status: Int? = nil,
+        linkedProductId: Int? = nil
+    ) {
+        self.name = name
+        self.extraPrice = extraPrice
+        self.status = status
+        self.linkedProductId = linkedProductId
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case name = "OptionName"
+        case extraPrice = "ExtraPrice"
+        case status = "Status"
+        case linkedProductId = "LinkedProductId"
+    }
+
+    enum LocalCodingKeys: String, CodingKey {
+        case name
+        case extraPrice
+        case status
+        case linkedProductId
+    }
+
+    init(from decoder: Decoder) throws {
+        if let c = try? decoder.container(keyedBy: CodingKeys.self) {
+            let apiName = (try? c.decode(String.self, forKey: .name))?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if let apiName, !apiName.isEmpty {
+                self.name = apiName
+                self.extraPrice = (try? c.decode(Double.self, forKey: .extraPrice)) ?? 0
+                self.status = try? c.decode(Int.self, forKey: .status)
+                self.linkedProductId = try? c.decodeIfPresent(Int.self, forKey: .linkedProductId)
+                return
+            }
+        }
+
+        let c = try decoder.container(keyedBy: LocalCodingKeys.self)
+        self.name = (try? c.decode(String.self, forKey: .name)) ?? ""
+        self.extraPrice = (try? c.decode(Double.self, forKey: .extraPrice)) ?? 0
+        self.status = try? c.decode(Int.self, forKey: .status)
+        self.linkedProductId = try? c.decodeIfPresent(Int.self, forKey: .linkedProductId)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(name, forKey: .name)
+        try c.encode(extraPrice, forKey: .extraPrice)
+        try c.encodeIfPresent(status, forKey: .status)
+        try c.encodeIfPresent(linkedProductId, forKey: .linkedProductId)
+    }
+}
+
+struct ModifierGroup: Identifiable, Codable, Hashable, Equatable {
+    enum GroupType: String, Codable, Hashable {
+        case options
+        case additions
+    }
+
+    let groupId: String
+    var id: String { groupId }
+
     let type: GroupType
     let title: String
     let items: [ModifierItem]
-}
+    let selection: ModifierSelection?
 
-struct ModifierItem: Identifiable {
-    let id = UUID()
-    let name: String
-    let extraPrice: Double
+    init(
+        type: GroupType,
+        title: String,
+        items: [ModifierItem],
+        groupId: String = UUID().uuidString,
+        selection: ModifierSelection? = nil
+    ) {
+        let cleanId = groupId.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        self.groupId = cleanId.isEmpty ? UUID().uuidString : cleanId
+        self.type = type
+        self.title = title
+        self.items = items
+        self.selection = selection
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case groupId = "GroupId"
+        case title = "Title"
+        case items = "Items"
+        case selection = "Selection"
+    }
+
+    enum LocalCodingKeys: String, CodingKey {
+        case groupId
+        case type
+        case title
+        case items
+        case selection
+    }
+
+    init(from decoder: Decoder) throws {
+        if let c = try? decoder.container(keyedBy: CodingKeys.self) {
+            let apiTitle = (try? c.decode(String.self, forKey: .title)) ?? ""
+            let apiItems = (try? c.decode([ModifierItem].self, forKey: .items)) ?? []
+
+            if !apiTitle.isEmpty || !apiItems.isEmpty {
+                let gid = (try? c.decode(String.self, forKey: .groupId))?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+
+                self.groupId = (gid?.isEmpty == false) ? gid! : UUID().uuidString
+                self.title = apiTitle
+                self.items = apiItems
+                self.selection = try? c.decode(ModifierSelection.self, forKey: .selection)
+
+                let mode = selection?.mode?.lowercased() ?? "single"
+                self.type = (mode == "multi") ? .additions : .options
+                return
+            }
+        }
+
+        let c = try decoder.container(keyedBy: LocalCodingKeys.self)
+
+        let gid = (try? c.decode(String.self, forKey: .groupId))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        self.groupId = (gid?.isEmpty == false) ? gid! : UUID().uuidString
+        self.type = (try? c.decode(GroupType.self, forKey: .type)) ?? .options
+        self.title = (try? c.decode(String.self, forKey: .title)) ?? ""
+        self.items = (try? c.decode([ModifierItem].self, forKey: .items)) ?? []
+        self.selection = try? c.decode(ModifierSelection.self, forKey: .selection)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(groupId, forKey: .groupId)
+        try c.encode(title, forKey: .title)
+        try c.encode(items, forKey: .items)
+        try c.encodeIfPresent(selection, forKey: .selection)
+    }
 }
 
 struct BasketEntry: Identifiable {
@@ -1296,8 +1702,21 @@ enum OrderAPI {
                 "orderSource": normalizedSource
             ]
             
-            if let pickupLoc = pickupLocationIfEnabled(miniAppId: miniAppId, defaults: defaults) {
-                payload["pickupLocation"] = pickupLoc
+            if miniAppId == 13 {
+                let d = UserDefaults.standard
+
+                let rawV2 = (d.string(forKey: "pickup.location.v2") ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+
+                let rawV1 = (d.string(forKey: "pickup.location") ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+
+                let raw = !rawV2.isEmpty ? rawV2 : rawV1
+                print("📍 pickup debug v2=\(rawV2) v1=\(rawV1) -> raw=\(raw)")
+                
+                if let pickup = canonicalPickupLocation(raw) {
+                    payload["pickupLocation"] = pickup   // "humanities" | "social"
+                }
             }
             // ------------------------------------------------------------
             // ✅ DELIVERY (Fastlane / miniAppId == 3 via loc key)
@@ -1581,21 +2000,6 @@ struct ZCreditResult {
     var approved: Bool { status == .approved }
 }
 
-func pickupLocationIfEnabled(miniAppId: Int, defaults: UserDefaults) -> String? {
-    // ✅ Only minis with multi-location support
-    let supportsPickupLocations: Set<Int> = [13]   // add others later
-
-    guard supportsPickupLocations.contains(miniAppId) else { return nil }
-
-    let raw = (defaults.string(forKey: "pickup.location") ?? "")
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-
-    // safety: ignore empty
-    guard !raw.isEmpty else { return nil }
-
-    // Optional: normalize just in case
-    return raw.lowercased()
-}
 
 final class ZCreditPaymentHandler {
     static let shared = ZCreditPaymentHandler()
@@ -1613,6 +2017,31 @@ final class ZCreditPaymentHandler {
     private var currentPinpadId: String?
 
     // MARK: - Helper: map backend JSON → tri-state ZCreditResult
+    
+    private func resolveMiniAppId() -> Int {
+        let d = UserDefaults.standard
+        let m = d.integer(forKey: "miniAppId")
+        if m > 0 { return m }
+        if let s = d.string(forKey: "shopId"), let v = Int(s), v > 0 { return v }
+        return 0
+    }
+
+    private func resolvePinpadId(miniAppId: Int) -> String {
+        let d = UserDefaults.standard
+
+        // ✅ per-mini key first
+        let perMini = (d.string(forKey: "pinpadId.\(miniAppId)") ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !perMini.isEmpty { return perMini }
+
+        // ✅ legacy fallback
+        let legacy = (d.string(forKey: "pinpadId") ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !legacy.isEmpty { return legacy }
+
+        // ✅ final fallback = no terminal
+        return "111111"
+    }
 
     private func finishFromResponse(
         json: [String: Any],
@@ -1749,7 +2178,11 @@ final class ZCreditPaymentHandler {
         let _ = CashpointID(rawValue: UserDefaults.standard.integer(forKey: "cashpointID")) ?? .one
 
         let safeAmount    = max(0, amount)
-        let pinpadId      = UserDefaults.standard.string(forKey: "pinpadId") ?? "111111"
+        let mid = resolveMiniAppId()
+        
+        let pinpadId = resolvePinpadId(miniAppId: mid)
+
+        print("💳 ZCREDIT PAY mid=\(mid) pinpadId=\(pinpadId) perMini=\(UserDefaults.standard.string(forKey: "pinpadId.\(mid)") ?? "nil") legacy=\(UserDefaults.standard.string(forKey: "pinpadId") ?? "nil")")
         let correlationId = UUID().uuidString
 
         currentCorrelationId = correlationId
@@ -1784,6 +2217,10 @@ final class ZCreditPaymentHandler {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue(correlationId, forHTTPHeaderField: "x-correlation-id")
         req.setValue(pinpadId, forHTTPHeaderField: "x-pinpad-id")
+        if mid != 12 {
+          req.setValue(String(mid), forHTTPHeaderField: "x-miniapp-id")
+        }
+        
         req.httpBody = try? JSONSerialization.data(withJSONObject: startBody)
 
         // 🔍 Debug: print the full curl for /payments/zcredit/start
@@ -2784,19 +3221,19 @@ final class ReportPreviewModel: ObservableObject {
                     d.tipsTotal    = row.TipsTotal
 
                     // Payments (cash includes tips)
-                    let cashWithTips = row.CashTotal + row.TipsTotal
-                    d.cashAmount = cashWithTips
+                    let cashTips = row.CashTipsTotal
+                    let cashWithCashTips = row.CashTotal + cashTips
+
+                    d.cashAmount = cashWithCashTips
                     d.cardAmount = row.CardTotal
-                    d.cashCount  = row.CashCount
-                    d.cardCount  = row.CardCount
 
-                    d.collectionsTotalAmount = cashWithTips + row.CardTotal
-                    d.collectionsTotalCount  = row.CashCount + row.CardCount + row.MixedCount
+                    d.collectionsTotalAmount = cashWithCashTips + row.CardTotal
+                    d.closedDrawersAmount    = cashWithCashTips
+                    d.drawerTotalAmount      = cashWithCashTips
+                    d.mainDrawerAmount       = cashWithCashTips
 
+                 
                     // Cash report section
-                    d.closedDrawersAmount     = cashWithTips
-                    d.drawerTotalAmount       = cashWithTips
-                    d.mainDrawerAmount        = cashWithTips
                     d.openDrawersAmount       = 0
                     d.depositWithdrawAmount   = 0
                     d.hostStationDrawerAmount = 0
@@ -4016,4 +4453,67 @@ func savePendingCheckoutKey(_ key: String, miniAppId: Int) {
 func clearPendingCheckoutKey() {
     UserDefaults.standard.removeObject(forKey: CheckoutRecoveryKeys.pendingCheckoutKey)
     UserDefaults.standard.removeObject(forKey: CheckoutRecoveryKeys.pendingMiniAppId)
+}
+
+func canonicalPickupLocation(_ raw: String?) -> String? {
+    let s = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+    if s == "humanities" { return "humanities" }
+    if s == "humanity"   { return "humanities" }   // ✅ add
+    if s == "social"     { return "social" }
+
+    let compact = s.filter { $0.isLetter || $0.isNumber }
+    if ["humanity","cafeteria","מדעיהרוח","רוח","קפיטריה","קפטריה"].contains(compact) { return "humanities" }
+    if ["sciencebuilding","science","socialbuilding","מדעיהחברה","חברה"].contains(compact) { return "social" }
+
+    return nil
+}
+extension ModifierItem {
+    var linkedProduct: ShellMenuItem? {
+        MenuCatalog.shared.item(for: linkedProductId)
+    }
+
+    var effectiveStatus: Int? {
+        if let linked = linkedProduct {
+            if let stock = linked.stockQuantity {
+                return stock > 0 ? 1 : 0
+            }
+            return linked.status
+        }
+        return status
+    }
+
+    var effectiveName: String {
+        linkedProduct?.displayName ?? name
+    }
+
+    var isAvailable: Bool {
+        if let linked = linkedProduct {
+            return linked.isAvailable
+        }
+        if let status, status == 0 { return false }
+        return true
+    }
+}
+extension ModifierItem {
+    var resolvedName: String {
+        if let linkedProductId,
+           let linked = MenuCatalog.shared.item(for: linkedProductId) {
+            return linked.displayName
+        }
+        return name
+    }
+
+    var isResolvedAvailable: Bool {
+        if let linkedProductId,
+           let linked = MenuCatalog.shared.item(for: linkedProductId) {
+            return linked.isAvailable
+        }
+
+        if let status, status == 0 {
+            return false
+        }
+
+        return true
+    }
 }

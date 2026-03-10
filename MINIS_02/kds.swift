@@ -37,7 +37,7 @@ struct SwipeUpCardCarousel: View {
     @AppStorage("kds.selectedStations") private var selectedStationsRaw: String = ""
     @AppStorage("kds.historyCardIds") private var historyCardIdsRaw: String = ""
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("admin.pickupLocation") private var adminPickupLocation: String = "humanity"
+    @AppStorage("pickup.location") private var adminPickupLocation: String = "humanity"
     enum Tab: String, CaseIterable { case active = "עכשיו", history = "היסטוריה" }
     @State private var showDrinkComic = false
     @State private var drinkComicPulse = false
@@ -45,6 +45,9 @@ struct SwipeUpCardCarousel: View {
     @State private var pastryComicPulse = false
     @State private var pastryComicToken = UUID()
     @State private var debugPlayer: AVPlayer? = nil
+    @State private var searchText: String = ""
+    @State private var isSearching: Bool = false
+    @State private var tabBeforeSearch: Tab = .active
     @AppStorage(ExperienceModeKeys.mode) private var experienceModeRaw: String = ExperienceMode.casual.rawValue
     
     private func cardStatusFromBackend(_ s: Int) -> Card.Status {
@@ -52,6 +55,39 @@ struct SwipeUpCardCarousel: View {
         return (s < 2) ? .active : .history
     }
     
+    private var isSearchActive: Bool {
+        !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+    
+    @MainActor
+    private func autoMoveOldActiveCardsToHistory(minutes: Int = 40) {
+        let cutoff = Date().addingTimeInterval(-TimeInterval(minutes * 60))
+
+        // Load once, mutate once, save once (fast + stable)
+        var map = loadHistoryMap()
+        let now = Date()
+
+        var didChange = false
+
+        for i in cards.indices {
+            guard cards[i].status == .active else { continue }
+            guard cards[i].placedAt < cutoff else { continue }
+
+            // Persist “forced history” so it stays in history across polls
+            if map[cards[i].id] == nil {
+                map[cards[i].id] = now
+                didChange = true
+            }
+
+            // Flip UI state
+            cards[i].status = .history
+            cards[i].completedAt = cards[i].completedAt ?? map[cards[i].id] ?? now
+        }
+
+        if didChange {
+            saveHistoryMap(map)
+        }
+    }
     
     private func normalizeModToken(_ s: String) -> String {
         s.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -59,6 +95,16 @@ struct SwipeUpCardCarousel: View {
             .replacingOccurrences(of: " ", with: "")
     }
 
+    private func canonPickupParam(_ raw: String) -> String? {
+        let compact = raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .filter { $0.isLetter || $0.isNumber }   // scienceBuilding -> sciencebuilding
+
+        if compact == "humanity" { return "humanity" }
+        if compact == "sciencebuilding" { return "sciencebuilding" }
+        return nil
+    }
     private func isDefaultHiddenModifier(_ stripped: String) -> Bool {
         // Put here whatever you already hide as “default”
         // (examples — tweak to YOUR defaults)
@@ -187,8 +233,10 @@ struct SwipeUpCardCarousel: View {
         var items: [OrderItem]
         var isTA: Bool
         var placedAt: Date
-        let backendStatus: Int        // ✅ ADD
+        let backendStatus: Int
         var customerPhone: String?
+
+        let orderSource: String?   // ✅ ADD (e.g. "mini", "kiosk", "cashpoint")
     }
     
     
@@ -226,7 +274,7 @@ struct SwipeUpCardCarousel: View {
         // ✅ NEW: printed “big number” (ticketNumber / number)
         // If you don’t have it, set nil and fall back to orderId in UI.
         var orderNumber: Int?
-
+        var orderSource: String?   // ✅ ADD
         var name: String
         var isTA: Bool
 
@@ -466,11 +514,11 @@ struct SwipeUpCardCarousel: View {
         saveHistoryMap(map)
 
         if let idx = cards.firstIndex(where: { $0.id == card.id }) {
+            // ✅ keep existing orderSource (already on the card)
             cards[idx].status = .history
             cards[idx].completedAt = map[card.id]
         }
     }
-
     private func stripModifierTitle(_ s: String) -> String {
         let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty else { return t }
@@ -591,7 +639,7 @@ struct SwipeUpCardCarousel: View {
 
                 if let idx = cards.firstIndex(where: { $0.id == id }) {
                     cards[idx].orderNumber = order.number          // ✅ ADD
-
+                    cards[idx].orderSource = order.orderSource  
                     cards[idx].name = order.customerName
                     cards[idx].isTA = order.isTA
                     cards[idx].timeText = timeText
@@ -620,7 +668,7 @@ struct SwipeUpCardCarousel: View {
                         orderId: order.id,
                         station: station,
                         orderNumber: order.number,             // ✅ ADD
-
+                        orderSource: order.orderSource,
                         name: order.customerName,
                         isTA: order.isTA,
                         timeText: timeText,
@@ -647,6 +695,7 @@ struct SwipeUpCardCarousel: View {
                 }
             }
         }
+        autoMoveOldActiveCardsToHistory(minutes: 40)
 
        // trimCardsToMax(activeMax: 25, historyMax: 25)
     }
@@ -689,41 +738,45 @@ struct SwipeUpCardCarousel: View {
 
     private func fetchOrdersFromBackend(miniAppId: Int) async throws -> [Order] {
 
-        var comps = URLComponents(string: "https://minis.studio/api/admin/ordersByLocation")!
-
-        var q: [URLQueryItem] = [
-            .init(name: "miniAppId", value: "\(miniAppId)")
-        ]
-
-        // ✅ Only miniAppId 13 uses location filtering
-        if miniAppId == 13 {
-            let loc = adminPickupLocation.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !loc.isEmpty {
+        func fetchOne(_ loc: String?) async throws -> [KDSAdminOrderDTO] {
+            var comps = URLComponents(string: "https://minis.studio/api/admin/ordersByLocation")!
+            var q: [URLQueryItem] = [
+                .init(name: "miniAppId", value: "\(miniAppId)")
+            ]
+            if let loc, !loc.isEmpty {
                 q.append(.init(name: "pickupLocation", value: loc))
             }
+            comps.queryItems = q
+            let url = comps.url!
+
+            var req = URLRequest(url: url)
+            req.httpMethod = "GET"
+            req.setValue("application/json", forHTTPHeaderField: "Accept")
+            req.timeoutInterval = 12
+
+            print("📡 KDS fetch:", url.absoluteString)
+
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                throw URLError(.badServerResponse)
+            }
+
+            let wrapped = try JSONDecoder().decode(KDSAdminOrdersWrappedDTO.self, from: data)
+            return wrapped.orders ?? []
         }
 
-        comps.queryItems = q
-        let url = comps.url!
-
-        var req = URLRequest(url: url)
-        req.httpMethod = "GET"
-        req.setValue("application/json", forHTTPHeaderField: "Accept")
-        req.timeoutInterval = 12
-
-        print("📡 KDS fetch:", url.absoluteString)
-
-        let (data, resp) = try await URLSession.shared.data(for: req)
-        guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            throw URLError(.badServerResponse)
+        // ✅ mini 13: fetch BOTH locations and merge
+        if miniAppId == 13 {
+            let loc = canonPickupParam(adminPickupLocation) ?? "humanity" // default safe
+            let single = try await fetchOne(loc)
+            return mapDTOToOrders(single)
         }
+        
+        
 
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .useDefaultKeys
-
-        // ✅ Your endpoint returns wrapped { ok, count, orders }
-        let wrapped = try decoder.decode(KDSAdminOrdersWrappedDTO.self, from: data)
-        return mapDTOToOrders(wrapped.orders ?? [])
+        // ✅ all other minis: normal single call
+        let single = try await fetchOne(nil)
+        return mapDTOToOrders(single)
     }
     private func mapDTOToOrders(_ decodedArray: [KDSAdminOrderDTO]) -> [Order] {
         let now = Date()
@@ -755,7 +808,8 @@ struct SwipeUpCardCarousel: View {
             isTA: isTakeAway(dto),
             placedAt: placed,
             backendStatus: dto.status ?? 0,
-            customerPhone: bestPhone(dto)     // ✅ ADD
+            customerPhone: bestPhone(dto),
+            orderSource: dto.orderSource        // ✅ ADD
         )
     }
 
@@ -1000,6 +1054,41 @@ struct SwipeUpCardCarousel: View {
         }
     }
 
+    private struct TabsCapsules: View {
+        let tabs: [SwipeUpCardCarousel.Tab]
+        @Binding var selected: SwipeUpCardCarousel.Tab
+
+        var body: some View {
+            HStack(spacing: 8) {
+                ForEach(tabs, id: \.self) { tab in
+                    let isOn = (selected == tab)
+
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            selected = tab
+                        }
+                    } label: {
+                        Text(tab.rawValue.uppercased())
+                            .font(.system(size: 13, weight: isOn ? .semibold : .regular))
+                            .foregroundColor(isOn ? .black : .white)
+                            .opacity(isOn ? 1.0 : 0.8)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 7)
+                            .background(
+                                Capsule(style: .continuous)
+                                    .fill(isOn ? Color.white : Color.clear)
+                            )
+                            .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 2)
+            .padding(.vertical, 2)
+            .fixedSize(horizontal: true, vertical: true)
+        }
+    }
+    
     // MARK: - View
 
     var body: some View {
@@ -1026,6 +1115,8 @@ struct SwipeUpCardCarousel: View {
                                     tab: selectedTab,
                                     rowHeight: rowHeight,
                                     cards: cards,
+                                    miniAppId: miniAppId,
+                                    searchText: searchText,
                                     cardBG: cardBG,
                                     stroke: cardStroke,
                                     radius: cardRadius,
@@ -1088,46 +1179,63 @@ struct SwipeUpCardCarousel: View {
                 stopPolling()
             }
             .onChange(of: selectedStations) { newValue in
-                if newValue.isEmpty {
-                    selectedStations = Set(Station.allCases)
-                    return
-                }
+                // ✅ allow 0 selections
                 saveStationsToStorage(newValue)
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button { dismiss() } label: {
-                        Image(systemName: "chevron.right")
+                        Image(systemName: "chevron.left")
                             .font(.system(size: 17, weight: .semibold))
                             .foregroundColor(.white)
                     }
                 }
 
                 ToolbarItem(placement: .principal) {
-                    HStack(spacing: 24) {
-                        ForEach(Tab.allCases, id: \.self) { tab in
+                    TabsCapsules(
+                        tabs: Tab.allCases,
+                        selected: $selectedTab
+                    )
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    HStack(spacing: 10) {
+
+                        if isSearching {
+                            TextField("Search id / name", text: $searchText)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 220)
+                                .submitLabel(.search)
+
                             Button {
-                                withAnimation(.easeInOut(duration: 0.2)) { selectedTab = tab }
+                                searchText = ""
+                                isSearching = false
                             } label: {
-                                Text(tab.rawValue.uppercased())
-                                    .font(.system(size: 16, weight: selectedTab == tab ? .semibold : .regular))
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundColor(.white.opacity(0.9))
+                            }
+                            .buttonStyle(.plain)
+
+                        } else {
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.15)) { isSearching = true }
+                            } label: {
+                                Image(systemName: "magnifyingglass")
                                     .foregroundColor(.white)
-                                    .opacity(selectedTab == tab ? 1.0 : 0.55)
                             }
                             .buttonStyle(.plain)
                         }
-                    }
-                }
 
-                ToolbarItem(placement: .topBarTrailing) {
-                    MultiSegmentedStations(stations: Station.allCases, selected: $selectedStations)
-                        .fixedSize()
+                        MultiSegmentedStations(stations: Station.allCases, selected: $selectedStations)
+                            .fixedSize()
+                    }
                 }
             }
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(.hidden, for: .navigationBar)
             .toolbarBackground(.clear, for: .navigationBar)
         }
+        .environment(\.layoutDirection, .leftToRight)   // ✅ FORCE LTR FOR THIS SCREEN
+
         .animation(.easeInOut(duration: 0.15), value: cards.count)
         .animation(.easeInOut(duration: 0.2), value: selectedStations)
         .toolbarBackground(.hidden, for: .navigationBar)
@@ -1170,7 +1278,10 @@ private struct KDSAdminOrderDTO: Decodable {
     let id: Int?
     let ticketNumber: Int?
     let status: Int?
+
+    // ✅ we normalize everything into THIS field
     let orderSource: String?
+
     let number: Int?
     let orderNumber: Int?
     let customerPhone: String?
@@ -1193,7 +1304,53 @@ private struct KDSAdminOrderDTO: Decodable {
     let lines: [KDSAdminLineItemDTO]?
     let items: [KDSAdminLineItemDTO]?
 
-    
+    enum CodingKeys: String, CodingKey {
+        case id, ticketNumber, status
+        case orderSource      // some endpoints
+        case source           // other endpoints (AdminOrdersView uses this)
+        case number, orderNumber
+        case customerPhone, customerName, customerDisplayName, displayName, name
+        case note, service
+        case isTA, isDelivery, fulfillment
+        case placedAt, createdAt, created
+        case lines, items
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+
+        id = try c.decodeIfPresent(Int.self, forKey: .id)
+        ticketNumber = try c.decodeIfPresent(Int.self, forKey: .ticketNumber)
+        status = try c.decodeIfPresent(Int.self, forKey: .status)
+
+        // ✅ KEY FIX: accept both keys
+        orderSource =
+            (try? c.decodeIfPresent(String.self, forKey: .orderSource)) ??
+            (try? c.decodeIfPresent(String.self, forKey: .source))
+
+        number = try c.decodeIfPresent(Int.self, forKey: .number)
+        orderNumber = try c.decodeIfPresent(Int.self, forKey: .orderNumber)
+
+        customerPhone = try c.decodeIfPresent(String.self, forKey: .customerPhone)
+        customerName = try c.decodeIfPresent(String.self, forKey: .customerName)
+        customerDisplayName = try c.decodeIfPresent(String.self, forKey: .customerDisplayName)
+        displayName = try c.decodeIfPresent(String.self, forKey: .displayName)
+        name = try c.decodeIfPresent(String.self, forKey: .name)
+
+        note = try c.decodeIfPresent(String.self, forKey: .note)
+        service = try c.decodeIfPresent(String.self, forKey: .service)
+
+        isTA = try c.decodeIfPresent(Bool.self, forKey: .isTA)
+        isDelivery = try c.decodeIfPresent(Bool.self, forKey: .isDelivery)
+        fulfillment = try c.decodeIfPresent(String.self, forKey: .fulfillment)
+
+        placedAt = try c.decodeIfPresent(String.self, forKey: .placedAt)
+        createdAt = try c.decodeIfPresent(String.self, forKey: .createdAt)
+        created = try c.decodeIfPresent(String.self, forKey: .created)
+
+        lines = try c.decodeIfPresent([KDSAdminLineItemDTO].self, forKey: .lines)
+        items = try c.decodeIfPresent([KDSAdminLineItemDTO].self, forKey: .items)
+    }
 }
 
 private struct KDSAdminLineItemDTO: Decodable {
@@ -1275,59 +1432,92 @@ private extension ISO8601DateFormatter {
     }()
 }
 
-// MARK: - Station row
 
 private struct StationRow: View {
     let station: SwipeUpCardCarousel.Station
     let tab: SwipeUpCardCarousel.Tab
     let rowHeight: CGFloat
     let cards: [SwipeUpCardCarousel.Card]
+
+    let miniAppId: Int
+    let searchText: String
+
     let cardBG: Color
     let stroke: Color
     let radius: CGFloat
     let sepText: String
     let onMoveToHistory: (SwipeUpCardCarousel.Card) -> Void
 
-    @State private var lastActiveCount: Int = 0   // ✅ remember previous count (per station)
+    @State private var lastActiveCount: Int = 0
+
+    private var isSearching: Bool {
+        !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func matchesSearch(_ card: SwipeUpCardCarousel.Card) -> Bool {
+        let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if q.isEmpty { return true }
+
+        let needle = q.lowercased()
+
+        let orderId = "\(card.orderId)"
+        let orderNum = card.orderNumber.map(String.init) ?? ""
+        let name = card.name.lowercased()
+
+        return orderId.contains(needle) || orderNum.contains(needle) || name.contains(needle)
+    }
+
+    private func shouldShowCard(_ card: SwipeUpCardCarousel.Card) -> Bool {
+        // Only enforce gating rules for mini 12
+        guard miniAppId == 12 else { return true }
+
+        // ✅ If source is MINI → show always (any station, even without phone)
+        let src = (card.orderSource ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if src == "mini" { return true }
+
+        // Otherwise (kiosk/cashpoint/anything else) → require phone
+        guard let phone = card.phoneLine,
+              !phone.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return false }
+
+        return true
+    }
 
     private var activeCards: [SwipeUpCardCarousel.Card] {
-        cards.filter { $0.station == station && $0.status == .active }
+        cards
+            .filter { $0.station == station && $0.status == .active }
+            .filter(shouldShowCard)
+            .filter(matchesSearch)
+            .sorted { $0.placedAt < $1.placedAt }   // oldest → newest
+    }
+
+    private var historyCards: [SwipeUpCardCarousel.Card] {
+        cards
+            .filter { $0.station == station && $0.status == .history }
+            .filter(shouldShowCard)
+            .filter(matchesSearch)
+            .sorted { ($0.completedAt ?? $0.placedAt) < ($1.completedAt ?? $1.placedAt) } // oldest → newest
     }
 
     private func waitBannerText(
         allCards: [SwipeUpCardCarousel.Card],
         current: SwipeUpCardCarousel.Card
     ) -> String? {
-
-        // Only ACTIVE cards participate
         guard current.status == .active else { return nil }
 
-        // Collect all active cards for the same order
         let sameOrder = allCards.filter {
             $0.orderId == current.orderId && $0.status == .active
         }
 
-        // Buckets logic (exactly like your snippet)
-        let hasBar =
-            sameOrder.contains { $0.station == .bar }
+        let hasBar = sameOrder.contains { $0.station == .bar }
+        let hasBakery = sameOrder.contains { $0.station == .bakery }
+        guard hasBar && hasBakery else { return nil }
 
-        let hasBakery =
-            sameOrder.contains { $0.station == .bakery }
-
-        let hasBarAndBakery = hasBar && hasBakery
-        guard hasBarAndBakery else { return nil }
-
-        // Only show on Bakery card
         guard current.station == .bakery else { return nil }
-
         return "מחכה לשתייה"
     }
-    private var historyCards: [SwipeUpCardCarousel.Card] {
-        cards.filter { $0.station == station && $0.status == .history }
-            .sorted { ($0.completedAt ?? .distantPast) > ($1.completedAt ?? .distantPast) }
-    }
+
     private func waitBadge(for card: SwipeUpCardCarousel.Card) -> WaitBadge? {
-        // ✅ Show ONLY on BAR when BAR+BAKERY tickets exist for same active order
         guard card.station == .bar else { return nil }
         guard card.status == .active else { return nil }
 
@@ -1338,8 +1528,7 @@ private struct StationRow: View {
 
         return WaitBadge(systemImage: "takeoutbag.and.cup.and.straw.fill", text: "++++ מחכה למאפה ++++")
     }
-    
-   
+
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(station.rawValue.uppercased())
@@ -1347,68 +1536,76 @@ private struct StationRow: View {
                 .foregroundColor(.white.opacity(0.9))
                 .padding(.horizontal, 14)
 
-            if tab == .active {
-                ScrollViewReader { proxy in
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        LazyHStack(alignment: .center, spacing: 10) {
-                            ForEach(activeCards) { card in
-                                BonesCardActive(
-                                    card: card,
-                                    waitBadge: waitBadge(for: card),   // ✅ NEW
-                                    cardBG: cardBG,
-                                    stroke: stroke,
-                                    radius: radius,
-                                    sepText: sepText,
-                                    onDismiss: { onMoveToHistory($0) }
-                                )
-                                .id(card.id)
-                              
-                            }
-                        }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 2)
-                       
-                    }
-                   
-                    .onAppear {
-                        lastActiveCount = activeCards.count
-                    }
-                    .onChange(of: activeCards.map(\.id)) { ids in
-                        let newCount = ids.count
-                        defer { lastActiveCount = newCount }
-
-                        // ✅ KEY FIX:
-                        // Only snap back when cards were REMOVED (count decreased).
-                        // When polling ADDS cards, do NOTHING (no jump back).
-                        guard newCount < lastActiveCount else { return }
-                        guard let first = ids.first else { return }
-
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
-                            proxy.scrollTo(first, anchor: .leading)
-                        }
-                    }
-                }
+            if isSearching {
+                // ✅ While searching: show BOTH (active + history), regardless of selected tab
+                activeCarousel
+                historyCarousel
+            } else if tab == .active {
+                activeCarousel
             } else {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    LazyHStack(alignment: .top, spacing: 10) {
-                        ForEach(historyCards) { card in
-                            BonesCardHistory(
-                                card: card,
-                                waitBadge: waitBadge(for: card),   // ✅ NEW
-                                cardBG: cardBG,
-                                stroke: stroke,
-                                radius: radius,
-                                sepText: sepText
-                            )
-                        }
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 2)
-                   
-                }
-                .frame(maxHeight: 380)
+                historyCarousel
             }
         }
+    }
+
+    // MARK: - Carousels
+
+    @ViewBuilder
+    private var activeCarousel: some View {
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(alignment: .center, spacing: 10) {
+                    ForEach(activeCards) { card in
+                        BonesCardActive(
+                            card: card,
+                            waitBadge: waitBadge(for: card),
+                            cardBG: cardBG,
+                            stroke: stroke,
+                            radius: radius,
+                            sepText: sepText,
+                            onDismiss: { onMoveToHistory($0) }
+                        )
+                        .id(card.id)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 2)
+            }
+            .onAppear { lastActiveCount = activeCards.count }
+            .onChange(of: activeCards.map(\.id)) { ids in
+                let newCount = ids.count
+                defer { lastActiveCount = newCount }
+
+                // Only snap back when cards were REMOVED (count decreased).
+                guard newCount < lastActiveCount else { return }
+                guard let first = ids.first else { return }
+
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
+                    proxy.scrollTo(first, anchor: .leading)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var historyCarousel: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            LazyHStack(alignment: .top, spacing: 10) {
+                ForEach(historyCards) { card in
+                    BonesCardHistory(
+                        card: card,
+                        waitBadge: waitBadge(for: card),
+                        cardBG: cardBG,
+                        stroke: stroke,
+                        radius: radius,
+                        sepText: sepText
+                    )
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 2)
+        }
+        .frame(maxHeight: 380)
     }
 }
 
@@ -1642,7 +1839,7 @@ private struct BonesCardActive: View {
         .padding(12)
 
         // ✅ KEY: collapse the layout slot instantly so neighbors squeeze in (no empty gap)
-        .frame(width: isCollapsing ? 0 : cardWidth)
+        .frame(width: isCollapsing ? 1 : cardWidth)   // ✅ avoid 0-width layout glitch
         .clipped() // important so content doesn’t “stick out” while width collapses
 
         .frame(minHeight: minCardHeight, alignment: .top)
@@ -1683,7 +1880,11 @@ private struct BonesCardActive: View {
 
                         // ✅ 2) then remove from data after the collapse finishes
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.14) {
-                            onDismiss(card)
+                            var t = Transaction()
+                            t.disablesAnimations = true     // ✅ prevents “blink” relayout when last item removed
+                            withTransaction(t) {
+                                onDismiss(card)
+                            }
                         }
                     } else {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) { dragY = 0 }
@@ -1702,29 +1903,31 @@ private struct BonesCardActive: View {
 
     @ViewBuilder
     private var itemsContent: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .trailing, spacing: 8) {
             ForEach(card.itemRows) { row in
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .trailing, spacing: 4) {
 
-                    // Main line: "QTY NAME" big
+                    // ✅ Main line RTL: push content to the right
                     HStack(spacing: 8) {
-                        Text("\(row.qty)")
-                            .font(.system(size: 18, weight: .bold, design: .monospaced))
+                        Spacer(minLength: 0)
 
                         Text(row.name)
                             .font(.system(size: 18, weight: .bold, design: .monospaced))
                             .lineLimit(1)
+                            .multilineTextAlignment(.trailing)
 
-                        Spacer(minLength: 0)
+                        Text("\(row.qty)")
+                            .font(.system(size: 18, weight: .bold, design: .monospaced))
                     }
                     .foregroundColor(.black)
 
-                    // Modifiers: indented, smaller
+                    // ✅ Modifiers right aligned
                     ForEach(row.modifierLines, id: \.self) { m in
-                        Text("  " + m)
+                        Text(m)
                             .font(.system(size: 14, weight: .semibold, design: .monospaced))
                             .foregroundColor(.black.opacity(0.75))
                             .lineLimit(2)
+                            .multilineTextAlignment(.trailing)
                     }
                     .padding(.top, 2)
                 }
@@ -1735,9 +1938,10 @@ private struct BonesCardActive: View {
                     .font(.system(size: 14, weight: .regular, design: .monospaced))
                     .foregroundColor(.black.opacity(0.75))
                     .padding(.top, 6)
+                    .multilineTextAlignment(.trailing)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .trailing)   // ✅ WAS leading
     }
 
     // MARK: - Header (centered ticket header)

@@ -1,4 +1,4 @@
-
+/*
 import Foundation
 import Network
 import UIKit
@@ -127,7 +127,7 @@ enum OneShotPrinter {
     }
     private static func isOnPrinterLan(_ ip: String?) -> Bool {
         guard let ip else { return false }
-        return ip.hasPrefix("10.100.10.")
+        return ip.hasPrefix("10.100.10.") || ip.hasPrefix("10.0.0.")
     }
 
     private static func key(_ host: String, _ port: UInt16) -> String { "\(host):\(port)" }
@@ -425,7 +425,6 @@ enum OneShotPrinter {
         }
     }
 
-    
     // MARK: - Core send
 
     private static func sendImpl(
@@ -755,9 +754,6 @@ fileprivate func stationFromString(_ s: String?) -> Station? {
     switch raw.lowercased() {
     case "s1", "kitchen", "מטבח":
         return .kitchen
-        
-    case "s85777":
-        return .kitchen
 
     case "s2", "bar", "בר":
         return .bar
@@ -938,34 +934,7 @@ final class PrinterManager {
             self.lastSendHadNetworkError = !success
         }
     }
-    private func orderSourceHebrew(_ src: Any) -> String {
-        // If your type is an enum, Swift will stringify it like "kiosk" / "cashpoint" / "mini"
-        let raw = String(describing: src).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 
-        // ✅ map to what you want on paper
-        switch raw {
-        case "mini", "minis", "miniapp":
-            return "מיני"
-        case "kiosk", "selfservice", "self_service":
-            return "קיוסק"
-        case "cashpoint", "pos", "register", "cash", "cassa":
-            return "קופה"
-        default:
-            return raw.isEmpty ? "לא ידוע" : raw
-        }
-    }
-    private func shouldPrintMinisSourceRow(_ src: Any) -> Bool {
-        let raw = String(describing: src)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-
-        switch raw {
-        case "kiosk", "selfservice", "self_service", "mini", "minis", "miniapp":
-            return true
-        default:
-            return false
-        }
-    }
     static let shared = PrinterManager()
     private let debugTickets = true
 
@@ -1003,6 +972,182 @@ final class PrinterManager {
 
             return ($0.productId ?? 0) < ($1.productId ?? 0)
         }
+    }
+    
+    private var isMini13: Bool {
+        UserDefaults.standard.integer(forKey: "miniAppId") == 13
+    }
+    fileprivate func mini13ModifierRows(_ raw: String) -> [String] {
+        // 1) Split on common separators + newlines
+        let seps = CharacterSet(charactersIn: "·,•\n\r")
+        let parts = raw
+            .components(separatedBy: seps)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .map { token -> String in
+                // 2) Remove "Title: Value" -> "Value"
+                if let r = token.range(of: ":") {
+                    return token[token.index(after: r.lowerBound)...]
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                // 3) Remove "(Title: Value" pattern if it exists
+                if let r = token.range(of: #"^\(([^:]{1,30}):\s*"#,
+                                       options: .regularExpression) {
+                    var t = token
+                    t.removeSubrange(r)
+                    return t.trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                return token
+            }
+
+        // 4) Dedup while preserving order
+        var seen = Set<String>()
+        var out: [String] = []
+        for p in parts {
+            if !seen.contains(p) {
+                seen.insert(p)
+                out.append(p)
+            }
+        }
+        return out
+    }
+    private func printMini13RongtaTicket(
+        orderNumber: Int,
+        entries: [BasketEntry],
+        diningMode: DiningMode,
+        customerName: String?,
+        customerPhone: String?
+    ) async -> Bool {
+
+        // ✅ hardcoded printers
+        let p: UInt16 = 9100
+        let primary = "10.0.0.221"
+        let secondary = "10.0.0.222"
+
+        // ✅ Build lines (simple)
+        let lines: [KDSOrderLine] = entries.map { e in
+            KDSOrderLine(
+                itemId: nil,
+                productId: e.item.id,
+                name: e.item.name,
+                qty: e.quantity,
+                category: e.item.category,
+                status: 1,
+                station: "ron13",              // irrelevant, but keeps your model happy
+                modifiers: e.subtitle
+            )
+        }
+
+        let order = KDSAdminOrder(
+            id: orderNumber,
+            source: .kiosk,
+            tableLabel: nil,
+            bucket: .active,
+            stage: .received,
+            placedAt: Date(),
+            scheduledFor: nil,
+            customerName: (customerName ?? "").isEmpty ? "שם לקוח" : (customerName ?? ""),
+            customerPhone: customerPhone,
+            totalGBP: 0,
+            itemSummary: "",
+            isDelivery: false,
+            shortCode: nil,
+            lines: lines,
+            service: (diningMode == .takeAway ? "ta" : "sit"),
+            name: customerName
+        )
+
+        // ✅ Build Rongta job (hard-coded: codepage 33 + win1255 + visual reverse)
+        let job = makeMini13RongtaJob(order: order, lines: lines)
+
+        let dkBase = "ron13|\(orderNumber)"
+
+        let ok1 = await OneShotPrinter.sendAwait(host: primary, port: p, data: job, tag: dkBase + "|p", dedupeKey: dkBase + "|p")
+        if ok1 { return true }
+
+        let ok2 = await OneShotPrinter.sendAwait(host: secondary, port: p, data: job, tag: dkBase + "|s", dedupeKey: dkBase + "|s")
+        return ok2
+    }
+    
+    private func makeMini13RongtaJob(order o: KDSAdminOrder, lines: [KDSOrderLine]) -> Data {
+        let lineWidth = 42
+        let sep = String(repeating: "-", count: lineWidth)
+
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "en_US_POSIX")
+        df.timeZone = .current
+        df.dateFormat = "HH:mm   dd/MM/yyyy"
+        let meta = df.string(from: Date())
+
+        var job = Data()
+        job += EscPos.initPrinter
+
+        // ✅ Force Rongta Hebrew codepage
+        job.append(contentsOf: [0x1B, 0x74, 33])
+
+        // Title
+        job += EscPos.align(1)
+        job += EscPos.style(doubleHeight: true, doubleWidth: true, bold: true)
+        job += asciiLine("\(o.id)")
+        job += EscPos.feed(1)
+
+        // Name
+        let name = o.customerName.trimmingCharacters(in: .whitespacesAndNewlines)
+        job += EscPos.style(doubleHeight: true, doubleWidth: true, bold: true)
+        job += hebrewLineData(name.isEmpty ? "שם לקוח" : name)
+        job += EscPos.feed(1)
+
+        // Date/time
+        job += EscPos.style(doubleHeight: false, doubleWidth: true, bold: false)
+        job += EscPos.align(1)
+        job += asciiLine(meta)
+        job += EscPos.feed(1)
+
+        // Service pill
+        if (o.service ?? "").lowercased().contains("ta") {
+            job += EscPos.feed(1)
+            job += makeBlackTitle("** TA **", totalWidth: 24)
+            job += EscPos.feed(1)
+        }
+
+        // Items
+        job += EscPos.align(0)
+        job += asciiLine(sep)
+        job += EscPos.feed(1)
+
+        for ln in lines {
+            job += EscPos.align(2)
+            job += EscPos.style(doubleHeight: true, doubleWidth: true, bold: true)
+            job += hebrewLineData("\(ln.qty) \(ln.name)")
+
+            if let rawMods = ln.modifiers?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !rawMods.isEmpty {
+
+                let rows = mini13ModifierRows(rawMods)
+                if !rows.isEmpty {
+                    job += EscPos.feed(1)
+                    job += EscPos.style(doubleHeight: false, doubleWidth: true, bold: false)
+
+                    for r in rows {
+                        job += hebrewLineData("  \(r)")   // ✅ each modifier on a new row
+                    }
+                }
+            }
+
+            job += EscPos.feed(1)
+            job += EscPos.style(doubleHeight: false, doubleWidth: false, bold: false)
+            job += EscPos.align(0)
+            job += asciiLine(sep)
+            job += EscPos.feed(1)
+        }
+
+        // Footer
+        job += EscPos.align(1)
+        job += EscPos.feed(2)
+        job += hebrewLineData("תודה רבה")
+        job += EscPos.feed(4)
+        job += EscPos.cut
+        return job
     }
 
     // MARK: - Which set is active? (global toggle)
@@ -1690,7 +1835,6 @@ final class PrinterManager {
         Swift.print("Customer: \(order.customerName.isEmpty ? "-" : order.customerName)")
         Swift.print("Service:  \(serviceLabel(from: order.service))")
         Swift.print("Printed:  \(Date())")
-        Swift.print("Source:   \(order.source)")
         Swift.print("Items:")
 
         if lines.isEmpty {
@@ -1735,7 +1879,7 @@ final class PrinterManager {
             var modsClean: String
         }
 
-        let shouldShowMinisRow = shouldPrintMinisSourceRow(o.source)
+        
         let phoneLine: String? = {
             let p = o.customerPhone?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             guard !p.isEmpty else { return nil }
@@ -1916,12 +2060,7 @@ final class PrinterManager {
                                 bold: false)
             job += asciiLine(orderMeta1)
 
-            if shouldShowMinisRow {
-                job += EscPos.feed(1)
-                job += makeBlackTitle("MINIS", totalWidth: 24)
-                job += EscPos.feed(1)
-            }
-
+            // reset after
             job += EscPos.style(doubleHeight: false,
                                 doubleWidth: false,
                                 bold: false)
@@ -1975,15 +2114,7 @@ final class PrinterManager {
             job += EscPos.style(doubleHeight: true, doubleWidth: true, bold: false)
             job += asciiLine(orderMeta1)
 
-            if shouldShowMinisRow {
-                job += EscPos.feed(1)
-                job += makeBlackTitle("MINIS", totalWidth: 24)
-                job += EscPos.feed(1)
-            }
-
-            job += EscPos.style(doubleHeight: false,
-                                doubleWidth: false,
-                                bold: false)
+            job += EscPos.style(doubleHeight: false, doubleWidth: false, bold: false)
             job += EscPos.align(0)
             job += asciiLine(sep)
             job += EscPos.feed(1)
@@ -2780,7 +2911,15 @@ extension PrinterManager {
         customerName: String?,
         customerPhone: String?
     ) async -> Bool {
-
+        if isMini13 {
+            return await printMini13RongtaTicket(
+                orderNumber: orderNumber,
+                entries: entries,
+                diningMode: diningMode,
+                customerName: customerName,
+                customerPhone: customerPhone
+            )
+        }
         // ✅ tiny stagger between printers (reduces burst/connect collisions)
         @inline(__always)
         func gapMs(_ ms: Int) async {
@@ -3343,7 +3482,7 @@ enum PrintEventType: String, Codable {
 
 struct PrintEvent: Codable {
     let ts: Double                // unix seconds
-    var orderId: Int 
+    let orderId: Int
     let station: String
     let host: String
     let port: UInt16
@@ -3420,7 +3559,6 @@ final class PrintJournal {
         }
     }
 
-    
     private func trimIfNeeded() {
         // time trim
         let cutoff = Date().timeIntervalSince1970 - keepSeconds
@@ -3460,20 +3598,4 @@ final class PrintJournal {
         try? Data(newText.utf8).write(to: fileURL, options: .atomic)
     }
 }
-
-extension PrintJournal {
-
-    func aliasLogs(fromTicket ticket: Int, toOrderId orderId: Int) {
-        guard ticket > 0, orderId > 0, ticket != orderId else { return }
-
-        let ticketEvents = read(orderId: ticket)
-        guard !ticketEvents.isEmpty else { return }
-
-        for var e in ticketEvents {
-            e.orderId = orderId   // now allowed (var)
-            log(e)                // ✅ use existing logger
-        }
-
-        print("🧾 Aliased \(ticketEvents.count) logs from ticket \(ticket) → orderId \(orderId)")
-    }
-}
+*/

@@ -118,6 +118,8 @@ private struct AutoOrderDTO: Decodable {
         case Status = "Status"
         case service
         case Service = "Service"
+        
+        
     }
 
     init(from decoder: Decoder) throws {

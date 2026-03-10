@@ -2,94 +2,135 @@ import SwiftUI
 import UIKit
 import UserNotifications
 import StripeApplePay
-
-// MARK: - Reset mini shop defaults
-
-
+import Security
+import Foundation
+import Darwin
 
 @main
 struct MINIS_02App: App {
-    
+
+    // MARK: - App Delegate + Scene
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @Environment(\.scenePhase) private var scenePhase
+
+    // MARK: - Core App State
     @AppStorage("admin") private var isAdmin: Bool = false
-    // MARK: - App State
     @AppStorage(AppSettings.Key.cashPointMode) private var cashPointMode: Bool = false
-    @AppStorage("shopId") private var shopId: String = "12"
+    @AppStorage(LangKeys.lang) private var appLang: String = "he"
+
+    private var appIsRtl: Bool { appLang == "he" || appLang == "ar" }
+
+    private var appLocale: Locale {
+        switch appLang {
+        case "ar": return Locale(identifier: "ar")
+        case "en": return Locale(identifier: "en_GB")
+        default:   return Locale(identifier: "he_IL")
+        }
+    }
+    // ✅ Leave these unset by default (no bootstrap)
+    @AppStorage("shopId") private var shopId: String = ""
     @AppStorage("miniAppId") private var miniAppId: Int = 0
+
     @AppStorage("launchMenuOnce") private var launchMenuOnce: Bool = false
     @AppStorage("autoPrintEnabled") private var autoPrintEnabled: Bool = true
     @AppStorage("direction") private var direction: String = "ltr"
     @AppStorage("deliveryLoc") private var deliveryLoc: String = ""
 
+    // MARK: - Admin pairing / identity
+    @AppStorage("admin.role") private var adminRole: String = "cashier"   // cashier/admin/grandManager/owner/kds
+    private let principalId: String = PrincipalIdStore.getOrCreate()
+
+    // MARK: - Student
     @State private var studentClaim: StudentClaim? = nil
 
     // MARK: - App Group + Keys
     private let appGroupId = "group.minis"
     private let kPendingUniversalLink = "pendingUniversalLink"
     private let kPendingStudentClaim  = "pendingStudentClaim.v1"
-    
-    func detectLANIPv4() -> String? {
-        var ifaddr: UnsafeMutablePointer<ifaddrs>?
 
-        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else {
-            return nil
-        }
-        defer { freeifaddrs(ifaddr) }
-
-        for ptr in sequence(first: first, next: { $0.pointee.ifa_next }) {
-            let iface = ptr.pointee
-
-            // We care only about IPv4
-            guard iface.ifa_addr.pointee.sa_family == sa_family_t(AF_INET) else { continue }
-
-            let name = String(cString: iface.ifa_name)
-
-            // Wi-Fi / Ethernet / bridge (iOS simulator)
-            guard name == "en0" || name == "bridge100" else { continue }
-
-            var addr = iface.ifa_addr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
-                $0.pointee.sin_addr
-            }
-
-            var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
-            inet_ntop(AF_INET, &addr, &buffer, socklen_t(INET_ADDRSTRLEN))
-
-            return String(cString: buffer)
-        }
-
-        return nil
+    // MARK: - MiniAppId presence (true “nil” = key is missing)
+    private var storedMiniAppId: Int? {
+        let key = "miniAppId"
+        guard UserDefaults.standard.object(forKey: key) != nil else { return nil } // ✅ real nil = missing key
+        let v = UserDefaults.standard.integer(forKey: key)
+        return v > 0 ? v : nil
     }
 
-    init() {
+    private var hasMiniAppContext: Bool {
+        storedMiniAppId != nil
+    }
 
-        // 🔒 Hide back button text globally (no SwiftUI Table/toolbars involved)
-        do {
-            let appearance = UINavigationBarAppearance()
-              appearance.configureWithTransparentBackground()   // ✅ THIS makes it transparent
-              appearance.backgroundColor = .clear
-              appearance.shadowColor = .clear   // removes bottom hairline
+    @MainActor
+    private func clearMiniAppContext() {
+        deliveryLoc = ""
+        UserDefaults.standard.removeObject(forKey: "deliveryLoc")
 
+        miniAppId = 0
+        shopId = ""
+        UserDefaults.standard.removeObject(forKey: "miniApinitpId")
+        UserDefaults.standard.removeObject(forKey: "shopId")
 
-            appearance.backButtonAppearance.normal.titleTextAttributes = [
-                .foregroundColor: UIColor.clear
-            ]
-            appearance.backButtonAppearance.highlighted.titleTextAttributes = [
-                .foregroundColor: UIColor.clear
-            ]
+        launchMenuOnce = false
+        cashPointMode = false
 
-            UINavigationBar.appearance().standardAppearance = appearance
-            UINavigationBar.appearance().scrollEdgeAppearance = appearance
-            UINavigationBar.appearance().compactAppearance = appearance
+        print("🧼 Cleared miniAppId/shopId context (miniAppId is now NIL in UserDefaults)")
+    }
+    
+    
 
-            // Extra safety: push title off-screen (covers some edge cases)
-            UIBarButtonItem.appearance().setBackButtonTitlePositionAdjustment(
-                UIOffset(horizontal: -1000, vertical: 0),
-                for: .default
-            )
+    @MainActor
+    private func applyMiniAppContext(_ id: Int, url: URL) {
+        guard id > 0 else {
+            clearMiniAppContext()
+            return
         }
 
-        // ✅ Keep your existing init logic
+        deliveryLoc = ""
+        UserDefaults.standard.removeObject(forKey: "deliveryLoc")
+
+        miniAppId = id
+        UserDefaults.standard.set(id, forKey: "miniAppId")
+
+        let sid = String(id)
+        shopId = sid
+        UserDefaults.standard.set(sid, forKey: "shopId")
+
+        // optional query ?loc=
+        if let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
+           let loc = comps.queryItems?.first(where: { $0.name == "loc" })?.value,
+           !loc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+
+            let clean = loc.trimmingCharacters(in: .whitespacesAndNewlines)
+            deliveryLoc = clean
+            UserDefaults.standard.set(clean, forKey: "deliveryLoc")
+            print("📍 Stored deliveryLoc =", clean)
+        }
+
+        // keep your existing behavior
+        resetShopUserDefaultsToDefaults()
+        launchMenuOnce = true
+
+        // ✅ Device rule:
+        // iPad should start in CashPoint first (unless admin).
+        // iPhone should start Home first.
+        cashPointMode = isIPad ? true : false
+
+        pingInstallIfNeeded(force: true)
+
+        print("✅ Applied miniAppId=\(miniAppId) shopId=\(shopId) deliveryLoc=\(deliveryLoc)")
+        
+    }
+
+    // MARK: - Init
+    init() {
+        UserDefaults.standard.set("12", forKey: "miniAppId")
+        print("🔑 principalId =", principalId)
+
+        configureNavBarAppearance()
+        configureStripe()
+        configureSegmented()
+
+        // Keep your existing init logic
         UserDefaults.standard.removeObject(forKey: "printers.config.shop13")
 
         if let ip = detectLANIPv4() {
@@ -98,62 +139,63 @@ struct MINIS_02App: App {
             print("🌐 LAN IP detected: none")
         }
 
-        // ⚠️ If you *always* want to force shop 12 on every launch, keep these lines.
-        // If not, remove them and rely only on the "savedMini" logic below.
-        UserDefaults.standard.set(12, forKey: "miniAppId")
-        UserDefaults.standard.set("12", forKey: "shopId")
-
-        STPAPIClient.shared.publishableKey =
-        "pk_live_51H5URzFZIwZSNufssK4R7BjLhpqxHVcfmEZVH8Tg74MAHMA20RfkYhIfbwFjDWJ55KzHWkOhEcqVWhIO2VShjOcU00Tslmi1XT"
-
-        let seg = UISegmentedControl.appearance()
-        seg.setTitleTextAttributes([.foregroundColor: UIColor.label], for: .normal)
-        seg.setTitleTextAttributes([.foregroundColor: UIColor.label], for: .selected)
-        seg.selectedSegmentTintColor = UIColor.tertiarySystemFill
-
         // ✅ Clear drafts on launch (as you wanted)
         UserDefaults.standard.removeObject(forKey: "posSavedName")
         UserDefaults.standard.removeObject(forKey: "posSavedPhone")
 
-        // ✅ Only set defaults if nothing is saved yet
-        let savedMini = UserDefaults.standard.integer(forKey: "miniAppId")
-        if savedMini <= 0 {
-            miniAppId = 12
-            shopId = "12"
-            UserDefaults.standard.set(miniAppId, forKey: "miniAppId")
-            UserDefaults.standard.set(shopId, forKey: "shopId")
+        // ✅ NO BOOTSTRAP DEFAULT MINI HERE
+        // miniAppId remains NIL (missing key) until a universal link / QR is scanned
+        if let mid = storedMiniAppId {
+            miniAppId = mid
+            shopId = UserDefaults.standard.string(forKey: "shopId") ?? String(mid)
         } else {
-            // keep saved
-            miniAppId = savedMini
-            shopId = UserDefaults.standard.string(forKey: "shopId") ?? String(savedMini)
+            miniAppId = 0
+            shopId = ""
         }
     }
+
+    // MARK: - Body
     var body: some Scene {
         WindowGroup {
             Group {
+                // ✅ 1) Admin always goes Tesla3
                 if isAdmin {
-                           DashboardView()
-                               .tint(.primary)
-                               .environment(\.layoutDirection, .rightToLeft)
-                               .environment(\.locale, Locale(identifier: "he_IL"))
-                       } else if cashPointMode {
-                           CashPointView()
-                               .tint(.primary)
-                               .environment(\.layoutDirection, .rightToLeft)
-                               .environment(\.locale, Locale(identifier: "he_IL"))
+                    Tesla3()
+                        .tint(.primary)
+                        .environment(\.layoutDirection, .leftToRight)
+
+                // ✅ 2) No miniAppId stored => must scan QR / open minis.studio/<id>
+                } else if !hasMiniAppContext {
+                    MiniQRScanGateView(
+                        onPasteLink: { s in
+                            guard let url = URL(string: s) else { return }
+                            handleIncoming(url: url)
+                        }
+                    )
+
+                // ✅ 3) Has miniAppId:
+                // iPad starts CashPoint, iPhone starts Home
+                } else if cashPointMode {
+                    CashPointView()
+                        .tint(.primary)
+                        .preferredColorScheme(.dark)
+                        .environment(\.locale, appLocale)
+                        .environment(\.isRtl, appIsRtl)
+                } else {
+                    menuView()
                                .preferredColorScheme(.dark)
-                           
-                       } else {
-                           HomeView()
-                               .tint(.primary)
                                .environment(\.layoutDirection, .leftToRight)
-                               .preferredColorScheme(.dark)
-                       }
+                               .environment(\.locale, appLocale)
+                                  .environment(\.isRtl, appIsRtl)   // your custom env key
+                }
                 
             }
-            .environment(\.isRtl, direction == "rtl")
-            .environment(\.layoutDirection, direction == "rtl" ? .rightToLeft : .leftToRight)
-            .environment(\.currency, direction == "rtl" ? "₪" : "£")
+            .environment(\.isRtl, true)
+            .environment(\.layoutDirection, .leftToRight)
+            .environment(\.currency, "₪")
+          // .environment(\.isRtl, direction == "rtl")
+          //  .environment(\.layoutDirection, direction == "rtl" ? .rightToLeft : .leftToRight)
+          //  .environment(\.currency, direction == "rtl" ? "₪" : "£")
             .accentColor(.primary)
 
             // MARK: - Universal Links / Deep Links
@@ -171,10 +213,13 @@ struct MINIS_02App: App {
 
             // MARK: - Cold launch handling
             .onAppear {
-                // 1) If app group has a pending claim (App Clip → Full App), show it
                 loadPendingClaimFromAppGroupIfAny()
 
-                // 2) If we stored a pending link (cold launch), process it
+                // ✅ Enforce device-first rule at runtime too
+                if !isAdmin, hasMiniAppContext {
+                    cashPointMode = isIPad
+                }
+
                 if let s = MinisShared.sharedDefaults.string(forKey: kPendingUniversalLink),
                    let url = URL(string: s) {
                     print("🥶 cold-launch pendingUniversalLink → \(url.absoluteString)")
@@ -185,9 +230,7 @@ struct MINIS_02App: App {
                 }
             }
 
-            // MARK: - Student (full screen like clip)
-          
-            // MARK: - Scene phase (auto print + installs ping)
+            // MARK: - Scene phase
             .onChange(of: scenePhase) { phase in
                 switch phase {
                 case .active:
@@ -225,61 +268,141 @@ struct MINIS_02App: App {
         print("🔗 handleIncoming → \(url.absoluteString)")
         guard url.host?.lowercased() == "minis.studio" else { return }
 
-        // ✅ Save for attribution + cold-launch fallback
+        // Save for attribution + cold-launch fallback
         MinisShared.sharedDefaults.set(url.absoluteString, forKey: kPendingUniversalLink)
         MinisShared.sharedDefaults.synchronize()
 
-        // ✅ 1) STUDENT CLAIM FIRST (menuView will present it)
+        // ✅ 1) STUDENT CLAIM FIRST
         if let claim = StudentClaim.from(url: url) {
             print("🎓 Student claim detected → \(claim)")
             saveClaimToAppGroup(claim)
-
-            // ✅ tell menuView (if already running) to load + present
             NotificationCenter.default.post(name: .studentClaimArrived, object: nil)
-
             return
         }
 
-        // ✅ 2) Normal deep links (shop/fastlane etc.)
-        deliveryLoc = ""
-        UserDefaults.standard.removeObject(forKey: "deliveryLoc")
+        // Parse components once
+        let pathParts = url.pathComponents.filter { $0 != "/" && !$0.isEmpty }
 
-        let components = url.pathComponents.filter { $0 != "/" && !$0.isEmpty }
-        guard let last = components.last, let id = Int(last) else {
-            print("⚠️ Deep link ignored: no numeric id in path: \(url.path)")
+        // ✅ 2) PAIR (admin/device claim) — uses same miniAppId rules
+        // https://minis.studio/pair?miniAppId=12&token=GUID
+        if url.path.lowercased().hasPrefix("/pair") {
+            let comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
+            let miniStr = comps?.queryItems?.first(where: { $0.name == "miniAppId" })?.value
+            let tokStr  = comps?.queryItems?.first(where: { $0.name == "token" })?.value
+
+            let mid = Int(miniStr ?? "") ?? 0
+            let tok = (tokStr ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+
+            print("🔐 Pair link detected → miniAppId=\(mid) token=\(tok)")
+
+            guard mid > 0, !tok.isEmpty else {
+                print("❌ Pair link missing miniAppId/token")
+                return
+            }
+
+            Task { @MainActor in
+                applyMiniAppContext(mid, url: url)
+            }
+
+            Task { await claimAdminInvite(miniAppId: mid, token: tok) }
             return
         }
 
-        let miniType = components.dropLast().last ?? "unknown"
-        print("🎯 Deep link → type=\(miniType), miniAppId=\(id)")
-
-        miniAppId = id
-        UserDefaults.standard.set(id, forKey: "miniAppId")
-
-        let shopIdString = String(id)
-        shopId = shopIdString
-        UserDefaults.standard.set(shopIdString, forKey: "shopId")
-
-        // optional query ?loc=
-        if let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
-           let loc = comps.queryItems?.first(where: { $0.name == "loc" })?.value,
-           !loc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-
-            let clean = loc.trimmingCharacters(in: .whitespacesAndNewlines)
-            deliveryLoc = clean
-            UserDefaults.standard.set(clean, forKey: "deliveryLoc")
-            print("📍 Stored deliveryLoc =", clean)
+        // ✅ 3) NORMAL shop links
+        // https://minis.studio/12
+        // https://minis.studio/shop/12
+        // https://minis.studio/mini/12
+        if let last = pathParts.last, let id = Int(last) {
+            let miniType = pathParts.dropLast().last ?? "root"
+            print("🎯 Deep link → type=\(miniType), miniAppId=\(id)")
+            Task { @MainActor in
+                applyMiniAppContext(id, url: url)
+            }
+            return
         }
 
-        // reset shop defaults / force menu mode
-        resetShopUserDefaultsToDefaults()
-        launchMenuOnce = true
-        cashPointMode = false
+        print("⚠️ Deep link ignored: no numeric id / no pair token: path=\(url.path)")
+    }
 
-        // ping with attribution
-        pingInstallIfNeeded(force: true)
+    // MARK: - Admin claim (pairing)
 
-        print("✅ Deep link handled → miniAppId=\(miniAppId), shopId=\(shopId), deliveryLoc=\(deliveryLoc)")
+    @MainActor
+    private func claimAdminInvite(miniAppId: Int, token: String) async {
+        let base = UserDefaults.standard.string(forKey: "apiBase") ?? "https://minis.studio"
+        guard let url = URL(string: "\(base)/api/admin/invites/claim") else { return }
+
+        struct Req: Encodable {
+            let miniAppId: Int
+            let inviteToken: String
+            let principalId: String
+            let deviceName: String?
+        }
+
+        let payload = Req(
+            miniAppId: miniAppId,
+            inviteToken: token,
+            principalId: principalId,
+            deviceName: UIDevice.current.name
+        )
+
+        var req = URLRequest(url: url, timeoutInterval: 20)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+        req.setValue(UUID().uuidString, forHTTPHeaderField: "X-Request-Id")
+        req.httpBody = try? JSONEncoder().encode(payload)
+
+        print("📤 claim invite -> \(url.absoluteString)")
+        print("   principalId=\(principalId)")
+        print("   miniAppId=\(miniAppId)")
+        print("   token=\(token)")
+
+        do {
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
+            let text = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
+            print("📥 claim invite HTTP \(code) body=\(String(text.prefix(600)))")
+
+            guard (200...299).contains(code) else {
+                UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
+                return
+            }
+
+            let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            let ok = (obj?["ok"] as? Bool) ?? false
+            guard ok else {
+                UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
+                return
+            }
+
+            let role = (obj?["role"] as? String ?? "admin")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+
+            adminRole = role
+            UserDefaults.standard.set(role, forKey: "admin.role")
+
+            if role == "admin" || role == "owner" || role == "grandmanager" {
+                isAdmin = true
+                cashPointMode = false
+            } else if role == "cashier" {
+                isAdmin = false
+                // ✅ iPad cashier: start cashpoint. iPhone cashier: still starts Home (your rule)
+                cashPointMode = isIPad
+            } else if role == "kds" {
+                isAdmin = false
+                cashPointMode = false
+            } else {
+                isAdmin = false
+                cashPointMode = isIPad
+            }
+
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            print("✅ Pair claim success -> role=\(role)")
+        } catch {
+            print("❌ claim invite network error:", error.localizedDescription)
+            UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
+        }
     }
 
     // MARK: - Student Claim in App Group
@@ -320,8 +443,8 @@ struct MINIS_02App: App {
 
     private struct InstallPingPayload: Codable {
         let anonId: String
-        let platform: String      // "ios"
-        let appVariant: String    // "app"
+        let platform: String
+        let appVariant: String
         let miniAppId: Int?
         let source: String?
         let campaign: String?
@@ -396,13 +519,14 @@ struct MINIS_02App: App {
             anonId: anonId,
             platform: "ios",
             appVariant: "app",
-            miniAppId: miniAppId > 0 ? miniAppId : nil,
+            miniAppId: (storedMiniAppId != nil) ? miniAppId : nil,
             source: attrib.source,
             campaign: attrib.campaign,
             referrer: attrib.referrer
         )
 
         guard let url = URL(string: "https://minis.studio/api/installs/ping") else { return }
+
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -420,6 +544,167 @@ struct MINIS_02App: App {
                 print("📈 installs/ping resp:", s)
             }
         }.resume()
+    }
+
+    // MARK: - UI Config
+
+    private func configureStripe() {
+        STPAPIClient.shared.publishableKey =
+        "pk_live_51H5URzFZIwZSNufssK4R7BjLhpqxHVcfmEZVH8Tg74MAHMA20RfkYhIfbwFjDWJ55KzHWkOhEcqVWhIO2VShjOcU00Tslmi1XT"
+    }
+
+    private func configureSegmented() {
+        let seg = UISegmentedControl.appearance()
+        seg.setTitleTextAttributes([.foregroundColor: UIColor.label], for: .normal)
+        seg.setTitleTextAttributes([.foregroundColor: UIColor.label], for: .selected)
+        seg.selectedSegmentTintColor = UIColor.tertiarySystemFill
+    }
+
+    private func configureNavBarAppearance() {
+        let appearance = UINavigationBarAppearance()
+        appearance.configureWithTransparentBackground()
+        appearance.backgroundColor = .clear
+        appearance.shadowColor = .clear
+
+        appearance.backButtonAppearance.normal.titleTextAttributes = [.foregroundColor: UIColor.clear]
+        appearance.backButtonAppearance.highlighted.titleTextAttributes = [.foregroundColor: UIColor.clear]
+
+        UINavigationBar.appearance().standardAppearance = appearance
+        UINavigationBar.appearance().scrollEdgeAppearance = appearance
+        UINavigationBar.appearance().compactAppearance = appearance
+
+        UIBarButtonItem.appearance().setBackButtonTitlePositionAdjustment(
+            UIOffset(horizontal: -1000, vertical: 0),
+            for: .default
+        )
+    }
+
+    // MARK: - Network Utils
+
+    private func detectLANIPv4() -> String? {
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return nil }
+        defer { freeifaddrs(ifaddr) }
+
+        for ptr in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            let iface = ptr.pointee
+
+            guard iface.ifa_addr.pointee.sa_family == sa_family_t(AF_INET) else { continue }
+
+            let name = String(cString: iface.ifa_name)
+            guard name == "en0" || name == "bridge100" else { continue }
+
+            var addr = iface.ifa_addr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
+                $0.pointee.sin_addr
+            }
+
+            var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+            inet_ntop(AF_INET, &addr, &buffer, socklen_t(INET_ADDRSTRLEN))
+            return String(cString: buffer)
+        }
+
+        return nil
+    }
+}
+
+// MARK: - QR Gate (no extra libs; scanning via iOS Camera opens the universal link)
+
+private struct MiniQRScanGateView: View {
+    let onPasteLink: (String) -> Void
+    @State private var pasted: String = ""
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            VStack(spacing: 14) {
+                Text("Scan Minis QR")
+                    .font(.system(size: 28, weight: .bold))
+                    .foregroundColor(.white)
+
+                Text("No miniAppId is set on this device.\nScan a QR like: minis.studio/12\n(Using the iOS Camera is enough.)")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.75))
+                    .multilineTextAlignment(.center)
+
+                VStack(spacing: 10) {
+                    TextField("Paste link (debug)", text: $pasted)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled(true)
+                        .keyboardType(.URL)
+                        .padding(12)
+                        .background(Color.white.opacity(0.10))
+                        .cornerRadius(12)
+                        .foregroundColor(.white)
+
+                    Button {
+                        let s = pasted.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !s.isEmpty else { return }
+                        onPasteLink(s)
+                    } label: {
+                        Text("Apply Link")
+                            .font(.system(size: 16, weight: .bold))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                            .background(Color.white.opacity(0.16))
+                            .cornerRadius(14)
+                            .foregroundColor(.white)
+                    }
+                }
+                .padding(.top, 6)
+                .padding(.horizontal, 22)
+            }
+            .padding(.horizontal, 22)
+        }
+    }
+}
+
+// MARK: - PrincipalId (Keychain)
+
+enum PrincipalIdStore {
+    private static let account = "minis.principalId.v1"
+
+    static func getOrCreate() -> String {
+        if let existing = load(), !existing.isEmpty { return existing }
+        let created = "device:" + UUID().uuidString.uppercased()
+        save(created)
+        return created
+    }
+
+    private static func load() -> String? {
+        let q: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(q as CFDictionary, &item)
+        guard status == errSecSuccess,
+              let data = item as? Data,
+              let s = String(data: data, encoding: .utf8)
+        else { return nil }
+        return s
+    }
+
+    private static func save(_ value: String) {
+        let data = Data(value.utf8)
+
+        let del: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: account
+        ]
+        SecItemDelete(del as CFDictionary)
+
+        let add: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: account,
+            kSecValueData as String: data
+        ]
+        SecItemAdd(add as CFDictionary, nil)
+
+        UserDefaults.standard.set(value, forKey: "admin.principalId")
     }
 }
 

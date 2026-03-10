@@ -305,7 +305,11 @@ struct ZReportsSinceResponseDashboard: Decodable {
 struct ZReportDashboard: Codable, Identifiable {
     let id: Int
     let miniAppId: Int
+
+    /// We keep the property name `businessDay` to avoid refactoring the app,
+    /// but decode it from BusinessDate OR BusinessDay.
     let businessDay: String?
+
     let rangeFrom: String
     let rangeTo: String
 
@@ -333,25 +337,104 @@ struct ZReportDashboard: Codable, Identifiable {
     enum CodingKeys: String, CodingKey {
         case id = "Id"
         case miniAppId = "MiniAppId"
+
         case businessDay = "BusinessDay"
+        case businessDate = "BusinessDate"
+
         case rangeFrom = "RangeFrom"
         case rangeTo = "RangeTo"
+
         case grossTotal = "GrossTotal"
         case netTotal = "NetTotal"
         case vatTotal = "VatTotal"
         case vatRate = "VatRate"
+
         case cashCount = "CashCount"
         case cashTotal = "CashTotal"
         case cardCount = "CardCount"
         case cardTotal = "CardTotal"
         case paymentsTotal = "PaymentsTotal"
+
         case tipsTotal = "TipsTotal"
         case cashTipsTotal = "CashTipsTotal"
         case cardTipsTotal = "CardTipsTotal"
+
         case ordersCount = "OrdersCount"
         case missingPaymentCount = "MissingPaymentCount"
+
         case jsonData = "JsonData"
         case createdAt = "CreatedAt"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+
+        id = try c.decode(Int.self, forKey: .id)
+        miniAppId = try c.decode(Int.self, forKey: .miniAppId)
+
+        // ✅ prefer BusinessDate, fallback to BusinessDay
+        businessDay =
+            try c.decodeIfPresent(String.self, forKey: .businessDate)
+            ?? c.decodeIfPresent(String.self, forKey: .businessDay)
+
+        rangeFrom = try c.decode(String.self, forKey: .rangeFrom)
+        rangeTo = try c.decode(String.self, forKey: .rangeTo)
+
+        grossTotal = try c.decode(Double.self, forKey: .grossTotal)
+        netTotal = try c.decode(Double.self, forKey: .netTotal)
+        vatTotal = try c.decode(Double.self, forKey: .vatTotal)
+        vatRate = try c.decode(Double.self, forKey: .vatRate)
+
+        cashCount = try c.decode(Int.self, forKey: .cashCount)
+        cashTotal = try c.decode(Double.self, forKey: .cashTotal)
+        cardCount = try c.decode(Int.self, forKey: .cardCount)
+        cardTotal = try c.decode(Double.self, forKey: .cardTotal)
+        paymentsTotal = try c.decode(Double.self, forKey: .paymentsTotal)
+
+        tipsTotal = try c.decode(Double.self, forKey: .tipsTotal)
+        cashTipsTotal = try c.decode(Double.self, forKey: .cashTipsTotal)
+        cardTipsTotal = try c.decode(Double.self, forKey: .cardTipsTotal)
+
+        ordersCount = try c.decode(Int.self, forKey: .ordersCount)
+        missingPaymentCount = try c.decode(Int.self, forKey: .missingPaymentCount)
+
+        jsonData = try c.decodeIfPresent(String.self, forKey: .jsonData)
+        createdAt = try c.decodeIfPresent(String.self, forKey: .createdAt)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+
+        try c.encode(id, forKey: .id)
+        try c.encode(miniAppId, forKey: .miniAppId)
+
+        // ✅ Write BOTH for compatibility (server might return either)
+        try c.encodeIfPresent(businessDay, forKey: .businessDay)
+        try c.encodeIfPresent(businessDay, forKey: .businessDate)
+
+        try c.encode(rangeFrom, forKey: .rangeFrom)
+        try c.encode(rangeTo, forKey: .rangeTo)
+
+        try c.encode(grossTotal, forKey: .grossTotal)
+        try c.encode(netTotal, forKey: .netTotal)
+        try c.encode(vatTotal, forKey: .vatTotal)
+        try c.encode(vatRate, forKey: .vatRate)
+
+        try c.encode(cashCount, forKey: .cashCount)
+        try c.encode(cashTotal, forKey: .cashTotal)
+        try c.encode(cardCount, forKey: .cardCount)
+        try c.encode(cardTotal, forKey: .cardTotal)
+        try c.encode(paymentsTotal, forKey: .paymentsTotal)
+
+        try c.encode(tipsTotal, forKey: .tipsTotal)
+        try c.encode(cashTipsTotal, forKey: .cashTipsTotal)
+        try c.encode(cardTipsTotal, forKey: .cardTipsTotal)
+
+        try c.encode(ordersCount, forKey: .ordersCount)
+        try c.encode(missingPaymentCount, forKey: .missingPaymentCount)
+
+        try c.encodeIfPresent(jsonData, forKey: .jsonData)
+        try c.encodeIfPresent(createdAt, forKey: .createdAt)
     }
 }
 

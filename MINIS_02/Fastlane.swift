@@ -17,6 +17,10 @@ enum ExperienceMode: String, CaseIterable, Codable {
     case waiter
 }
 
+enum LangKeys {
+    static let lang = "app.lang"      // "he" | "ar" | "en"
+}
+
 enum ExperienceModeKeys {
     static let mode = "experience.mode.v1"   // "casual" | "fineDining" | "waiter"
 }
@@ -104,7 +108,7 @@ private struct HeaderHeroPromoView: View {
                         Button {
                             onOpenProduct(item)
                         } label: {
-                            Text(item.name)
+                            Text(item.displayName)
                                 .font(.menuRegular(14).weight(.semibold))
                                 .foregroundColor(.primary)
                                 .lineLimit(1)
@@ -568,7 +572,24 @@ struct menuView: View {
     @State private var scrollToTopToken: Int = 0
     @StateObject private var scrollVM = MenuScrollCoordinator()
     
-   
+    // MARK: - Idle suppression around Welcome
+    @State private var idleBlockUntil: Date = .distantPast
+
+    private func resetIdleBaseline(blockSeconds: TimeInterval = 0) {
+        markGlobalInteraction()
+
+        // hard reset any idle UI
+        showIdleOverlay = false
+        idleOverlayCountdown = idleCountdownStart
+        showIdleSheet = false
+        idleCountdown = idleCountdownStart
+
+        if blockSeconds > 0 {
+            idleBlockUntil = Date().addingTimeInterval(blockSeconds)
+        } else {
+            idleBlockUntil = .distantPast
+        }
+    }
     @State private var showIdleSheet: Bool = false
     @State private var idleCountdown: Int = 8
     // MARK: - Idle overlay (iPad only)
@@ -580,10 +601,10 @@ struct menuView: View {
     // ✅ put these near the top of menuView
     @AppStorage(ExperienceModeKeys.mode) private var experienceModeRaw: String = ExperienceMode.casual.rawValue
     private var experienceMode: ExperienceMode { ExperienceMode(rawValue: experienceModeRaw) ?? .casual }
-    private var isWaiterMode: Bool { experienceMode == .casual }
+    private var isWaiterMode: Bool { experienceMode == .waiter }
     @State private var headerPromos: [HeaderPromo] = []
     
- 
+   
     private var itemsById: [Int: ShellMenuItem] {
         Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
     }
@@ -657,6 +678,7 @@ struct menuView: View {
             }
             .contentShape(Rectangle())
             .onTapGesture { onTap() }
+            
         }
     }
 
@@ -1139,6 +1161,7 @@ struct menuView: View {
     }
 
     private var shouldShowNight: Bool {
+        return false
         (api.isOpen == false) || (ILHours.isOpenNowIL() == false)
     }
     private func presentNightIfPossible() {
@@ -1807,6 +1830,7 @@ struct menuView: View {
                                             }
                                             .padding(.horizontal, 16)
                                             .padding(.bottom, 18)
+                                           // .environment(\.locale, Locale(identifier: "en_GB"))
                                         }
                                         .padding(.top, -stickyHeaderHeight + 50)
                                     }
@@ -1970,7 +1994,7 @@ if miniAppId == 12  || miniAppId == 13 {
                                             Text(
                                                 miniAppId == 13
                                                 ? "vitamin"
-                                                : (isRtl ? "תפריט בוקר" : "Beigel Bake · Brick Ln")
+                                                : (isRtl ? "" : "Beigel Bake · Brick Ln")
                                             )
                                             .padding(.top, 15)
                                             .font(
@@ -1990,7 +2014,7 @@ if miniAppId == 12  || miniAppId == 13 {
                                                 miniAppId == 13
                                                 ? "בריא · מהיר · טבעי"
                                                 : (isRtl
-                                                    ? "הזמינו מהטלפון ונעדכן כשמוכן"
+                                                    ? ""
                                                     : "Delivered in around 20 minutes")
                                             )
                                             .font(.menuRegular(isRtl ? 15 : 18))
@@ -2212,7 +2236,7 @@ if miniAppId == 12  || miniAppId == 13 {
                 }
                 .hidden()
                 .navigationTitle("")
-                .navigationBarHidden(true)
+              //  .navigationBarHidden(true)
                 
                 if isPad && showIdleOverlay {
                     IdleOverlayView(miniAppId: miniAppId, countdown: idleOverlayCountdown) {
@@ -2223,6 +2247,26 @@ if miniAppId == 12  || miniAppId == 13 {
                     .zIndex(9998)
                     .transition(.opacity)
                 }
+            }
+        }
+        .overlay(alignment: .topLeading) {
+            // ✅ iPad back button (only when NOT in self-service/cashpoint mode)
+            if isPad && 1==2 {
+                Button {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    dismiss()
+                } label: {
+                    Image(systemName: isRtl ? "chevron.right" : "chevron.left")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundColor(.primary.opacity(0.92))
+                        .frame(width: 44, height: 44)
+                        .background(.ultraThinMaterial)
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .padding(.leading, 14)
+                .padding(.top, 10)
+                .zIndex(9999)
             }
         }
         .trackGlobalInteraction()
@@ -2285,6 +2329,7 @@ if miniAppId == 12  || miniAppId == 13 {
         .onChange(of: anyOtherModalPresented) { _ in
             if pendingNight { presentNightIfPossible() }
         }
+        .onChange(of: showWelcome) { v in print("🟣 showWelcome ->", v, "at", Date()) }
         .onChange(of: api.items.count) { count in
             guard count > 0 else { return }
             guard !showNightScreen else { return }   // ✅ ADD THIS
@@ -2384,7 +2429,7 @@ if miniAppId == 12  || miniAppId == 13 {
             serviceRequests = ServiceRequests.load()
         }
         .onAppear {
-            
+            showWelcome = true
             let tid = activeTableId
             if isWaiterMode, tid > 0 {
                 // If no events yet, seed a real "opened" event from existing covers
@@ -2509,6 +2554,12 @@ if miniAppId == 12  || miniAppId == 13 {
             guard isPad else { return }
             guard !cashPointMode else { return }
 
+            // ✅ never show idle while Welcome is up
+            guard !showWelcome else { return }
+
+            // ✅ grace period after Welcome dismiss (or other resets)
+            guard Date() >= idleBlockUntil else { return }
+
             let idleFor = Date().timeIntervalSince(lastGlobalInteractionDate())
 
             if !showIdleOverlay {
@@ -2525,13 +2576,17 @@ if miniAppId == 12  || miniAppId == 13 {
                 showIdleOverlay = false
                 idleOverlayCountdown = idleCountdownStart
                 startNewOrderFromIdle()
-                markGlobalInteraction() // reset baseline after reset
+                resetIdleBaseline(blockSeconds: 2) // ✅ avoid immediate re-trigger after reset
             }
         }
         .onChange(of: showWelcome) { isShown in
-           
-            markGlobalInteraction()
-            
+            if isShown {
+                // welcome is coming up -> don't allow idle to appear behind it
+                resetIdleBaseline(blockSeconds: 0)
+            } else {
+                // welcome dismissed -> treat as interaction + grace window
+                resetIdleBaseline(blockSeconds: 2.5)
+            }
         }
         .onChange(of: showBasketSheet, perform: { open in
             if open {
@@ -2806,15 +2861,15 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
                 Group {
                     if isPad {
                         HStack(spacing: 0) {
-                            // 👈 reserve the rail space so the bar starts under the grid
-                            Color.clear.frame(width: 200)
-
+                            // Reserve the rail width on the left
+                           
                             BasketBar(
                                 totalQuantity: basketTotalQuantity,
                                 totalPrice: basketTotalPrice,
                                 onTap: {
                                     guard !showNightScreen else { return }
-                                    showBasketSheet = true },
+                                    showBasketSheet = true
+                                },
                                 isPad: isPad,
                                 onNewOrder: {
                                     basket.removeAll()
@@ -2824,14 +2879,22 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
                                     showWelcome = true
                                 }
                             )
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            Color.clear
+                                .frame(width: 200)
+
+                            Spacer(minLength: 0)
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .environment(\.layoutDirection, .leftToRight)
                     } else {
                         BasketBar(
                             totalQuantity: basketTotalQuantity,
                             totalPrice: basketTotalPrice,
                             onTap: {
                                 guard !showNightScreen else { return }
-                                showBasketSheet = true },
+                                showBasketSheet = true
+                            },
                             isPad: isPad,
                             onNewOrder: {
                                 basket.removeAll()
@@ -2950,6 +3013,8 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
             KioskWelcomeView()
                 .environment(\.isRtl, isRtl)
                 .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
+                .onAppear { resetIdleBaseline(blockSeconds: 0) }
+                .onDisappear { resetIdleBaseline(blockSeconds: 2.5) }
         }
         // ✅ iPhone: normal sheet
         .sheet(isPresented: Binding(
@@ -3500,7 +3565,7 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
 
                         // Title + price + desc
                         VStack(alignment: .leading, spacing: 8) {
-                            Text(item.name)
+                            Text(item.displayName)
                                 .font(.menuRegular(20).weight(.semibold))
 
                             Text(isRtl ? String(format: "%.0f", item.price)
@@ -3689,6 +3754,7 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
         @Environment(\.dismiss) private var dismiss
 
         init(isRtl: Bool, @ViewBuilder content: () -> Content) {
+          //  self.isRtl = isRtl
             self.isRtl = isRtl
             self.content = content()
         }
@@ -4165,7 +4231,7 @@ struct ProductCard: View {
                             .clipShape(RoundedRectangle(cornerRadius: 18))
                     }
 
-                    Text(item.name)
+                    Text(item.displayName)
                         .font(.menuRegular(17).weight(.semibold))
                         .lineLimit(2)
                         .padding(.leading, 5)
@@ -4704,7 +4770,7 @@ struct ProductSheet: View {
 
                     // CONTENT
                     VStack(alignment: .leading, spacing: 8) {
-                        Text(item.name)
+                        Text(item.displayName)
                             .font(.menuRegular(20).weight(.semibold))
                             .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -5389,6 +5455,7 @@ struct BasketSheet: View {
                 }
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
+                    
                     ToolbarItem(placement: .principal) {
                         Text(isRtl ? "ההזמנה שלך" : "Your order")
                             .font(.menuRegular(24).weight(.semibold))
@@ -6937,8 +7004,14 @@ struct OrderConfirmationView: View {
                         .padding(.top, 4)
                     Text(
                         isRtl
-                        ? "נשלח הודעה כשמוכן"
+                        ? "איסוף שתייה ומוצרי ויטרינה - קריאה לפי שם"
                         : "The driver will notify you when they arrive"
+                    )
+                    
+                    Text(
+                        isRtl
+                        ? "איסוף מנות מטבח - תקבלו הודעה כשמוכן"
+                        : ""
                     )
                         .font(.menuRegular(17).weight(.regular))
                         .foregroundColor(.secondary)
@@ -7288,12 +7361,10 @@ struct KioskWelcomeView: View {
     @AppStorage(CheckoutKeys.didShowWelcome) private var didShowWelcome: Bool = false
 
     // ✅ Language + global RTL (single source of truth is app.isRtl)
-    @AppStorage("app.langOverride") private var langOverride: String = "he"
+    @AppStorage(LangKeys.lang) private var lang: String = "he"   // "he" | "ar" | "en"
     @AppStorage("app.isRtl") private var appIsRtl: Bool = true
-
-    // ✅ Optional legacy sync (if you still use "direction" elsewhere)
     @AppStorage("direction") private var direction: String = "rtl"
-
+    
     @State private var page = 0
     @State private var timer: Timer?
 
@@ -7317,23 +7388,28 @@ struct KioskWelcomeView: View {
 
     private var sidePadding: CGFloat { isPhone ? 18 : 20 }
     private var bottomSpacer: CGFloat { isPhone ? 26 : 40 }
-
+   
     // ✅ Push the dine-in / takeaway buttons down a bit
     private var buttonsTopPad: CGFloat { isPhone ? 22 : 30 }
 
     // ✅ Effective language
     private var effectiveLang: String {
-        if langOverride == "en" || langOverride == "he" { return langOverride }
-        let code = Locale.preferredLanguages.first?.prefix(2).lowercased() ?? "en"
-        return (code == "he") ? "he" : "en"
+        // allow only supported values
+        if lang == "he" || lang == "ar" || lang == "en" { return lang }
+        return "he"
     }
 
-    // ✅ The ONLY RTL decision inside this view (drives the whole app)
-    private var effectiveIsRtl: Bool { effectiveLang == "he" }
+    private var effectiveIsRtl: Bool {
+        // Hebrew + Arabic are RTL
+        effectiveLang == "he" || effectiveLang == "ar"
+    }
 
-    // ✅ Locale for this view (root can also set it; doing it here makes welcome perfect)
     private var effectiveLocale: Locale {
-        Locale(identifier: effectiveIsRtl ? "he_IL" : "en_GB")
+        switch effectiveLang {
+        case "ar": return Locale(identifier: "ar")
+        case "en": return Locale(identifier: "en_GB")
+        default:   return Locale(identifier: "he_IL")
+        }
     }
 
     // ✅ Labels
@@ -7407,17 +7483,15 @@ struct KioskWelcomeView: View {
         .safeAreaInset(edge: .top) {
             HStack {
                 Spacer()
-               // languagePill
+                languagePill
             }
             .padding(.horizontal, 16)
             .padding(.top, 10)
             .padding(.bottom, 6)
-            .background(Color.clear)
-            .zIndex(999)
         }
 
-        .toolbar(.hidden, for: .navigationBar)
-        .navigationBarHidden(true)
+       // .toolbar(.hidden, for: .navigationBar)
+        //.navigationBarHidden(true)
 
         // ✅ Timer
         .onAppear {
@@ -7437,7 +7511,7 @@ struct KioskWelcomeView: View {
         }
 
         // ✅ When language changes -> flip RTL for the WHOLE APP instantly
-        .onChange(of: langOverride) { _ in
+        .onChange(of: lang) { _ in
             syncGlobalLanguageState()
         }
 
@@ -7450,15 +7524,8 @@ struct KioskWelcomeView: View {
 
     private func syncGlobalLanguageState() {
         let rtl = effectiveIsRtl
-
-        // ✅ The key you inject from MINIS_02App root
         appIsRtl = rtl
-
-        // ✅ Optional legacy sync
         direction = rtl ? "rtl" : "ltr"
-
-        // If you also want to ensure any environment(\.isRtl) reads instantly in the stack:
-        // (Root will re-inject anyway, but syncing doesn't hurt)
         UserDefaults.standard.set(rtl, forKey: "app.isRtl")
         UserDefaults.standard.set(direction, forKey: "direction")
     }
@@ -7486,6 +7553,8 @@ struct KioskWelcomeView: View {
         HStack(spacing: 6) {
             langButton(title: "EN", value: "en")
             Divider().frame(height: 16).opacity(0.25)
+            langButton(title: "ع", value: "ar")
+            Divider().frame(height: 16).opacity(0.25)
             langButton(title: "עב", value: "he")
         }
         .padding(.horizontal, 10)
@@ -7499,23 +7568,19 @@ struct KioskWelcomeView: View {
 
         return Button {
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            langOverride = value   // ✅ triggers onChange -> syncGlobalLanguageState()
+            lang = value
         } label: {
             Text(title)
                 .font(.menuRegular(15).weight(.bold))
                 .foregroundColor(selected ? .white : .white.opacity(0.85))
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
-                .background(
-                    selected
-                    ? (Color(hex: "#324E57") ?? .black).opacity(0.85)
-                    : Color.clear
-                )
+                .background(selected ? Color.black.opacity(0.35) : .clear)
                 .clipShape(Capsule())
         }
         .buttonStyle(.plain)
     }
-
+    
     private func kioskButton(title: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title)

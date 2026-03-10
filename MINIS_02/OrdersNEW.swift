@@ -656,6 +656,35 @@ struct AdminOrdersView: View {
             })
         }
         
+        private func cancelAllNow() {
+            Haptics.light()
+
+            // ✅ 1) Instant local UI: mark ALL rows cancelled
+            cancelledRowIndexes = Set(order.items.indices)
+
+            // ✅ 2) Close the sheet immediately (your requirement: don't wait)
+            onResolved()
+
+            // ✅ 3) Fire API call (don’t block UI)
+            OrdersResolveAPI.cancelAllLines(
+                miniAppId: miniAppId,
+                orderId: order.id,
+                isCancelled: true
+            ) { result in
+                switch result {
+                case .success(let allCancelled):
+                    print("✅ cancelAllLines done allCancelled=\(allCancelled)")
+                case .failure(let err):
+                    print("❌ cancelAllLines failed:", err)
+                }
+            }
+        }
+        
+        @State private var showLogs = false
+        private var logOrderNumber: Int {
+            Int(order.orderId) ?? order.id   // ✅ ticketNumber preferred, fallback to DB id
+        }
+        
         private func norm(_ s: String) -> String {
             s.trimmingCharacters(in: .whitespacesAndNewlines)
              .replacingOccurrences(of: "\u{200F}", with: "") // RTL mark
@@ -829,6 +858,21 @@ struct AdminOrdersView: View {
         // MARK: - Top bar
         private var topBar: some View {
             HStack {
+                Button {
+                    cancelAllNow()
+                } label: {
+                    Text("בטל הכל")
+                        .font(.system(size: 14, weight: .bold))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color.red.opacity(0.15))
+                        .foregroundColor(.red)
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+
+                Spacer()
+
                 Text("פרטי הזמנה")
                     .font(.system(size: 17, weight: .bold))
                     .frame(maxWidth: .infinity, alignment: .center)
@@ -909,63 +953,83 @@ struct AdminOrdersView: View {
 
         private func toggleCancelIndex(_ idx: Int) {
             guard order.items.indices.contains(idx) else { return }
-            let line = order.items[idx]
+
+            Haptics.light()
+
             let newValue = !cancelledRowIndexes.contains(idx)
 
-            // optimistic UI
+            // ✅ 1) ALWAYS local toggle (never revert)
             if newValue { cancelledRowIndexes.insert(idx) }
             else { cancelledRowIndexes.remove(idx) }
+
+            // ✅ 2) If now ALL rows are locally cancelled -> resolve immediately + bulk cancel server
+            if cancelledRowIndexes.count == order.items.count {
+                // close UI immediately (no waiting)
+                onResolved()
+
+                // fire server bulk cancel (lineId=0)
+                OrdersResolveAPI.cancelAllLines(
+                    miniAppId: miniAppId,
+                    orderId: order.id,
+                    isCancelled: true
+                ) { result in
+                    switch result {
+                    case .success(let allCancelled):
+                        print("✅ bulk cancelAllLines allCancelled=\(allCancelled)")
+                    case .failure(let err):
+                        print("❌ bulk cancelAllLines failed:", err)
+                    }
+                }
+
+                return
+            }
+
+            // ✅ 3) Best-effort server cancel for THIS line (ignore failures)
+            let uiLine = order.items[idx]
 
             TeamTabsAPI.fetchOrderMetadata(orderId: order.id) { res in
                 switch res {
                 case .success(let meta):
                     let basket = meta.basket ?? []
-
-                    // ✅ build a quick set of valid meta lineIds
                     let basketLineIds = Set(basket.map(\.lineId))
 
-                    // ✅ pick the correct basket lineId (ignore bogus UI basketLineId like 1)
+                    // find real meta lineId
                     let match = basket.first(where: { b in
-                        if let bid = line.basketLineId, bid > 0, basketLineIds.contains(bid) {
-                            return b.lineId == bid
-                        }
-                        if let pid = line.productId, pid > 0, b.productId == pid { return true }
-                        return norm(b.name) == norm(line.name)
+                        if let bid = uiLine.basketLineId, bid > 0, basketLineIds.contains(bid) { return b.lineId == bid }
+                        if let pid = uiLine.productId, pid > 0, b.productId == pid { return true }
+                        return norm(b.name) == norm(uiLine.name)
                     })
 
-                    // ✅ optional debug if UI basketLineId is wrong
-                    if let bid = line.basketLineId, bid > 0, !basketLineIds.contains(bid) {
-                        print("⚠️ ignoring UI basketLineId=\(bid) (meta lineIds=\(basket.map(\.lineId))) for item '\(norm(line.name))'")
-                    }
-
                     guard let match else {
-                        print("❌ could not match item. Will NOT call cancel.")
-                        debugMetaBasket(basket, uiLine: line, idx: idx)
-
-                        let wantedBid = line.basketLineId ?? -1
-                        let wantedPid = line.productId ?? -1
-                        print("🧪 match attempt: basketLineId=\(wantedBid) productId=\(wantedPid) name='\(norm(line.name))'")
-
-                        DispatchQueue.main.async {
-                            if newValue { cancelledRowIndexes.remove(idx) }
-                            else { cancelledRowIndexes.insert(idx) }
-                        }
+                        // ✅ comments / non-product rows -> no lineId -> keep local cancel only
+                        print("⚠️ no meta lineId match for '\(norm(uiLine.name))' (keeping local cancel)")
                         return
                     }
 
-                    print("✅ matched meta lineId=\(match.lineId) pid=\(match.productId ?? -1) name='\(norm(match.name))'")
-                    self.sendCancelLineId(match.lineId, idx: idx, line: line, newValue: newValue)
+                    OrdersResolveAPI.setLineCancelled(
+                        miniAppId: miniAppId,
+                        orderId: order.id,
+                        lineId: match.lineId,
+                        isCancelled: newValue
+                    ) { r in
+                        switch r {
+                        case .success(let allCancelled):
+                            // ✅ You can still close if server says all cancelled, but DON'T require it
+                            if allCancelled {
+                                DispatchQueue.main.async { onResolved() }
+                            }
+                        case .failure(let err):
+                            // ✅ ignore failure (local cancel stays)
+                            print("❌ server cancel failed lineId=\(match.lineId) (keeping local):", err)
+                        }
+                    }
 
                 case .failure(let err):
-                    print("❌ fetchOrderMetadata failed:", err.localizedDescription)
-                    DispatchQueue.main.async {
-                        if newValue { cancelledRowIndexes.remove(idx) }
-                        else { cancelledRowIndexes.insert(idx) }
-                    }
+                    // ✅ ignore failure (local cancel stays)
+                    print("❌ fetchOrderMetadata failed (keeping local):", err.localizedDescription)
                 }
             }
         }
-
         private func sendCancelLineId(_ lineId: Int, idx: Int, line: AdminOrderLineItem, newValue: Bool) {
             OrdersResolveAPI.setLineCancelled(
                 miniAppId: miniAppId,
@@ -979,65 +1043,8 @@ struct AdminOrdersView: View {
                         DispatchQueue.main.async { onResolved() }
                     }
                 case .failure(let err):
-                    let ns = err as NSError
-                    let body = ns.userInfo["body"] as? String ?? ""
-                    if ns.code == 404 && body.contains("lineId not found in basket") {
-                        print("♻️ server rejected lineId=\(lineId). Retrying via metadata…")
-
-                        TeamTabsAPI.fetchOrderMetadata(orderId: order.id) { res in
-                            switch res {
-                            case .success(let meta):
-                                let basket = meta.basket ?? []
-                                print("🧾 meta basket lineIds:", basket.map(\.lineId))
-
-                                let match = basket.first(where: { b in
-                                    if let pid = line.productId, pid > 0, b.productId == pid { return true }
-                                    return b.name == line.name
-                                })
-
-                                guard let match else {
-                                    print("❌ retry: could not match item '\(line.name)' pid=\(line.productId ?? -1)")
-                                    DispatchQueue.main.async {
-                                        if newValue { cancelledRowIndexes.remove(idx) }
-                                        else { cancelledRowIndexes.insert(idx) }
-                                    }
-                                    return
-                                }
-
-                                OrdersResolveAPI.setLineCancelled(
-                                    miniAppId: miniAppId,
-                                    orderId: order.id,
-                                    lineId: match.lineId,
-                                    isCancelled: newValue
-                                ) { r2 in
-                                    switch r2 {
-                                    case .success(let allCancelled):
-                                        if allCancelled { DispatchQueue.main.async { onResolved() } }
-                                    case .failure(let e2):
-                                        print("❌ retry cancel failed:", e2)
-                                        DispatchQueue.main.async {
-                                            if newValue { cancelledRowIndexes.remove(idx) }
-                                            else { cancelledRowIndexes.insert(idx) }
-                                        }
-                                    }
-                                }
-
-                            case .failure(let e):
-                                print("❌ retry fetch metadata failed:", e.localizedDescription)
-                                DispatchQueue.main.async {
-                                    if newValue { cancelledRowIndexes.remove(idx) }
-                                    else { cancelledRowIndexes.insert(idx) }
-                                }
-                            }
-                        }
-                        return
-                    }
-
-                    print("❌ cancel line failed:", err)
-                    DispatchQueue.main.async {
-                        if newValue { cancelledRowIndexes.remove(idx) }
-                        else { cancelledRowIndexes.insert(idx) }
-                    }
+                    // ✅ DO NOT revert local UI
+                    print("❌ cancel line failed (keeping local):", err)
                 }
             }
         }
@@ -1083,6 +1090,7 @@ struct AdminOrdersView: View {
                     }
 
                     HStack(spacing: 12) {
+
                         Button(action: onPrintBon) {
                             Text("בונבון")
                                 .font(.system(size: 16, weight: .bold))
@@ -1092,6 +1100,20 @@ struct AdminOrdersView: View {
                                 .background(Color.white)
                                 .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                         }
+
+                        Button {
+                            showLogs = true
+                            Haptics.light()
+                        } label: {
+                            Text("דווח על תקלה")
+                                .font(.system(size: 16, weight: .bold))
+                                .foregroundColor(.black)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 50)
+                                .background(Color.white)
+                                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
 
                         Button(action: onPrintInvoice) {
                             Text("חשבונית")
@@ -1108,8 +1130,16 @@ struct AdminOrdersView: View {
             .padding(.horizontal, 16)
             .padding(.top, 10)
             .padding(.bottom, 10)
+            .sheet(isPresented: $showLogs) {
+                PrintLogsViewerSheet(
+                    initialOrderId: logOrderNumber,
+                    titleOverride: "לוגים להזמנה #\(logOrderNumber)"
+                )
+                .environment(\.layoutDirection, .rightToLeft)
+            }
             
         }
+           
         
     }
     // MARK: - UI building blocks
@@ -1317,7 +1347,7 @@ struct AdminOrdersView: View {
 
         Task {
             let ok = await PrinterManager.shared.printCashPointSplit(
-                orderNumber: ticketNumber,
+                orderNumber: ticketNumber * 100 + Int.random(in: 1...99),   // ✅ manual dedupe-bust
                 entries: entries,
                 total: order.total,
                 diningMode: mode,
@@ -1727,6 +1757,59 @@ enum ZPrecheckAPI {
         return try JSONDecoder().decode(Resp.self, from: data)
     }
 }
+
+extension OrdersResolveAPI {
+
+    static func cancelAllLines(
+        miniAppId: Int,
+        orderId: Int,
+        isCancelled: Bool,
+        completion: @escaping (Result<Bool, Error>) -> Void
+    ) {
+        // ✅ convention: lineId=0 means "ALL LINES"
+        guard let url = URL(string: "https://minis.studio/api/orders/\(orderId)/lines/0/cancel") else {
+            completion(.failure(NSError(domain: "OrdersResolveAPI", code: -1)))
+            return
+        }
+
+        let payload: [String: Any] = [
+            "miniAppId": miniAppId,
+            "isCancelled": isCancelled
+        ]
+
+        let bodyData = (try? JSONSerialization.data(withJSONObject: payload, options: [])) ?? Data()
+
+        var req = URLRequest(url: url, timeoutInterval: 20)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.httpBody = bodyData
+
+        URLSession.shared.dataTask(with: req) { data, resp, err in
+            if let err = err { completion(.failure(err)); return }
+
+            guard let http = resp as? HTTPURLResponse else {
+                completion(.failure(NSError(domain: "OrdersResolveAPI", code: -2)))
+                return
+            }
+
+            let raw = data ?? Data()
+            let text = String(data: raw, encoding: .utf8) ?? "<non-utf8 \(raw.count) bytes>"
+
+            guard (200...299).contains(http.statusCode) else {
+                completion(.failure(NSError(domain: "OrdersResolveAPI", code: http.statusCode, userInfo: ["body": text])))
+                return
+            }
+
+            do {
+                let decoded = try JSONDecoder().decode(CancelResp.self, from: raw)
+                completion(.success(decoded.allCancelled ?? false))
+            } catch {
+                completion(.failure(error))
+            }
+        }.resume()
+    }
+}
 enum OrdersResolveAPI {
     struct CancelResp: Decodable {
         let ok: Bool?
@@ -1921,18 +2004,19 @@ struct EODWizardView: View {
                 miniAppId: miniAppId,
                 businessDate: $businessDate
             ) {
-                EODStepTipsView(
+                EODStepOpenOrdersView(
                     miniAppId: miniAppId,
-                    dismissWizard: { dismiss() },
-                    businessDate: businessDate
+                    businessDate: businessDate,
+                    onContinueOrder: onContinueOrder,
+                    dismissWizard: { dismiss() }
                 )
             }
             .navigationBarTitleDisplayMode(.inline)
-            .wizardBackDismiss { dismiss() }
+            .wizardBackDismiss { dismiss() }   // ✅ dismiss the whole wizard from step 0
         }
-        .navigationBarBackButtonHidden(true)
         .environment(\.layoutDirection, .rightToLeft)
         .environment(\.locale, Locale(identifier: "he_IL"))
+        
     }
 }
 
@@ -1988,7 +2072,7 @@ private struct EODStepOpenOrdersView: View {
             AdminOrdersView(
                 mode: .endOfDay,
                 eodFilter: .openOrdersOnly,
-                showsNavBackButton: false,
+                  showsNavBackButton: false,
                 onSelectUnpaid: { order in
                     onContinueOrder(order)
                     dismissWizard()
@@ -1997,6 +2081,7 @@ private struct EODStepOpenOrdersView: View {
                 onAllResolved: { remainingOpenOrders = 0 }
             )
             .environment(\.layoutDirection, .rightToLeft)
+            
 
             NavigationLink {
                 EODStepTipsView(
@@ -2143,8 +2228,11 @@ private struct EODStepTipsView: View {
     private var canProceedFromTips: Bool {
         guard cashSystemInclTip != nil else { return false }
         guard hasEnteredCountedCash else { return false }
-        // ✅ Always require balance (gap==0 OR updates match).
-        // We'll auto-fill updates when gap is negative, so this will still pass.
+
+        // ✅ If counted is LOWER than system, allow continuing even if not "balanced"
+        if gap < -0.01 { return true }
+
+        // Otherwise keep strict logic (gap zero or updates match)
         return gapIsZero || updateMatchesGap
     }
 
@@ -2252,18 +2340,6 @@ private struct EODStepTipsView: View {
                                             showAfterCounted = shouldShow
                                         }
                                     }
-
-                                    // ✅ SIMPLE: if counted < system, always force cash update to match the gap
-                                    // (fixes "stuck" old values like -3144)
-                                    if gap < -0.01 {
-                                        cashAdjText = String(format: "%.0f", r0(gap))   // e.g. "-59"
-                                        tipsAdjText = "0"
-                                    } else if abs(gap) < 0.01 {
-                                        // optional but nice: when perfectly balanced, clear updates
-                                        cashAdjText = "0"
-                                        tipsAdjText = "0"
-                                    }
-                                    // if gap > 0 (extra cash), we leave adjustments as-is so user can allocate if needed
                                 }
                         }
 
@@ -2373,12 +2449,24 @@ private struct EODStepTipsView: View {
 
         do {
             let x = try await XReportAPI.fetch(miniAppId: miniAppId)
-            cashSystemInclTip = (x.agg.cashTotal) + (x.agg.tipsTotal)
+            cashSystemInclTip = x.agg.cashTotal + x.agg.cashTipsTotal
         } catch {
             let ns = error as NSError
-            let body = ns.userInfo["body"] as? String ?? ""
-            tipsError = body.isEmpty ? "שגיאה בטעינת X" : "שגיאה בטעינת X: \(body)"
+
+            // ✅ try all known places where the body/desc might be
+            let body =
+                (ns.userInfo["body"] as? String)
+                ?? (ns.userInfo[NSLocalizedDescriptionKey] as? String)
+                ?? ""
+
+            let msg = body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? error.localizedDescription
+                : body
+
+            tipsError = "שגיאה בטעינת X: \(msg)"
             cashSystemInclTip = nil
+
+            print("❌ X load failed:", msg)
         }
     }
 
@@ -2399,16 +2487,13 @@ private struct EODStepTipsView: View {
 
         didSubmitAdjustment = true
 
-     
+        // --- tiny cash hack (same as you had) ---
         let cashUpdateRaw = cashUpdate
         let tipsUpdateRaw = tipsUpdate
-
-        // ✅ Only apply tiny-cash hack when cash is basically zero (non-negative) AND tips positive
-        let needsTinyCashHack = (cashUpdateRaw >= 0 && cashUpdateRaw <= 0.01 && tipsUpdateRaw > 0.01)
+        let needsTinyCashHack = (cashUpdateRaw <= 0.01 && tipsUpdateRaw > 0.01)
         let cashUpdateForDb = needsTinyCashHack ? 0.2 : cashUpdateRaw
-
         let totalUpdateForDb = cashUpdateForDb + tipsUpdateRaw
-        
+
         // Build the single "עדכון" entry
         let item = ShellMenuItem(
             id: -900_001,
@@ -2439,7 +2524,7 @@ private struct EODStepTipsView: View {
             "discount": 0,
             "excluded": 0,
             "tip": tipsUpdateRaw,
-            "total": cashUpdateForDb,
+            "total": cashUpdateForDb,               // keep aligned with your existing server logic
             "grandTotal": totalUpdateForDb,
             "currency": "ILS",
             "eodTinyCashHack": needsTinyCashHack
@@ -2483,7 +2568,6 @@ private struct EODStepTipsView: View {
                     case .success(let oid):
                         print("✅ EOD update saved. orderId=\(oid) tinyHack=\(needsTinyCashHack)")
                         Haptics.success()
-                        Task { await reloadCashExpectedFromXReport() } 
                     case .failure(let err):
                         print("❌ EOD update submit failed:", err)
                         Haptics.error()
@@ -2846,7 +2930,7 @@ enum XReportAPI {
         // ✅ print curl
         print(#"🧾 XREPORT cURL:"#)
         print(#"curl -sS -i -X GET "\#(url.absoluteString)" -H "Accept: application/json""#)
-
+        print("📡 XREPORT url:", url.absoluteString)
         var req = URLRequest(url: url, timeoutInterval: 15)
         req.httpMethod = "GET"
         req.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -2871,8 +2955,7 @@ enum XReportAPI {
         do {
             return try JSONDecoder().decode(XReportApiResponse.self, from: raw)
         } catch {
-            print("❌ XREPORT decode failed:", error)
-            print("📦 XREPORT raw:\n\(body)")
+            print("❌ XREPORT network error:", error.localizedDescription)
             throw error
         }
     }
@@ -2899,5 +2982,3 @@ enum EODFilter {
     case teamTablesOnly
     case openOrdersOnly
 }
-
-

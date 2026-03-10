@@ -6,10 +6,8 @@ import NetworkExtension
 @main
 struct MiniApp: App {
 
-    @AppStorage("direction") private var direction: String = "ltr"
+    @AppStorage("direction") private var direction: String = "rtl"
     @State private var studentClaim: StudentClaim? = nil
-
-    // ✅ Gate UI until JSON customization applied
     @State private var didLoadMini = false
 
     private let wifiSSID = "Beit Ha Am"
@@ -20,13 +18,10 @@ struct MiniApp: App {
     private let kPendingUniversalLink = "pendingUniversalLink"
     private let kPendingStudentClaim  = "pendingStudentClaim.v1"
 
-    // ✅ canonical keys
     private let kMiniAppId = "miniAppId"
     private let kShopId    = "shopId"
     private let kDirection = "direction"
-    private let kDeliveryLoc = "delivery.loc"   // ✅ use one stable key everywhere
-
-    // ✅ launch attribution flag (consumed on launch)
+    private let kDeliveryLoc = "delivery.loc"
     private let kOpenedViaLink = "openedViaLink.v1"
 
     init() {
@@ -34,11 +29,8 @@ struct MiniApp: App {
         "pk_live_51H5URzFZIwZSNufssK4R7BjLhpqxHVcfmEZVH8Tg74MAHMA20RfkYhIfbwFjDWJ55KzHWkOhEcqVWhIO2VShjOcU00Tslmi1XT"
 
         let std = UserDefaults.standard
-        let miniId = std.integer(forKey: kMiniAppId)
-        let shopId = (std.string(forKey: kShopId) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-
-        _ = miniId
-        _ = shopId
+        _ = std.integer(forKey: kMiniAppId)
+        _ = (std.string(forKey: kShopId) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     var body: some Scene {
@@ -47,16 +39,14 @@ struct MiniApp: App {
                 if !didLoadMini {
                     LoadingSplashView()
                 } else {
-                    if direction == "rtl" {
-                        ForceRTL {
-                            NavigationStack {
+                    NavigationStack {
+                        if direction == "rtl" {
+                            ForceRTL {
                                 menuView()
                                     .environment(\.isRtl, true)
                                     .environment(\.layoutDirection, .rightToLeft)
                             }
-                        }
-                    } else {
-                        NavigationStack {
+                        } else {
                             menuView()
                                 .environment(\.isRtl, false)
                                 .environment(\.layoutDirection, .leftToRight)
@@ -66,18 +56,14 @@ struct MiniApp: App {
             }
             .onAppear {
                 joinBeitHaAmWiFiIfNeeded()
-
-                // ✅ If NOT opened via link → force miniAppId = 12
                 applyMiniFallbackIfNotOpenedViaLink()
-
                 loadPendingClaimFromAppGroupIfAny()
 
-                // ✅ Load customization for current mini and ONLY then show HomeView
                 didLoadMini = false
+                enforceDirectionPolicy()
+
                 parseMiniIfNeeded { _ in
-                    DispatchQueue.main.async {
-                        self.didLoadMini = true
-                    }
+                    DispatchQueue.main.async { self.didLoadMini = true }
                 }
 
                 if let s = suite()?.string(forKey: kPendingUniversalLink),
@@ -90,9 +76,7 @@ struct MiniApp: App {
                 }
             }
             .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
-                if let url = activity.webpageURL {
-                    processIncoming(url)
-                }
+                if let url = activity.webpageURL { processIncoming(url) }
             }
             .onOpenURL { url in
                 processIncoming(url)
@@ -114,7 +98,36 @@ struct MiniApp: App {
         UserDefaults(suiteName: appGroupId)
     }
 
-    // MARK: - ✅ Fallback: if not opened via link, force miniAppId = 12
+    private func setDirection(_ value: String) {
+        let v = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let final = (v == "rtl") ? "rtl" : "ltr"
+        let std = UserDefaults.standard
+        let grp = suite()
+        std.set(final, forKey: kDirection)
+        grp?.set(final, forKey: kDirection)
+        grp?.synchronize()
+        DispatchQueue.main.async { self.direction = final }
+    }
+
+    // ✅ Policy:
+    // - If opened via URL AND miniAppId == 3 -> force LTR
+    // - Otherwise -> force RTL
+    private func enforceDirectionPolicy() {
+        let std = UserDefaults.standard
+        let grp = suite()
+
+        let openedViaLink = std.bool(forKey: kOpenedViaLink) || (grp?.bool(forKey: kOpenedViaLink) ?? false)
+
+        let grpMini = grp?.integer(forKey: kMiniAppId) ?? 0
+        let stdMini = std.integer(forKey: kMiniAppId)
+        let miniId = (grpMini > 0) ? grpMini : stdMini
+
+        if openedViaLink && miniId == 3 {
+            setDirection("ltr")
+        } else {
+            setDirection("rtl")
+        }
+    }
 
     private func applyMiniFallbackIfNotOpenedViaLink() {
         let std = UserDefaults.standard
@@ -131,55 +144,24 @@ struct MiniApp: App {
             grp?.synchronize()
         }
 
-        // ✅ consume immediately so next cold launch without a link falls back again
         std.set(false, forKey: kOpenedViaLink)
         grp?.set(false, forKey: kOpenedViaLink)
         grp?.synchronize()
     }
 
-    // MARK: - URL parsing helpers
-
-    private func queryValue(_ name: String, in url: URL) -> String? {
-        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
-        return items.first(where: { $0.name.lowercased() == name.lowercased() })?.value
-    }
-
-    private func isStudentLink(_ url: URL) -> Bool {
-        let path = url.path.lowercased()
-        if path == "/student" || path == "/student/" { return true }
-
-        if let v = queryValue("student", in: url)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased() {
-            if v == "1" || v == "true" || v == "yes" { return true }
-        }
-
-        return false
-    }
-
-    private func makeStudentClaimForCurrentMini() -> StudentClaim? {
-        let mini = UserDefaults.standard.integer(forKey: kMiniAppId)
-        guard mini > 0 else { return nil }
-        return StudentClaim(
-            miniAppId: mini,
-            campaignId: "student",
-            discountPercent: 10,
-            durationMonths: 6
-        )
-    }
-
-    // MARK: - Incoming URL Router
-
     private func processIncoming(_ url: URL) {
-        // ✅ mark that we were opened via a link (so we DON'T force mini=12 on next launch)
         let std = UserDefaults.standard
         let grp = suite()
+
         std.set(true, forKey: kOpenedViaLink)
         grp?.set(true, forKey: kOpenedViaLink)
         grp?.synchronize()
 
-        // MARK: - Helpers (local)
-        func suite() -> UserDefaults? { UserDefaults(suiteName: appGroupId) }
+        suite()?.set(url.absoluteString, forKey: kPendingUniversalLink)
+        suite()?.synchronize()
+
+        let host = (url.host ?? "").lowercased()
+        guard host == "minis.studio" || host.hasSuffix(".minis.studio") else { return }
 
         func queryValue(_ key: String, in url: URL) -> String? {
             let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
@@ -189,12 +171,8 @@ struct MiniApp: App {
         func isStudentLink(_ url: URL) -> Bool {
             let path = url.path.lowercased()
             if path == "/student" || path == "/student/" { return true }
-
-            let q = (queryValue("student", in: url) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            if q == "1" || q.lowercased() == "true" || q.lowercased() == "yes" { return true }
-
-            if path.contains("student=1") { return true }
-            return false
+            let q = (queryValue("student", in: url) ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return q == "1" || q == "true" || q == "yes"
         }
 
         func makeStudentClaimForMini(_ miniId: Int) -> StudentClaim? {
@@ -210,29 +188,17 @@ struct MiniApp: App {
         func saveStudentClaim(_ claim: StudentClaim) {
             saveClaimToAppGroup(claim)
             studentClaim = claim
-
             suite()?.removeObject(forKey: kPendingUniversalLink)
             suite()?.synchronize()
-
             pingInstall()
         }
 
-        // MARK: - Persist incoming link (for attribution)
-        suite()?.set(url.absoluteString, forKey: kPendingUniversalLink)
-        suite()?.synchronize()
-
-        // ✅ Only handle minis.studio links
-        let host = (url.host ?? "").lowercased()
-        guard host == "minis.studio" || host.hasSuffix(".minis.studio") else { return }
-
-        // MARK: - 1) Shop deep link first: /shop/{id}
         let comps = url.pathComponents.filter { $0 != "/" && !$0.isEmpty }
         var incomingMiniId: Int? = nil
 
         if comps.count >= 2, comps[0].lowercased() == "shop", let id = Int(comps[1]) {
             incomingMiniId = id
 
-            // ✅ Write BOTH: standard + app group (prevents "loc missing" bug)
             std.set(id, forKey: kMiniAppId)
             std.set(String(id), forKey: kShopId)
 
@@ -240,21 +206,16 @@ struct MiniApp: App {
             grp?.set(String(id), forKey: kShopId)
             grp?.synchronize()
 
-            // ✅ loc from URL (or fallback for mini 3)
-            let loc = (queryValue("loc", in: url) ?? "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-
+            let loc = (queryValue("loc", in: url) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             if !loc.isEmpty {
                 std.set(loc, forKey: kDeliveryLoc)
                 grp?.set(loc, forKey: kDeliveryLoc)
                 grp?.synchronize()
-                print("📍 \(kDeliveryLoc) from URL =", loc)
             } else {
                 if id == 3 {
                     std.set("mikkeller", forKey: kDeliveryLoc)
                     grp?.set("mikkeller", forKey: kDeliveryLoc)
                     grp?.synchronize()
-                    print("📍 \(kDeliveryLoc) fallback = mikkeller (miniAppId=3)")
                 } else {
                     std.removeObject(forKey: kDeliveryLoc)
                     grp?.removeObject(forKey: kDeliveryLoc)
@@ -262,8 +223,9 @@ struct MiniApp: App {
                 }
             }
 
-            // ✅ Hold UI while refreshing customization for the new mini
-            DispatchQueue.main.async { self.didLoadMini = false }
+            didLoadMini = false
+            enforceDirectionPolicy()
+
             parseMiniIfNeeded { _ in
                 DispatchQueue.main.async { self.didLoadMini = true }
             }
@@ -271,7 +233,6 @@ struct MiniApp: App {
             pingInstall()
         }
 
-        // MARK: - 2) Student triggers
         if let claim = StudentClaim.from(url: url) {
             saveStudentClaim(claim)
             return
@@ -289,13 +250,10 @@ struct MiniApp: App {
             }
         }
 
-        // MARK: - 3) If it wasn't /shop/{id} above, still ping attribution
         if incomingMiniId == nil {
             pingInstall()
         }
     }
-
-    // MARK: - Student Claim in App Group
 
     private func saveClaimToAppGroup(_ claim: StudentClaim) {
         guard let s = suite(), let data = try? JSONEncoder().encode(claim) else { return }
@@ -315,8 +273,6 @@ struct MiniApp: App {
         s.synchronize()
     }
 
-    // MARK: - Mini customization fetch
-
     private func parseMiniIfNeeded(completion: @escaping (Bool) -> Void = { _ in }) {
         let std = UserDefaults.standard
         let id = String(std.integer(forKey: kMiniAppId))
@@ -332,14 +288,15 @@ struct MiniApp: App {
                 completion(false)
                 return
             }
-            // ✅ Your existing function (assumed to set direction/theme/etc)
+
             applyMiniCustomization(from: data)
+
+            // ✅ Ignore JSON "direction" completely; enforce our rule.
+            self.enforceDirectionPolicy()
 
             completion(true)
         }.resume()
     }
-
-    // MARK: - Install Ping
 
     private struct InstallPingPayload: Codable {
         let anonId: String
@@ -421,8 +378,6 @@ struct MiniApp: App {
         URLSession.shared.dataTask(with: req) { _, _, _ in }.resume()
     }
 
-    // MARK: - WiFi (unchanged)
-
     private func joinBeitHaAmWiFiIfNeeded() {
         let std = UserDefaults.standard
         if std.bool(forKey: kDidTryJoinWiFi) { return }
@@ -434,8 +389,6 @@ struct MiniApp: App {
         NEHotspotConfigurationManager.shared.apply(config) { _ in }
     }
 }
-
-// MARK: - Simple loading view while mini JSON loads
 
 private struct LoadingSplashView: View {
     var body: some View {

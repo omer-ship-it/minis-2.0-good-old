@@ -4,7 +4,7 @@ import Kingfisher
 import Combine
 import SwiftUI
 import WebKit
-
+import MessageUI
 
 
 struct CashPointView: View {
@@ -14,7 +14,7 @@ struct CashPointView: View {
     @State private var noteEditingLineId: Int? = nil
     @State private var noteEditingText: String = ""
     @FocusState private var focusedStockProductId: Int?
-    @AppStorage("pinpadId") private var pinpadId: String = ""
+    @State private var pinpadId: String = ""
     @Environment(\.isRtl) private var isRtl
     @Environment(\.currency) private var currency
     @StateObject private var api = MenuApiModel()
@@ -35,7 +35,400 @@ struct CashPointView: View {
     @State private var showLastInvoicePrompt: Bool = false
     @State private var zRestoreMode: Bool = false
     @State private var showZeroStockConfirm = false
-    @AppStorage(AppSettings.Key.cashPointMode) private var cashPointMode: Bool = AppSettings.Defaults.cashPointMode
+    private enum DragAxis { case none, horizontal, vertical }
+    @State private var localFrozenOverrides: [String: Bool] = [:]
+    @State private var renamingCategory: String? = nil
+    @State private var renamingText: String = ""
+    @State private var basketShakeTrigger: CGFloat = 0
+    private let archiveCategoryTitle = "ארכיון"
+    
+    private func hasBasketValidationError() -> Bool {
+        firstBasketLineWithMissingRequired() != nil
+    }
+    
+    private func isModifierVisible(_ opt: ModifierItem) -> Bool {
+        guard let linkedId = opt.linkedProductId else {
+            return true   // normal modifier, always visible
+        }
+
+        guard let linked = api.items.first(where: { $0.id == linkedId }) else {
+            return true   // if linked product missing, don't hide it completely
+        }
+
+        // archived products should also disappear
+        if isArchived(linked) {
+            return false
+        }
+
+        // local stock quantity wins
+        if let q = stockAdjustments[linkedId] {
+            return q > 0
+        }
+
+        // fallback to toggle/status
+        return stockToggles.isOn(linkedId)
+    }
+    
+    private func displayModifierName(_ opt: ModifierItem) -> String {
+        if let linkedId = opt.linkedProductId,
+           let linked = api.items.first(where: { $0.id == linkedId }) {
+            return linked.name
+        }
+        return opt.name
+    }
+    
+    struct FlowLayout<Data: RandomAccessCollection, Content: View>: View where Data.Element: Hashable {
+
+        var data: Data
+        var spacing: CGFloat = 6
+        var content: (Data.Element) -> Content
+
+        @State private var totalHeight = CGFloat.zero
+
+        var body: some View {
+            GeometryReader { geo in
+                self.generateContent(in: geo)
+            }
+            .frame(height: totalHeight)
+        }
+
+        private func generateContent(in geo: GeometryProxy) -> some View {
+
+            var width = CGFloat.zero
+            var height = CGFloat.zero
+
+            return ZStack(alignment: .topLeading) {
+
+                ForEach(Array(data), id: \.self) { item in
+
+                    content(item)
+                        .alignmentGuide(.leading) { dimension in
+                            if abs(width - dimension.width) > geo.size.width {
+                                width = 0
+                                height -= dimension.height + spacing
+                            }
+                            let result = width
+                            if item == data.last {
+                                width = 0
+                            } else {
+                                width -= dimension.width + spacing
+                            }
+                            return result
+                        }
+
+                        .alignmentGuide(.top) { _ in
+                            let result = height
+                            if item == data.last {
+                                height = 0
+                            }
+                            return result
+                        }
+                }
+            }
+            .background(
+                GeometryReader { geo -> Color in
+                    DispatchQueue.main.async {
+                        totalHeight = geo.size.height
+                    }
+                    return Color.clear
+                }
+            )
+        }
+    }
+
+    private func validateBasketBeforeCheckout() -> Bool {
+        guard let badLineId = firstBasketLineWithMissingRequired() else {
+            return true
+        }
+
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
+            expandedBasketLineId = badLineId
+        }
+
+        if isPhoneLayout {
+            showBasketSheetPhone = true
+        }
+
+        Haptics.error()
+
+        withAnimation(.linear(duration: 0.45)) {
+            basketShakeTrigger += 1
+        }
+
+        return false
+    }
+    private func firstBasketLineWithMissingRequired() -> Int? {
+        for entry in basketEntriesSorted {
+            let groups = entry.item.modifiers ?? []
+            let optionsMap = optionSelections[entry.id] ?? [:]
+
+            for g in groups where g.type == .options {
+                let isRequired = (g.selection?.required ?? 0) > 0
+                guard isRequired else { continue }
+
+                let selectedValue = optionsMap[g.title]?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+                if selectedValue.isEmpty {
+                    return entry.id
+                }
+            }
+        }
+        return nil
+    }
+
+    private func triggerBasketValidationError() {
+        if let badLineId = firstBasketLineWithMissingRequired() {
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.8)) {
+                expandedBasketLineId = badLineId
+            }
+
+            if isPhoneLayout {
+                showBasketSheetPhone = true
+            }
+
+            Haptics.error()
+
+            withAnimation(.linear(duration: 0.45)) {
+                basketShakeTrigger += 1
+            }
+        }
+    }
+    
+    private enum AdditionMode: String, Codable, Hashable {
+        case with = "with"
+        case without = "without"
+        case side = "side"
+    }
+    
+    struct ShakeEffect: GeometryEffect {
+        var amount: CGFloat = 10
+        var shakesPerUnit: CGFloat = 3
+        var animatableData: CGFloat
+
+        func effectValue(size: CGSize) -> ProjectionTransform {
+            let translation = amount * sin(animatableData * .pi * shakesPerUnit)
+            return ProjectionTransform(CGAffineTransform(translationX: translation, y: 0))
+        }
+    }
+    private func isArchived(_ item: ShellMenuItem) -> Bool {
+        item.isArchived ?? false
+    }
+    
+    private func modifierPriceLabel(_ value: Double) -> String {
+        guard value != 0 else { return "" }
+
+        let absValue = abs(value)
+        let formatted: String = absValue.truncatingRemainder(dividingBy: 1) == 0
+            ? String(Int(absValue))
+            : String(format: "%.2f", absValue)
+
+        return value > 0 ? "+\(formatted)" : "-\(formatted)"
+    }
+    
+    private func moveProductToCategory(productId: Int, newCategory: String) {
+        let cleanNew = normalizeCategory(newCategory)
+        guard !cleanNew.isEmpty else { return }
+
+        guard let idx = api.items.firstIndex(where: { $0.id == productId }) else { return }
+
+        let item = api.items[idx]
+        let oldCategory = normalizeCategory(item.category)
+        guard oldCategory != cleanNew else { return }
+
+        // ✅ local update first
+        api.items[idx] = ShellMenuItem(
+            id: item.id,
+            name: item.name,
+            price: item.price,
+            category: cleanNew,
+            modifiers: item.modifiers,
+            imageURL: item.imageURL,
+            description: item.description,
+            status: item.status,
+            stockQuantity: item.stockQuantity,
+            printer: item.printer,
+            printers: item.printers
+        )
+
+        // ✅ if currently filtered by old category, jump to new one
+        selectedCategory = cleanNew
+
+        // optional: keep category order persisted
+        if !categoryOrder.contains(cleanNew) {
+            categoryOrder.append(cleanNew)
+            persistCategoryOrder()
+        }
+
+        saveProductCategoryToServer(productId: productId, newCategory: cleanNew)
+    }
+
+    private func renameCategoryOnServer(oldName: String, newName: String) {
+        let miniAppId = resolvedMiniAppId
+        guard miniAppId > 0 else {
+            print("❌ categories/rename: missing miniAppId")
+            return
+        }
+
+        let cleanOld = normalizeCategory(oldName)
+        let cleanNew = normalizeCategory(newName)
+
+        guard !cleanOld.isEmpty, !cleanNew.isEmpty, cleanOld != cleanNew else { return }
+
+        guard let url = URL(string: "https://minis.studio/api/categories/rename") else {
+            print("❌ categories/rename: bad URL")
+            return
+        }
+
+        let body: [String: Any] = [
+            "miniAppId": miniAppId,
+            "oldName": cleanOld,
+            "newName": cleanNew
+        ]
+
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: body) else {
+            print("❌ categories/rename: encode failed")
+            return
+        }
+
+        print("""
+        🌀 CATEGORY RENAME cURL:
+        curl -X POST "https://minis.studio/api/categories/rename" \
+          -H "Content-Type: application/json" \
+          -d '\(String(data: jsonData, encoding: .utf8) ?? "{}")'
+        """)
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = jsonData
+
+        Task {
+            do {
+                let (data, resp) = try await URLSession.shared.data(for: req)
+                let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
+                let text = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
+                print("🌍 categories/rename HTTP \(code)")
+                print("📦 categories/rename RESPONSE:", text)
+
+                await MainActor.run {
+                    safeReloadMenu(reason: "rename category")
+                }
+            } catch {
+                print("❌ categories/rename network error:", error.localizedDescription)
+            }
+        }
+    }
+    
+    private func applyLocalCategoryRename(oldName: String, newName: String) {
+        let oldClean = normalizeCategory(oldName)
+        let newClean = normalizeCategory(newName)
+
+        guard !oldClean.isEmpty, !newClean.isEmpty, oldClean != newClean else { return }
+
+        // update products locally
+        for i in api.items.indices {
+            let item = api.items[i]
+
+            if normalizeCategory(item.category) == oldClean {
+                api.items[i] = ShellMenuItem(
+                    id: item.id,
+                    name: item.name,
+                    price: item.price,
+                    category: newClean,              // 👈 changed
+                    modifiers: item.modifiers,
+                    imageURL: item.imageURL,
+                    description: item.description,
+                    status: item.status,
+                    stockQuantity: item.stockQuantity,
+                    printer: item.printer,
+                    printers: item.printers
+                )
+            }
+        }
+
+        // update categoryOrder locally
+        categoryOrder = categoryOrder.map { cat in
+            normalizeCategory(cat) == oldClean ? newClean : cat
+        }
+        categoryOrder = uniqueNormalized(categoryOrder)
+
+        // keep selection on renamed category
+        if normalizeCategory(selectedCategory) == oldClean {
+            selectedCategory = newClean
+        }
+
+        persistCategoryOrder()
+    }
+    private func normalizeCategory(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\u{00A0}", with: " ")   // non-breaking spaces
+            .replacingOccurrences(of: "\t", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    
+    private func archiveProduct(productId: Int, mode: String) {
+        let miniId =
+            UserDefaults.standard.integer(forKey: "miniAppId") > 0
+            ? UserDefaults.standard.integer(forKey: "miniAppId")
+            : (Int(UserDefaults.standard.string(forKey: "shopId") ?? "0") ?? 0)
+
+        guard miniId > 0 else {
+            print("❌ archiveProduct: missing miniAppId/shopId")
+            return
+        }
+
+        if mode == "archive" || mode == "remove" {
+            if let idx = api.items.firstIndex(where: { $0.id == productId }) {
+                api.items.remove(at: idx)
+            }
+        }
+
+        let base = UserDefaults.standard.string(forKey: "apiBase") ?? "https://minis.studio"
+        guard let url = URL(string: "\(base)/api/products/\(productId)/archive") else { return }
+
+        let debugCurl = """
+        curl -X POST "\(base)/api/products/\(productId)/archive" \\
+          -H "Content-Type: application/json" \\
+          -d '{ "miniAppId": \(miniId), "mode": "\(mode)" }'
+        """
+        print("🔎 Product action DEBUG CURL:\n\(debugCurl)")
+
+        struct ArchiveBody: Encodable {
+            let miniAppId: Int
+            let mode: String
+        }
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONEncoder().encode(
+            ArchiveBody(miniAppId: miniId, mode: mode)
+        )
+
+        Task {
+            do {
+                let (_, resp) = try await URLSession.shared.data(for: req)
+                let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
+                print("📦 product \(productId) mode=\(mode) miniAppId=\(miniId) → HTTP \(code)")
+
+                await MainActor.run {
+                    safeReloadMenu(reason: "product \(mode)")
+                }
+            } catch {
+                print("❌ product \(mode) error:", error.localizedDescription)
+            }
+        }
+    }
+    
+    private func displayCategory(for item: ShellMenuItem) -> String {
+        if isArchived(item) { return archiveCategoryTitle }
+        return item.category
+    }
+    @GestureState private var productDragAxis: DragAxis = .none
+    @AppStorage(AppSettings.Key.cashPointMode) private var cashPointMode: Bool = true
     @State private var zRestoreDate: Date = Calendar.current.date(byAdding: .day, value: -1, to: Date()) ?? Date()
     @StateObject private var net = NetworkMonitor.shared
     @State private var printInFlight = false
@@ -45,12 +438,174 @@ struct CashPointView: View {
     @State private var isCategoryReorderMode: Bool = false
     @Environment(\.dismiss) private var dismiss
     @State private var frozenOrderIds: [Int] = []
+    @State private var showLogsViewer = false
     @Environment(\.presentationMode) private var presentationMode
     private let NO_TERMINAL_PINPAD = "111111"
     @StateObject private var stockToggles = StockToggleStore(
         shopId: 12   // 👈 hard-coded miniAppId
     )
     
+    @MainActor
+    private func makeDuplicateDraft(from item: ShellMenuItem) -> AdminProductDraft {
+        var d = makeAdminDraft(from: item)   // ✅ includes modifierGroups already
+
+        // ✅ New product (so server creates a new id)
+        d.productId = nil
+
+        // ✅ Nice default name
+        let baseName = d.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        d.name = baseName + " (העתק)"
+
+        // (Optional) if you prefer not to duplicate image, uncomment:
+        // d.imageURL = ""
+
+        return d
+    }
+    
+    private func freezeKey(productId: Int, groupTitle: String, optionName: String) -> String {
+        "\(productId)|\(groupTitle)|\(optionName)"
+    }
+
+    private func isLocallyFrozen(productId: Int, groupTitle: String, optionName: String) -> Bool {
+        localFrozenOverrides[freezeKey(productId: productId, groupTitle: groupTitle, optionName: optionName)] == true
+    }
+    enum ModifierStatusAPI {
+        private static func resolvedMiniAppId() -> Int {
+            let d = UserDefaults.standard
+            let m = d.integer(forKey: "miniAppId")
+            if m > 0 { return m }
+            if let s = d.string(forKey: "shopId"), let v = Int(s), v > 0 { return v }
+            return 0
+        }
+
+        static func setItemStatus(
+            productId: Int,
+            groupId: String,
+            title: String,
+            optionName: String,
+            enabled: Bool
+        ) async -> Bool {
+            let miniAppId = resolvedMiniAppId()
+            guard miniAppId > 0 else { return false }
+
+            let base = UserDefaults.standard.string(forKey: "apiBase") ?? "https://minis.studio"
+            guard let url = URL(string: "\(base)/api/products/\(productId)/modifier-item/status") else { return false }
+
+            var req = URLRequest(url: url, timeoutInterval: 20)
+            req.httpMethod = "POST"
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+
+            let body: [String: Any] = [
+                "miniAppId": miniAppId,
+                "groupId": groupId,      // may be fake, ok
+                "title": title,          // ✅ IMPORTANT fallback
+                "optionName": optionName,
+                "enabled": enabled
+            ]
+            req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+            do {
+                let (data, resp) = try await URLSession.shared.data(for: req)
+                let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
+                let txt = String(data: data, encoding: .utf8) ?? ""
+                print("🧊 modifier/status HTTP \(code): \(txt.prefix(240))")
+                return (200...299).contains(code)
+            } catch {
+                print("❌ modifier/status error:", error.localizedDescription)
+                return false
+            }
+        }
+    }
+    
+    private enum PinpadStore {
+        static func key(miniAppId: Int) -> String { "pinpadId.\(miniAppId)" }
+
+        static func load(miniAppId: Int) -> String {
+            let raw = UserDefaults.standard.string(forKey: key(miniAppId: miniAppId)) ?? ""
+            return raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        static func save(_ value: String, miniAppId: Int) {
+            UserDefaults.standard.set(value, forKey: key(miniAppId: miniAppId))
+        }
+    }
+    
+    private func debugPinpad(_ tag: String) {
+        let mid = resolvedMiniAppId
+        let stored = PinpadStore.load(miniAppId: mid)
+        let legacy = UserDefaults.standard.string(forKey: "pinpadId") ?? "nil"
+        print("💳[\(tag)] mid=\(mid) state=\(pinpadId) stored=\(stored) legacy=\(legacy)")
+        
+        
+    }
+    
+    private func migratePickupLocationOnce() {
+        let d = UserDefaults.standard
+
+        // if v2 already set, done
+        let existing = (d.string(forKey: "pickup.location.v2") ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !existing.isEmpty { return }
+
+        // read old keys (whatever existed historically)
+        let old =
+            d.string(forKey: "pickup.location")
+            ?? d.string(forKey: "admin.pickupLocation")
+            ?? ""
+
+        let migrated = canonPickup(old).rawValue
+        d.set(migrated, forKey: "pickup.location.v2")
+
+        // optional: kill old keys so nothing else reads them
+        d.removeObject(forKey: "pickup.location")
+        d.removeObject(forKey: "admin.pickupLocation")
+
+        // keep @AppStorage var in sync immediately
+        pickupLocationV2 = migrated
+
+        print("📍 pickup migration old='\(old)' -> v2='\(migrated)'")
+    }
+    // ✅ TEMP (v1): local role gate (later replace with server-loaded grant role)
+    @AppStorage("admin.role") private var adminRole: String = "cashier"   // cashier/admin/grandManager/owner
+    private func canonPickup(_ raw: String) -> AdminPickupLocation {
+        let s = raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .filter { $0.isLetter || $0.isNumber } // ✅ keep Hebrew letters too
+
+        switch s {
+
+        // ✅ HUMANITIES
+        case "humanities", "humanity", "humanitiesbuilding", "cafeteria",
+             "מדעיהרוח", "רוח", "קפיטריה", "קפטריה":
+            return .humanities
+
+        // ✅ SOCIAL / SCIENCE
+        case "social", "sciencebuilding", "science", "socialbuilding",
+             "מדעיהחברה", "חברה":
+            return .social
+
+        default:
+            // if already canonical, keep
+            if s == AdminPickupLocation.humanities.rawValue { return .humanities }
+            if s == AdminPickupLocation.social.rawValue     { return .social }
+
+            // unknown -> do NOT guess wildly; default to humanities
+            return .humanities
+        }
+    }
+    
+    private var isOwner: Bool { adminRole == "owner" }
+    private var isGrandManager: Bool { adminRole == "grandManager" }
+
+    // ✅ Who can manage admins/devices
+    private var canManageAdmins: Bool { isOwner || isGrandManager }
+
+    // ✅ Optional: can revoke (if you want grand manager to be able to add but NOT revoke)
+    private var canRevokeAdmins: Bool { isOwner } // keep strict
+    
+    @State private var showAdminsDevices = false
     
     @MainActor
     private func backToCashpointFromTeamTab() {
@@ -100,7 +655,7 @@ struct CashPointView: View {
     }
     @State private var pricePulseLineId: Int? = nil
     @State private var pricePulseScale: CGFloat = 1.0
-    @AppStorage("admin.pickupLocation") private var adminPickupLocation: String = "cafeteria" // default
+    @AppStorage("pickup.location.v2") private var pickupLocationV2: String = AdminPickupLocation.humanities.rawValue
     
     @MainActor
     private func cleanupLineStateForCurrentBasket() {
@@ -147,24 +702,25 @@ struct CashPointView: View {
     }
     
     enum AdminPickupLocation: String, CaseIterable, Identifiable {
-        case cafeteria
-        case scienceBuilding
+        case humanities = "humanities"
+        case social     = "social"
 
         var id: String { rawValue }
 
         var title: String {
             switch self {
-            case .cafeteria:       return "מדעי הרוח"
-            case .scienceBuilding: return "מדעי החברה"
+            case .humanities: return "מדעי הרוח"
+            case .social:     return "מדעי החברה"
             }
         }
     }
     
     private var isMiniApp13: Bool { resolvedMiniAppId == 13 }
 
-    private var selectedAdminLocation: AdminPickupLocation? {
-        AdminPickupLocation(rawValue: adminPickupLocation)
+    private var selectedAdminLocation: AdminPickupLocation {
+        canonPickup(pickupLocationV2)
     }
+
     private func setMiniAppOpen(_ open: Bool) {
         guard !mobileToggleBusy else { return }
 
@@ -474,43 +1030,71 @@ struct CashPointView: View {
     @State private var showOutboxLog = false
     @State private var pinpadsExpanded: Bool = false
 
-    private let pinpads: [(title: String, id: String)] = [
-        ("קופה 1", "48796294"),
-        ("קופה 2", "48796855"),
-        ("קיוסק 1", "48796856")
-    ]
+    private var pinpads: [(title: String, id: String)] {
+        switch resolvedMiniAppId {
+
+        case 12:
+            return [
+                ("קופה 1", "48796294"),
+                ("קופה 2", "48796855"),
+                ("קיוסק 1", "48796856"),
+                ("קיוסק 2", "48799267")
+            ]
+
+        case 13:
+            return [
+                ("חברה קופה", "48799364")
+            ]
+
+        default:
+            return [
+                ("קופה", "48796294")
+            ]
+        }
+    }
+    
+    
 
     private var currentPinpadId: String { pinpadId }
 
     private func setPinpadAndPing(_ id: String) {
         let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        let mid = resolvedMiniAppId
 
-        // ✅ No terminal sentinel
         if trimmed == NO_TERMINAL_PINPAD {
             pinpadId = NO_TERMINAL_PINPAD
+            PinpadStore.save(NO_TERMINAL_PINPAD, miniAppId: mid)
+
+            // ✅ LEGACY MIRROR (so current payment code sees it)
             UserDefaults.standard.set(NO_TERMINAL_PINPAD, forKey: "pinpadId")
 
             ZCreditPaymentHandler.shared.cancelCurrent()
             Haptics.success()
-            print("✅ pinpad disabled (pinpadId=\(NO_TERMINAL_PINPAD))")
+            print("✅ pinpad disabled mid=\(mid) id=\(NO_TERMINAL_PINPAD)")
             return
         }
 
-        // ✅ Normal terminal
         guard !trimmed.isEmpty else {
-            // optional: treat empty as "no terminal" too
             pinpadId = NO_TERMINAL_PINPAD
+            PinpadStore.save(NO_TERMINAL_PINPAD, miniAppId: mid)
+
+            // ✅ LEGACY MIRROR
             UserDefaults.standard.set(NO_TERMINAL_PINPAD, forKey: "pinpadId")
+
             ZCreditPaymentHandler.shared.cancelCurrent()
             Haptics.success()
             return
         }
 
         pinpadId = trimmed
+        PinpadStore.save(trimmed, miniAppId: mid)
+
+        // ✅ LEGACY MIRROR
         UserDefaults.standard.set(trimmed, forKey: "pinpadId")
+
         Haptics.light()
 
-        // ping (only for real terminals)
+        // ping
         ZCreditPaymentHandler.shared.pay(amount: 1.0, orderId: nil) { _ in }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             ZCreditPaymentHandler.shared.cancelCurrent()
@@ -691,8 +1275,9 @@ struct CashPointView: View {
         }
 
         // Never send notes in order (server can add it if needed)
-        let cleanOrder = categoryOrder.filter { $0 != "✏️ הערות" }
-
+        let cleanOrder = uniqueNormalized(categoryOrder).filter {
+            $0 != "✏️ הערות" && $0 != archiveCategoryTitle
+        }
         let payload = ReorderCategoriesReq(miniAppId: miniAppId, order: cleanOrder)
 
         guard let url = URL(string: "https://minis.studio/api/categories/reorder") else {
@@ -734,36 +1319,152 @@ struct CashPointView: View {
             }
         }
     }
-    private var categoryOrderKey: String { "cash.categoryOrder.shop12" } // or use shopId
+    private var categoryOrderKey: String {
+        "cash.categoryOrder.shop\(resolvedMiniAppId)"
+    }
+    
+    private func uniqueNormalized(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+
+        for raw in values {
+            let v = normalizeCategory(raw)
+            guard !v.isEmpty else { continue }
+            guard seen.insert(v).inserted else { continue }
+            result.append(v)
+        }
+
+        return result
+    }
+
+    private func currentMenuCategoriesInAppearanceOrder() -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+
+        for item in api.items {
+            let cat = normalizeCategory(displayCategory(for: item))
+            guard !cat.isEmpty else { continue }
+            guard seen.insert(cat).inserted else { continue }
+            result.append(cat)
+        }
+
+        return result
+    }
+    
+    private func mergedCategoryOrder(
+        saved: [String],
+        server: [String],
+        menu: [String]
+    ) -> [String] {
+        let notes = "✏️ הערות"
+        let archive = archiveCategoryTitle
+
+        let menuClean = uniqueNormalized(menu)
+        let menuSet = Set(menuClean)
+
+        let serverClean = uniqueNormalized(
+            server.filter { normalizeCategory($0) != notes && normalizeCategory($0) != archive }
+        )
+
+        let savedClean = uniqueNormalized(
+            saved.filter { normalizeCategory($0) != notes && normalizeCategory($0) != archive }
+        )
+
+        // prefer server order if it exists, otherwise saved local order
+        let preferredBase = !serverClean.isEmpty ? serverClean : savedClean
+
+        var merged: [String] = []
+
+        // keep only categories that still exist in real menu
+        for cat in preferredBase {
+            if menuSet.contains(cat), !merged.contains(cat) {
+                merged.append(cat)
+            }
+        }
+
+        // append newly discovered real categories at the end
+        for cat in menuClean where cat != notes && cat != archive {
+            if !merged.contains(cat) {
+                merged.append(cat)
+            }
+        }
+
+        // ✅ notes is always hardcoded and should always exist
+        if !merged.contains(notes) {
+            merged.append(notes)
+        }
+
+        // ✅ archive only if there are archived items
+        if menuSet.contains(archive), !merged.contains(archive) {
+            merged.append(archive)
+        }
+
+        return merged
+    }
+    
     
     private func loadCategoryOrderFromStorageOrMenu() {
-        let menuCats = Array(Set(api.items.map(\.category)))
+        let notes = "✏️ הערות"
+        let archive = archiveCategoryTitle
 
-        // ✅ 1) prefer server order if present
+        let menuCats = Array(Set(api.items.map { displayCategory(for: $0) }))
+
         let server = api.categoryOrder
-            .filter { $0 != "✏️ הערות" }
-            .filter { menuCats.contains($0) }
+            .filter { $0 != notes && $0 != archive }
 
-        // ✅ 2) fallback to local saved order only if server is empty
         let saved = (UserDefaults.standard.array(forKey: categoryOrderKey) as? [String]) ?? []
-        var merged = (!server.isEmpty ? server : saved.filter { menuCats.contains($0) })
 
-        // ✅ 3) append new categories that server/saved didn't include
-        for c in menuCats where !merged.contains(c) { merged.append(c) }
+        // ✅ prefer saved first, then server, because local drag is current truth
+        let base = !saved.isEmpty ? saved : server
 
-        // ✅ 4) keep notes last
-        merged.removeAll(where: { $0 == "✏️ הערות" })
-        merged.append("✏️ הערות")   // ✅ always show notes
-        categoryOrder = merged
+        var merged: [String] = []
 
-        // ✅ optional: persist the server truth so your rail stays correct across launches
-        if !server.isEmpty {
-            UserDefaults.standard.set(merged, forKey: categoryOrderKey)
+        for c in base {
+            if menuCats.contains(c), !merged.contains(c), c != notes, c != archive {
+                merged.append(c)
+            }
         }
+
+        // append newly discovered real categories
+        for c in menuCats where c != notes && c != archive {
+            if !merged.contains(c) {
+                merged.append(c)
+            }
+        }
+
+        // hardcoded notes
+        merged.append(notes)
+
+        // archive only if exists
+        if menuCats.contains(archive) {
+            merged.append(archive)
+        }
+
+        categoryOrder = merged
+        UserDefaults.standard.set(merged, forKey: categoryOrderKey)
+
+        print("🟣 menuCats =", menuCats)
+        print("🟣 categoryOrder =", categoryOrder)
     }
     
     private func persistCategoryOrder() {
-        UserDefaults.standard.set(categoryOrder, forKey: categoryOrderKey)
+        let notes = "✏️ הערות"
+        let archive = archiveCategoryTitle
+
+        var clean = categoryOrder
+
+        // keep one notes only, always near bottom
+        clean.removeAll { $0 == notes }
+        clean.append(notes)
+
+        // keep archive one only, always last if exists
+        clean.removeAll { $0 == archive }
+        if categories.contains(archive) {
+            clean.append(archive)
+        }
+
+        categoryOrder = clean
+        UserDefaults.standard.set(clean, forKey: categoryOrderKey)
     }
     
     private func buildSalesReportData(for type: ReportType) -> PrinterManager.SalesReportData {
@@ -1030,7 +1731,9 @@ struct CashPointView: View {
     @State private var expandedBasketLineId: Int? = nil
     @State private var noteDrafts: [Int: String] = [:]
     @State private var optionSelections: [Int: [String: String]] = [:]   // lineId -> [groupTitle: optionName]
-    @State private var additionSelections: [Int: Set<String>] = [:]      // lineId -> Set<additionName>
+    @State private var additionSelections: [Int: [String: [AdditionMode: Set<String>]]] = [:]
+    @State private var additionOrder: [Int: [String]] = [:]
+    @State private var additionGroupModes: [Int: [String: AdditionMode]] = [:]
     
     @State private var reportsExpanded: Bool = false
     @State private var teamTabsExpanded: Bool = false
@@ -1052,7 +1755,83 @@ struct CashPointView: View {
         case none, ten, fifteen,thirteen, custom
     }
     
+    private func selectedAdditionSet(
+        lineId: Int,
+        groupTitle: String,
+        mode: AdditionMode
+    ) -> Set<String> {
+        additionSelections[lineId]?[groupTitle]?[mode] ?? []
+    }
 
+    private func setAdditionSet(
+        lineId: Int,
+        groupTitle: String,
+        mode: AdditionMode,
+        value: Set<String>
+    ) {
+        var lineMap = additionSelections[lineId] ?? [:]
+        var groupMap = lineMap[groupTitle] ?? [:]
+        groupMap[mode] = value
+        lineMap[groupTitle] = groupMap
+        additionSelections[lineId] = lineMap
+    }
+
+    private func moveAdditionToCurrentMode(
+        lineId: Int,
+        groupTitle: String,
+        itemName: String,
+        targetMode: AdditionMode
+    ) {
+        var lineMap = additionSelections[lineId] ?? [:]
+        var groupMap = lineMap[groupTitle] ?? [:]
+
+        var withSet = groupMap[.with] ?? []
+        var withoutSet = groupMap[.without] ?? []
+        var sideSet = groupMap[.side] ?? []
+
+        withSet.remove(itemName)
+        withoutSet.remove(itemName)
+        sideSet.remove(itemName)
+
+        switch targetMode {
+        case .with:
+            withSet.insert(itemName)
+        case .without:
+            withoutSet.insert(itemName)
+        case .side:
+            sideSet.insert(itemName)
+        }
+
+        groupMap[.with] = withSet
+        groupMap[.without] = withoutSet
+        groupMap[.side] = sideSet
+        lineMap[groupTitle] = groupMap
+        additionSelections[lineId] = lineMap
+    }
+
+    private func removeAdditionFromAllModes(
+        lineId: Int,
+        groupTitle: String,
+        itemName: String
+    ) {
+        var lineMap = additionSelections[lineId] ?? [:]
+        var groupMap = lineMap[groupTitle] ?? [:]
+
+        var withSet = groupMap[.with] ?? []
+        var withoutSet = groupMap[.without] ?? []
+        var sideSet = groupMap[.side] ?? []
+
+        withSet.remove(itemName)
+        withoutSet.remove(itemName)
+        sideSet.remove(itemName)
+
+        groupMap[.with] = withSet
+        groupMap[.without] = withoutSet
+        groupMap[.side] = sideSet
+        lineMap[groupTitle] = groupMap
+        additionSelections[lineId] = lineMap
+    }
+    
     private var mainActionButtonTitle: String {
         if isTeamTabMode {
             return "הדפס"
@@ -1320,6 +2099,8 @@ struct CashPointView: View {
             .transition(.move(edge: .top).combined(with: .opacity))
         }
     }
+    
+    
 
     private struct ExcludePanelView: View {
         let isRtl: Bool
@@ -1647,6 +2428,7 @@ struct CashPointView: View {
 
                         Button {
                             guard !basketIsEmpty else { return }
+                            guard validateBasketBeforeCheckout() else { return }
 
                             if hasAddedLinesInPayLater {
                                 printUpdatedUnpaidOrder()
@@ -1687,29 +2469,40 @@ struct CashPointView: View {
 
                         Button {
                             guard !basketIsEmpty else { return }
-                            if inline {
-                                showOrderFlow = true
+                            guard validateBasketBeforeCheckout() else { return }
+
+                            if hasAddedLinesInPayLater {
+                                printUpdatedUnpaidOrder()
                             } else {
-                                showBasketSheetPhone = false
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                                if inline {
                                     showOrderFlow = true
+                                    hasChosenServiceMode = false
+                                } else {
+                                    showBasketSheetPhone = false
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                                        showOrderFlow = true
+                                        hasChosenServiceMode = false
+                                    }
                                 }
                             }
                         } label: {
+                            let enabled = !basketIsEmpty
+
                             Text(mainActionButtonTitle)
-                                .font(.system(size: 20, weight: .bold))
+                                .font(.system(size: 18, weight: .bold))
                                 .foregroundColor(
-                                    basketIsEmpty
-                                        ? .black
-                                        : (colorScheme == .dark ? .black : .white)
+                                    enabled
+                                        ? (colorScheme == .dark ? .black : .white)
+                                        : .white
                                 )
                                 .frame(maxWidth: .infinity)
-                                .frame(height: 56)
-                                .background(basketIsEmpty
-                                    ? Color.gray.opacity(0.4)
-                                            : (colorScheme == .dark ? .white : .black)
+                                .frame(height: 48)
+                                .background(
+                                    enabled
+                                        ? (colorScheme == .dark ? .white : .black)
+                                        : Color.gray.opacity(0.4)
                                 )
-                                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                         }
                         .buttonStyle(.plain)
                         .disabled(basketIsEmpty)
@@ -1719,6 +2512,7 @@ struct CashPointView: View {
                 .padding(.bottom, 12)
             }
         }
+        .modifier(ShakeEffect(animatableData: CGFloat(basketShakeTrigger)))
         .background(Color(.systemGray6))
         .frame(width: inline ? 360 : nil)
     }
@@ -1804,6 +2598,89 @@ struct CashPointView: View {
             installments: nil
         )
     }
+    struct ProductToCategoryDropDelegate: DropDelegate {
+        let targetCategory: String
+        @Binding var draggingProduct: ShellMenuItem?
+        let onMove: (Int, String) -> Void
+
+        func dropEntered(info: DropInfo) { }
+
+        func performDrop(info: DropInfo) -> Bool {
+            guard let product = draggingProduct else {
+                draggingProduct = nil
+                return false
+            }
+
+            draggingProduct = nil
+            onMove(product.id, targetCategory)
+            return true
+        }
+
+        func dropUpdated(info: DropInfo) -> DropProposal? {
+            DropProposal(operation: .move)
+        }
+    }
+ 
+    
+    private func saveProductCategoryToServer(productId: Int, newCategory: String) {
+        let shopId = resolvedMiniAppId
+        guard shopId > 0 else {
+            print("❌ saveProductCategoryToServer: missing shopId")
+            return
+        }
+
+        guard let item = api.items.first(where: { $0.id == productId }) else { return }
+
+        let draft = AdminProductDraft(
+            productId: item.id,
+            name: item.name,
+            priceText: String(format: "%.2f", item.price),
+            category: newCategory,
+            description: item.description ?? "",
+            imageURL: item.imageURL ?? "",
+            modifierGroups: (item.modifiers ?? []).map { g in
+                let kind: AdminModifierGroupDraft.Kind = (g.type == .options) ? .options : .additions
+
+                return AdminModifierGroupDraft(
+                    title: g.title,
+                    kind: kind,
+                    items: g.items.map {
+                        AdminModifierItemDraft(
+                            name: $0.name,
+                            extraPriceText: String(format: "%.2f", $0.extraPrice),
+                            linkedProductId: $0.linkedProductId
+                        )
+                    },
+                    defaultFirst: {
+                        guard kind == .options else { return false }
+
+                        // ✅ DB rule:
+                        // required = 0 -> toggle ON
+                        // required = 1 -> toggle OFF
+                        if let required = g.selection?.required {
+                            return required == 0
+                        }
+
+                        // fallback for older saved data
+                        if let defaultFirst = g.selection?.defaultFirst {
+                            return defaultFirst == 1
+                        }
+
+                        // default if missing
+                        return true
+                    }()
+                )
+            },
+            printerId: item.printer ?? defaultPrinterId(),
+            printerIds: Set(item.printers ?? (item.printer != nil ? [item.printer!] : [])),
+            isPhoneRequired: item.isPhone ?? false,
+            isArchived: isArchived(item)
+        )
+
+        Task {
+            await syncAdminDraftToServer(draft)
+        }
+    }
     
     private func sendReorderToServer(
         movedId: Int,
@@ -1823,7 +2700,7 @@ struct CashPointView: View {
         }
 
         // Resolve MiniApp / shop id
-        let miniAppId = Int(UserDefaults.standard.string(forKey: "shopId") ?? "12") ?? 12
+        let miniAppId = Int(UserDefaults.standard.string(forKey: "miniAppId") ?? "0") ?? 0
 
         // Find category index (0,1,2,…) from your left rail order
         let catIndex = categories.firstIndex(of: category) ?? 0
@@ -1895,6 +2772,7 @@ struct CashPointView: View {
         let onReorderCommitted: (Int, Int, String) -> Void   // movedId, newIndex, category
 
         func dropEntered(info: DropInfo) {
+           
             guard let current = dragging, current.id != target.id else { return }
 
             // Only reorder within same category
@@ -1927,7 +2805,7 @@ struct CashPointView: View {
     }
     
     private func syncAdminDraftToServer(_ draft: AdminProductDraft) async {
-        let shopId = 12
+        let shopId = resolvedMiniAppId
         guard shopId > 0 else {
             print("❌ syncAdminDraftToServer: missing shopId")
             return
@@ -2025,19 +2903,26 @@ struct CashPointView: View {
             let kind: AdminModifierGroupDraft.Kind = (g.type == .options) ? .options : .additions
 
             let items: [AdminModifierItemDraft] = g.items.map { opt in
-                AdminModifierItemDraft(
-                    name: opt.name,
-                    extraPriceText: String(format: "%.2f", opt.extraPrice)
+
+                let linkedProduct = api.items.first { $0.id == opt.linkedProductId }
+
+                return AdminModifierItemDraft(
+                    name: linkedProduct?.name ?? opt.name,
+                    extraPriceText: String(format: "%.2f", opt.extraPrice),
+                    linkedProductId: opt.linkedProductId,
+                    useLinkedName: opt.linkedProductId != nil,
+                    useLinkedPrice: false
                 )
             }
 
             return AdminModifierGroupDraft(
                 title: g.title,
                 kind: kind,
-                items: items
+                items: items,
+                defaultFirst: (g.selection?.defaultFirst ?? 0) > 0
             )
         }
-
+        
         return AdminProductDraft(
             productId: item.id,
             name: item.name,
@@ -2045,11 +2930,11 @@ struct CashPointView: View {
             category: item.category,
             description: item.description ?? "",
             imageURL: item.imageURL ?? "",
-            modifierGroups: groups,       // ✅ now loads in the editor again
+            modifierGroups: groups,
             printerId: primary,
             printerIds: idsSet,
-            isPhoneRequired: (item.isPhone ?? false)
-
+            isPhoneRequired: (item.isPhone ?? false),
+            isArchived: isArchived(item)
         )
     }
     
@@ -2109,7 +2994,16 @@ struct CashPointView: View {
                         extraPrice: Double($0.extraPriceText.replacingOccurrences(of: ",", with: ".")) ?? 0
                     )
                 }
-                return ModifierGroup(type: kind, title: g.title, items: items)
+
+                return ModifierGroup(
+                    type: kind,
+                    title: g.title,
+                    items: items,
+                    selection: ModifierSelection(
+                        required: 0,
+                        defaultFirst: g.defaultFirst ? 1 : 0
+                    )
+                )
             }
 
             let newId = (api.items.map(\.id).max() ?? 0) + 1
@@ -2428,6 +3322,29 @@ struct CashPointView: View {
         return parts.notePart ?? ""
     }
 
+    @ViewBuilder
+    private func additionModeChip(
+        title: String,
+        selected: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Text(title)
+            .font(.system(size: 15, weight: .semibold))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(
+                selected
+                ? (colorScheme == .dark ? .white : .black)
+                : Color(.systemGray5)
+            )
+            .foregroundColor(
+                selected
+                ? (colorScheme == .dark ? .black : .white)
+                : .primary
+            )
+            .clipShape(Capsule())
+            .onTapGesture(perform: action)
+    }
     // INSIDE CashPointView
     private func combineSubtitle(_ optionsText: String?, _ noteText: String?) -> String? {
         let opt  = optionsText?.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
@@ -2445,7 +3362,6 @@ struct CashPointView: View {
     private func updateEntryPricingAndSubtitle(lineId: Int) {
         guard var current = basket[lineId] else { return }
 
-        // No modifiers → only note matters
         guard let groups = current.item.modifiers, !groups.isEmpty else {
             let raw = (noteDrafts[lineId] ?? current.subtitle ?? "")
             let noteClean = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2460,26 +3376,34 @@ struct CashPointView: View {
             basket[lineId] = current
             return
         }
-        
-        let optionsMap   = optionSelections[lineId] ?? [:]
-        let additionsSet = additionSelections[lineId] ?? []
+
+        let optionsMap = optionSelections[lineId] ?? [:]
+        let additionsMap = additionSelections[lineId] ?? [:]
 
         let extraPerUnit: Double = groups.reduce(0.0) { total, group in
             switch group.type {
             case .options:
-                let selectedName = optionsMap[group.title] ?? group.items.first?.name
-                if let selectedName,
-                   let opt = group.items.first(where: { $0.name == selectedName }) {
-                    return total + opt.extraPrice
+                let selectedName = optionsMap[group.title]?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+
+                guard let selectedName,
+                      !selectedName.isEmpty,
+                      let opt = group.items.first(where: { $0.name == selectedName }) else {
+                    return total
                 }
-                return total
+
+                return total + opt.extraPrice
 
             case .additions:
-                let defaultName = norm(group.items.first?.name)
+                let groupMap = additionsMap[group.title] ?? [:]
+
+                let allSelectedNames =
+                    (groupMap[.with] ?? [])
+                    .union(groupMap[.without] ?? [])
+                    .union(groupMap[.side] ?? [])
 
                 let addSum = group.items
-                    .filter { additionsSet.contains($0.name) }
-                    .filter { norm($0.name) != defaultName }   // ✅ ignore default robustly
+                    .filter { allSelectedNames.contains($0.name) }
                     .map { $0.extraPrice }
                     .reduce(0.0, +)
 
@@ -2491,35 +3415,59 @@ struct CashPointView: View {
 
         var subtitlePieces: [String] = []
 
-        // Options: only show if different from default
         for group in groups where group.type == .options {
-            let defaultName  = group.items.first?.name
-            let selectedName = optionsMap[group.title] ?? defaultName
-            if let selectedName,
-               let defaultName,
-               selectedName != defaultName {
+            let selectedName = optionsMap[group.title]?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            guard let selectedName, !selectedName.isEmpty else { continue }
+
+            if let first = group.items.first?.name, selectedName == first {
+                let isRequired = (group.selection?.required ?? 0) > 0
+                if !isRequired { continue }
+            }
+
+            if let opt = group.items.first(where: { $0.name == selectedName }) {
+                let shownName = displayModifierName(opt)
+                subtitlePieces.append("\(group.title): \(shownName)")
+            } else {
                 subtitlePieces.append("\(group.title): \(selectedName)")
             }
         }
 
-        // Additions: list chosen additions
+        var withItems: [String] = []
+        var withoutItems: [String] = []
+        var sideItems: [String] = []
+
         for group in groups where group.type == .additions {
-            let defaultName = norm(group.items.first?.name)
+            let groupMap = additionsMap[group.title] ?? [:]
 
-            let chosen = group.items
-                .filter { additionsSet.contains($0.name) }
-                .filter { norm($0.name) != defaultName }   // ✅ ignore default robustly
+            let withSet = groupMap[.with] ?? []
+            let withoutSet = groupMap[.without] ?? []
+            let sideSet = groupMap[.side] ?? []
 
-            if !chosen.isEmpty {
-                let joined = chosen.map { $0.name }.joined(separator: ", ")
-                subtitlePieces.append("\(group.title): \(joined)")
+            for opt in group.items {
+                let shownName = displayModifierName(opt)
+
+                if withSet.contains(opt.name) {
+                    withItems.append("עם \(shownName)")
+                }
+                if withoutSet.contains(opt.name) {
+                    withoutItems.append("בלי \(shownName)")
+                }
+                if sideSet.contains(opt.name) {
+                    sideItems.append("\(shownName) בצד")
+                }
             }
         }
 
+        subtitlePieces.append(contentsOf: withItems)
+        subtitlePieces.append(contentsOf: withoutItems)
+        subtitlePieces.append(contentsOf: sideItems)
+
         let optionsText = subtitlePieces.joined(separator: ", ")
 
-        let rawNote   = noteDrafts[lineId] ?? noteFromSubtitle(current.subtitle)
-        let noteClean = rawNote.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+        let rawNote = noteDrafts[lineId] ?? noteFromSubtitle(current.subtitle)
+        let noteClean = rawNote.trimmingCharacters(in: .whitespacesAndNewlines)
 
         let newSubtitle = combineSubtitle(
             optionsText.isEmpty ? nil : optionsText,
@@ -2533,9 +3481,9 @@ struct CashPointView: View {
             subtitle: newSubtitle,
             unitPrice: unitPrice
         )
+
         basket[lineId] = current
     }
- 
 
     private var discountRate: Double {
         switch discountMode {
@@ -2593,7 +3541,7 @@ struct CashPointView: View {
         }
     }
 
-     struct CategoryDropDelegate: DropDelegate {
+    struct CategoryDropDelegate: DropDelegate {
         let target: String
         @Binding var order: [String]
         @Binding var dragging: String?
@@ -2602,23 +3550,24 @@ struct CashPointView: View {
         func dropEntered(info: DropInfo) {
             guard let current = dragging, current != target else { return }
 
-            // Don't reorder notes, and don't drop onto notes
-            if current == "✏️ הערות" || target == "✏️ הערות" { return }
+            // never move notes / archive
+            if current == "✏️ הערות" || current == "ארכיון" { return }
+            if target == "✏️ הערות" || target == "ארכיון" { return }
 
             guard let from = order.firstIndex(of: current),
-                  let to0  = order.firstIndex(of: target) else { return }
+                  let to = order.firstIndex(of: target) else { return }
 
-            if from == to0 { return }
+            // already in place → do nothing
+            if from == to { return }
 
-            withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
-                // ✅ Remove first
+            withAnimation(.interactiveSpring(response: 0.22, dampingFraction: 0.88)) {
                 let moved = order.remove(at: from)
-
-                // ✅ Recompute target index after removal (this fixes the “off by 1 / wrong place”)
-                let to = order.firstIndex(of: target) ?? min(to0, max(0, order.count))
-
                 order.insert(moved, at: to)
             }
+        }
+
+        func dropUpdated(info: DropInfo) -> DropProposal? {
+            DropProposal(operation: .move)
         }
 
         func performDrop(info: DropInfo) -> Bool {
@@ -2628,6 +3577,7 @@ struct CashPointView: View {
         }
     }
     
+    
     private let productColumns = [
         GridItem(.flexible(), spacing: 12),
         GridItem(.flexible(), spacing: 12),
@@ -2635,27 +3585,54 @@ struct CashPointView: View {
     ]
 
     private var categories: [String] {
-        let allCats = Array(Set(api.items.map(\.category)))
+        let notes = "✏️ הערות"
+        let archive = archiveCategoryTitle
 
-        // 1) start with server order
+        let realMenuCats = Array(Set(api.items.map { item in
+            isArchived(item) ? archive : item.category
+        }))
+
         var out: [String] = []
-        let serverOrder = api.categoryOrder
 
-        for c in serverOrder where allCats.contains(c) {
-            out.append(c)
+        // ✅ FIRST: trust current local categoryOrder
+        for cat in categoryOrder {
+            if cat == notes {
+                if !out.contains(notes) { out.append(notes) }
+                continue
+            }
+
+            if cat == archive {
+                if realMenuCats.contains(archive), !out.contains(archive) {
+                    out.append(archive)
+                }
+                continue
+            }
+
+            if realMenuCats.contains(cat), !out.contains(cat) {
+                out.append(cat)
+            }
         }
 
-        // 2) append any categories not present in server list (new ones)
-        for c in allCats where !out.contains(c) {
-            out.append(c)
+        // ✅ THEN: append any NEW categories not seen before
+        for cat in realMenuCats where cat != notes && cat != archive {
+            if !out.contains(cat) {
+                out.append(cat)
+            }
         }
 
-        // 3) keep notes last
-        out.removeAll(where: { $0 == "✏️ הערות" })
-        out.append("✏️ הערות")   // ✅ always show notes
+        // ✅ always keep hardcoded notes
+        if !out.contains(notes) {
+            out.append(notes)
+        }
+
+        // ✅ archive only if exists
+        if realMenuCats.contains(archive), !out.contains(archive) {
+            out.append(archive)
+        }
 
         return out
     }
+    
 
     private var itemsForSelectedCategory: [ShellMenuItem] {
         guard !selectedCategory.isEmpty else { return [] }
@@ -2668,7 +3645,13 @@ struct CashPointView: View {
             ]
         }
 
-        return api.items.filter { $0.category == selectedCategory }
+        if selectedCategory == archiveCategoryTitle {
+            return api.items.filter { isArchived($0) }
+        }
+
+        return api.items.filter {
+            !isArchived($0) && $0.category == selectedCategory
+        }
     }
    
     struct NewOrderButton: View {
@@ -2989,26 +3972,26 @@ struct CashPointView: View {
     private func basketSwipeGesture(for entry: BasketEntry) -> some Gesture {
         let isLocked = lockedLineIds.contains(entry.id)
 
-        return DragGesture(minimumDistance: 18)
+        return DragGesture(minimumDistance: 26) // ✅ harder to trigger accidentally
             .updating($isBasketHorizontalSwipe) { value, state, _ in
                 guard !isLocked else { return }
+
                 let dx = value.translation.width
                 let dy = value.translation.height
-                if abs(dx) > 32 && abs(dx) > abs(dy) + 10 {
+
+                // ✅ Require STRONG horizontal intent
+                if abs(dx) > 60 && abs(dx) > abs(dy) + 22 {
                     state = true
                 }
             }
             .onChanged { value in
-                guard !isLocked else {
-                    basketSwipeOffsets[entry.id] = 0
-                    return
-                }
+                guard !isLocked else { basketSwipeOffsets[entry.id] = 0; return }
 
                 let dx = value.translation.width
                 let dy = value.translation.height
 
-                // ✅ if it’s not horizontal, do NOTHING (let ScrollView scroll)
-                guard abs(dx) > 32 && abs(dx) > abs(dy) + 10 else {
+                // ✅ If it’s not clearly horizontal, don’t touch offsets (let ScrollView scroll)
+                guard abs(dx) > 60 && abs(dx) > abs(dy) + 22 else {
                     basketSwipeOffsets[entry.id] = 0
                     return
                 }
@@ -3028,8 +4011,7 @@ struct CashPointView: View {
 
                 let dx = value.translation.width
                 let dy = value.translation.height
-
-                guard abs(dx) > 32 && abs(dx) > abs(dy) + 10 else {
+                guard abs(dx) > 60 && abs(dx) > abs(dy) + 22 else {
                     withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
                         basketSwipeOffsets[entry.id] = 0
                     }
@@ -3038,7 +4020,7 @@ struct CashPointView: View {
 
                 let dir: CGFloat = isRtl ? -1 : 1
                 let translated = dx * dir
-                let commitThreshold: CGFloat = 80
+                let commitThreshold: CGFloat = 90 // ✅ slightly higher
 
                 if translated > commitThreshold {
                     withAnimation(.spring(response: 0.25, dampingFraction: 0.75)) {
@@ -3204,34 +4186,31 @@ struct CashPointView: View {
     }
 
     private var filteredItems: [ShellMenuItem] {
-           // 1) If search is active → global search (all categories)
-           let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-           if !query.isEmpty {
-               let q = query
-                   .folding(options: .diacriticInsensitive, locale: .current)
-                   .lowercased()
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
 
-               let base = api.items.filter { item in
-                   item.name
-                       .folding(options: .diacriticInsensitive, locale: .current)
-                       .lowercased()
-                       .contains(q)
-               }
+        // 1) Search across all items
+        if !query.isEmpty {
+            let q = query
+                .folding(options: .diacriticInsensitive, locale: .current)
+                .lowercased()
 
-               // 🔹 Sort: active first, then by `sort`, then name
-               if isStockEditMode || !dirtyStockIds.isEmpty || stockCommitInFlight {
-                   return base
-               }
+            let base = api.items.filter { item in
+                item.name
+                    .folding(options: .diacriticInsensitive, locale: .current)
+                    .lowercased()
+                    .contains(q)
+            }
 
-               return base.sorted { lhs, rhs in
-                   productSortKey(lhs) < productSortKey(rhs)
-               }
-           }
+            if isAnyStockEditing {
+                return applyFrozenOrder(base)
+            }
 
-           // 2) No search → regular category behaviour
-           guard !selectedCategory.isEmpty else { return [] }
+            return base.sorted { productSortKey($0) < productSortKey($1) }
+        }
 
-           // Notes category stays as-is (no stock / sort logic needed)
+        // 2) Normal category mode
+        guard !selectedCategory.isEmpty else { return [] }
+
         if selectedCategory == "✏️ הערות" {
             return [
                 makeNoteItem(id: -1001, name: "הערה לבר",     stationId: "s2", legacy: "Bar"),
@@ -3240,13 +4219,22 @@ struct CashPointView: View {
             ]
         }
 
-        let base = api.items.filter { $0.category == selectedCategory }
+        let base: [ShellMenuItem]
+
+        if selectedCategory == archiveCategoryTitle {
+            base = api.items.filter { isArchived($0) }
+        } else {
+            base = api.items.filter {
+                !isArchived($0) && $0.category == selectedCategory
+            }
+        }
 
         if isAnyStockEditing {
             return applyFrozenOrder(base)
         }
+
         return base.sorted { productSortKey($0) < productSortKey($1) }
-       }
+    }
   
 
     @ViewBuilder
@@ -3338,7 +4326,7 @@ struct CashPointView: View {
 
             // 🔒 HEADER (fixed)
             HStack {
-                Text("בית העם")
+                Text("קפה יהושע")
                     .font(.system(size: 22, weight: .bold))
 
                 Spacer()
@@ -3392,7 +4380,8 @@ struct CashPointView: View {
                             VStack(alignment: isRtl ? .trailing : .leading, spacing: 0) {
                                 ForEach(AdminPickupLocation.allCases) { loc in
                                     Button {
-                                        adminPickupLocation = loc.rawValue
+                                        pickupLocationV2 = loc.rawValue
+                                        UserDefaults.standard.set(loc.rawValue, forKey: "pickup.location.v2") // belt & braces
                                         Haptics.light()
 
                                         // optional: if Orders screen already open, you can force refresh there.
@@ -3400,9 +4389,7 @@ struct CashPointView: View {
                                         // showSideMenu = false
                                     } label: {
                                         HStack(spacing: 10) {
-                                            Image(systemName: (selectedAdminLocation == loc)
-                                                  ? "checkmark.circle.fill"
-                                                  : "circle")
+                                            Image(systemName: (selectedAdminLocation == loc) ? "checkmark.circle.fill" : "circle")
                                             Text(loc.title)
                                                 .font(.system(size: 16, weight: .semibold))
                                             Spacer()
@@ -3447,7 +4434,14 @@ struct CashPointView: View {
                     SideMenuRow(title: "פתח מגירה", systemImage: "tray") {
                         PrinterManager.shared.openCashDrawer()
                     }
-
+                    
+                    if canManageAdmins {
+                        SideMenuRow(title: "מנהלים ומכשירים", systemImage: "person.badge.key") {
+                            showSideMenu = false
+                            showAdminsDevices = true
+                        }
+                    }
+                   
                     SideMenuRow(title: "זיכוי לקוח", systemImage: "arrow.uturn.left.circle.fill") {
                         showSideMenu = false
                         refundInput = ""
@@ -3688,7 +4682,6 @@ struct CashPointView: View {
     }
     
     private func ensureSelectedCategoryIsValid() {
-        // prefer your rail order, skip notes
         let first = categoryOrder.first(where: { $0 != "✏️ הערות" }) ?? categories.first
         guard let first else { return }
 
@@ -3863,14 +4856,7 @@ struct CashPointView: View {
                                 ZStack {
                                     // base row
                                     HStack(spacing: 12) {
-                                        Button {
-                                            dismiss()
-                                        } label: {
-                                            Image(systemName: "chevron.backward")
-                                                .font(.system(size: 20, weight: .bold))
-                                                .padding(.leading, 8)
-                                                .clipShape(Circle())
-                                        }
+                                       
 
                                         Button {
                                             withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
@@ -3972,6 +4958,7 @@ struct CashPointView: View {
                                                 }
                                                 .buttonStyle(.plain)
                                                 .disabled(stockCommitInFlight)
+                                                .padding(.trailing, 40)
                                             }
                                         
                                     }
@@ -4050,7 +5037,7 @@ struct CashPointView: View {
                                             priceText: "0",
                                             category: defaultCategory,
                                             description: "",
-                                            imageURL: "https://beithaam.com/wp-content/uploads/2024/12/share.jpg",
+                                            imageURL: "https://d25t2285lxl5rf.cloudfront.net/images/shops/28596.png",
                                             modifierGroups: [],
                                             printerId: defaultPrinterId()        // ✅ NEW
                                         )
@@ -4175,7 +5162,7 @@ struct CashPointView: View {
                                         priceText: "0",
                                         category: defaultCategory,
                                         description: "",
-                                        imageURL: "https://beithaam.com/wp-content/uploads/2024/12/share.jpg",
+                                        imageURL: "https://d25t2285lxl5rf.cloudfront.net/images/shops/28596.png",
                                         modifierGroups: [],
                                         printerId: defaultPrinterId()        // ✅ NEW
                                     )
@@ -4262,7 +5249,7 @@ struct CashPointView: View {
                             ZStack(alignment: .bottom) {
 
                                 CashCategoryRail(
-                                    categories: categoryOrder,
+                                    categories: categories,
                                     selected: selectedCategory,
                                     onTap: { cat in
                                         searchText = ""
@@ -4273,18 +5260,31 @@ struct CashPointView: View {
                                     enableReorder: true,
                                     draggingCategory: $draggingCategory,
                                     categoryOrder: $categoryOrder,
+                                    renamingCategory: $renamingCategory,
+                                    renamingText: $renamingText,
+                                    draggingProduct: $draggingProduct,
+                                    onRenameCommit: { oldName, newName in
+                                        applyLocalCategoryRename(oldName: oldName, newName: newName)
+                                        renameCategoryOnServer(oldName: oldName, newName: newName)
+                                    },
+                                    onProductDroppedToCategory: { productId, targetCategory in
+                                        moveProductToCategory(productId: productId, newCategory: targetCategory)
+                                    },
                                     onReorderCommitted: {
                                         persistCategoryOrder()
                                         sendCategoryOrderToServer()
+
                                         if !categoryOrder.contains(selectedCategory),
-                                           let first = categoryOrder.first { selectedCategory = first }
+                                           let first = categoryOrder.first {
+                                            selectedCategory = first
+                                        }
                                     }
                                 )
                                 if isPad{
                                     VStack(spacing: 8) {
                                         if !isMiniApp13 {
                                             
-                                            printBacklogHUD()
+                                          //  printBacklogHUD()
                                         }
                                         
                                         if showLastInvoicePrompt,
@@ -4356,7 +5356,8 @@ struct CashPointView: View {
                                                 CashProductTile(
                                                     item: item,
                                                     quantityInBasket: qty > 0 ? qty : nil,
-                                                    isOutOfStock: isOut
+                                                    isOutOfStock: isOut,
+                                                    isArchived: isArchived(item)
                                                 )
                                                 .scaleEffect(tappedProductId == item.id ? 0.96 : 1.0)
 
@@ -4435,7 +5436,15 @@ struct CashPointView: View {
                                                         Button("ערוך מוצר") {
                                                             adminDraft = makeAdminDraft(from: item)
                                                         }
+                                                        Button("שכפל מוצר") {
+                                                                   let dup = makeDuplicateDraft(from: item)
 
+                                                                   // Option A (recommended): open editor so you can tweak before saving
+                                                                   adminDraft = dup
+
+                                                                   // Option B (instant duplicate, no editor):
+                                                                   // applyAdminSave(dup)
+                                                               }
                                                         // ✅ NEW: Edit stock for this specific product
                                                         Button("ערוך מלאי") {
                                                             var t = Transaction()
@@ -4609,7 +5618,8 @@ struct CashPointView: View {
                                                 CashProductTile(
                                                     item: item,
                                                     quantityInBasket: qty > 0 ? qty : nil,
-                                                    isOutOfStock: isOut
+                                                    isOutOfStock: isOut,
+                                                    isArchived: isArchived(item)
                                                 )
                                                 // keep same tap/context menu/stock UI as above…
                                             }
@@ -4744,6 +5754,8 @@ struct CashPointView: View {
                     }
                 }
                 .navigationBarHidden(true)
+                .navigationBarBackButtonHidden(true)          // ✅ kills the default iOS back chevron
+                .toolbar(.hidden, for: .navigationBar)        // ✅ hides the whole nav bar (extra safety)
                 
                 if isPhoneLayout && !basket.isEmpty {
                     BasketBar(
@@ -4816,6 +5828,33 @@ struct CashPointView: View {
             }
             
             .onAppear {
+                
+                debugPinpad("onAppear")
+                let mid = resolvedMiniAppId
+                pinpadId = PinpadStore.load(miniAppId: mid)
+                let legacy = pinpadId.isEmpty ? NO_TERMINAL_PINPAD : pinpadId
+                  UserDefaults.standard.set(legacy, forKey: "pinpadId")
+                if pinpadId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                   || pinpadId == NO_TERMINAL_PINPAD {
+
+                    if pinpads.count == 1 {
+                        let only = pinpads[0].id
+                        pinpadId = only
+                        PinpadStore.save(only, miniAppId: mid)
+
+                        // ✅ legacy mirror (if your payment handler still reads "pinpadId")
+                        UserDefaults.standard.set(only, forKey: "pinpadId")
+
+                        print("💳 PINPAD AUTOSET mid=\(mid) -> \(only)")
+                    }
+                }
+                print("💳 PINPAD FINAL mid=\(mid) pinpadId=\(pinpadId) stored=\(PinpadStore.load(miniAppId: mid)) legacy=\(UserDefaults.standard.string(forKey: "pinpadId") ?? "nil")")
+                if isMiniApp13 {
+                       migratePickupLocationOnce()
+                   }
+                cashPointMode = true
+                  UserDefaults.standard.set(true, forKey: AppSettings.Key.cashPointMode) // optional safety
+                  UserDefaults.standard.synchronize() // optional, usually not needed
                 clearSavedContactAndService()
                 let sid = UserDefaults.standard.string(forKey: "shopId") ?? "12"
                    if let cfg = loadSavedPrinters(shopId: sid) {
@@ -4868,9 +5907,17 @@ struct CashPointView: View {
                             let idx = api.items.firstIndex(where: { $0.id == item.id }) ?? Int.max
                             return (activeRank, idx, item.name)
                         }
-
+                        /*
                         frozenOrderIds = base
                             .sorted { sortKeyActiveFirst($0) < sortKeyActiveFirst($1) }
+                            .map(\.id)
+                         */
+                        frozenOrderIds = base
+                            .sorted { lhs, rhs in
+                                let li = api.items.firstIndex(where: { $0.id == lhs.id }) ?? Int.max
+                                let ri = api.items.firstIndex(where: { $0.id == rhs.id }) ?? Int.max
+                                return li < ri
+                            }
                             .map(\.id)
 
                     } else {
@@ -4896,6 +5943,17 @@ struct CashPointView: View {
                 if selectedCategory.isEmpty, let firstCat = api.items.first?.category {
                     selectedCategory = firstCat
                 }
+            }
+            .sheet(isPresented: $showLogsViewer) {
+                PrintLogsViewerSheet()
+            }
+            .fullScreenCover(isPresented: $showAdminsDevices) {
+                AdminsDevicesView(
+                    miniAppId: resolvedMiniAppId,
+                    canRevoke: canRevokeAdmins,
+                    onClose: { showAdminsDevices = false }
+                )
+                .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
             }
             .fullScreenCover(isPresented: $showEODWizard) {
                 EODWizardView(
@@ -5008,7 +6066,8 @@ struct CashPointView: View {
                         showOrdersAdmin = false
                     }
                 )
-                .environment(\.isRtl, isRtl)
+                .environment(\.isRtl, true)                      // ✅ your custom env key
+                   .environment(\.layoutDirection, .rightToLeft)
             }
             .sheet(isPresented: $showBasketSheetPhone) {
                 NavigationStack {
@@ -5264,44 +6323,175 @@ struct CashPointView: View {
                     draft: draft,
                     mode: draft.productId == nil ? .create : .edit,
                     categories: categories.filter { $0 != "✏️ הערות" },
+                    allProducts: api.items,
                     onSave: { updatedDraft in
                         applyAdminSave(updatedDraft)
                     },
-                    onDelete: {
+                    onArchive: {
                         guard let pid = draft.productId else { return }
 
-                        let miniId = Int(UserDefaults.standard.string(forKey: "shopId") ?? "0") ?? 0
-                        guard miniId > 0 else {
-                            print("❌ onDelete: missing miniAppId/shopId")
-                            return
-                        }
+                        let miniId =
+                            UserDefaults.standard.integer(forKey: "miniAppId") > 0
+                            ? UserDefaults.standard.integer(forKey: "miniAppId")
+                            : (Int(UserDefaults.standard.string(forKey: "shopId") ?? "0") ?? 0)
 
-                        if let idx = api.items.firstIndex(where: { $0.id == pid }) {
-                            api.items.remove(at: idx)
+                        guard miniId > 0 else {
+                            print("❌ onArchive: missing miniAppId/shopId")
+                            return
                         }
 
                         let base = UserDefaults.standard.string(forKey: "apiBase") ?? "https://minis.studio"
                         guard let url = URL(string: "\(base)/api/products/\(pid)/archive") else { return }
+
                         let debugCurl = """
                         curl -X POST "\(base)/api/products/\(pid)/archive" \\
                           -H "Content-Type: application/json" \\
-                          -d '{ "miniAppId": \(miniId) }'
+                          -d '{ "miniAppId": \(miniId), "mode": "archive" }'
                         """
-                        print("🔎 Archive DEBUG CURL:\n\(debugCurl)")
-                        struct ArchiveBody: Encodable { let miniAppId: Int }
+                        print("🔎 ARCHIVE DEBUG CURL:\n\(debugCurl)")
+
+                        struct ArchiveBody: Encodable {
+                            let miniAppId: Int
+                            let mode: String
+                        }
 
                         var req = URLRequest(url: url)
                         req.httpMethod = "POST"
                         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                        req.httpBody = try? JSONEncoder().encode(ArchiveBody(miniAppId: miniId))
+                        req.httpBody = try? JSONEncoder().encode(
+                            ArchiveBody(miniAppId: miniId, mode: "archive")
+                        )
 
                         Task {
                             do {
-                                let (_, resp) = try await URLSession.shared.data(for: req)
+                                let (data, resp) = try await URLSession.shared.data(for: req)
                                 let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
-                                print("🗑️ Archive product \(pid) (miniAppId \(miniId)) → HTTP \(code)")
+                                let text = String(data: data, encoding: .utf8) ?? ""
+
+                                print("📦 Product \(pid) mode=archive (miniAppId \(miniId)) → HTTP \(code)")
+                                print("📦 Response:", text)
+
+                                if (200...299).contains(code) {
+                                    await MainActor.run {
+                                        if let idx = api.items.firstIndex(where: { $0.id == pid }) {
+                                            api.items.remove(at: idx)
+                                        }
+                                        safeReloadMenu(reason: "archive product")
+                                    }
+                                }
                             } catch {
                                 print("❌ Archive error:", error.localizedDescription)
+                            }
+                        }
+                    },
+                    onRemoveFromMini: {
+                        guard let pid = draft.productId else { return }
+
+                        let miniId =
+                            UserDefaults.standard.integer(forKey: "miniAppId") > 0
+                            ? UserDefaults.standard.integer(forKey: "miniAppId")
+                            : (Int(UserDefaults.standard.string(forKey: "shopId") ?? "0") ?? 0)
+
+                        guard miniId > 0 else {
+                            print("❌ onRemoveFromMini: missing miniAppId/shopId")
+                            return
+                        }
+
+                        let base = UserDefaults.standard.string(forKey: "apiBase") ?? "https://minis.studio"
+                        guard let url = URL(string: "\(base)/api/products/\(pid)/archive") else { return }
+
+                        let debugCurl = """
+                        curl -X POST "\(base)/api/products/\(pid)/archive" \\
+                          -H "Content-Type: application/json" \\
+                          -d '{ "miniAppId": \(miniId), "mode": "remove" }'
+                        """
+                        print("🔎 REMOVE DEBUG CURL:\n\(debugCurl)")
+
+                        struct ArchiveBody: Encodable {
+                            let miniAppId: Int
+                            let mode: String
+                        }
+
+                        var req = URLRequest(url: url)
+                        req.httpMethod = "POST"
+                        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                        req.httpBody = try? JSONEncoder().encode(
+                            ArchiveBody(miniAppId: miniId, mode: "remove")
+                        )
+
+                        Task {
+                            do {
+                                let (data, resp) = try await URLSession.shared.data(for: req)
+                                let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
+                                let text = String(data: data, encoding: .utf8) ?? ""
+
+                                print("🗑️ Product \(pid) mode=remove (miniAppId \(miniId)) → HTTP \(code)")
+                                print("🗑️ Response:", text)
+
+                                if (200...299).contains(code) {
+                                    await MainActor.run {
+                                        if let idx = api.items.firstIndex(where: { $0.id == pid }) {
+                                            api.items.remove(at: idx)
+                                        }
+                                        safeReloadMenu(reason: "remove product from mini")
+                                    }
+                                }
+                            } catch {
+                                print("❌ Remove error:", error.localizedDescription)
+                            }
+                        }
+                    },
+                    onRestore: {
+                        guard let pid = draft.productId else { return }
+
+                        let miniId =
+                            UserDefaults.standard.integer(forKey: "miniAppId") > 0
+                            ? UserDefaults.standard.integer(forKey: "miniAppId")
+                            : (Int(UserDefaults.standard.string(forKey: "shopId") ?? "0") ?? 0)
+
+                        guard miniId > 0 else {
+                            print("❌ onRestore: missing miniAppId/shopId")
+                            return
+                        }
+
+                        let base = UserDefaults.standard.string(forKey: "apiBase") ?? "https://minis.studio"
+                        guard let url = URL(string: "\(base)/api/products/\(pid)/archive") else { return }
+
+                        let debugCurl = """
+                        curl -X POST "\(base)/api/products/\(pid)/archive" \\
+                          -H "Content-Type: application/json" \\
+                          -d '{ "miniAppId": \(miniId), "mode": "restore" }'
+                        """
+                        print("🔎 RESTORE DEBUG CURL:\n\(debugCurl)")
+
+                        struct ArchiveBody: Encodable {
+                            let miniAppId: Int
+                            let mode: String
+                        }
+
+                        var req = URLRequest(url: url)
+                        req.httpMethod = "POST"
+                        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                        req.httpBody = try? JSONEncoder().encode(
+                            ArchiveBody(miniAppId: miniId, mode: "restore")
+                        )
+
+                        Task {
+                            do {
+                                let (data, resp) = try await URLSession.shared.data(for: req)
+                                let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
+                                let text = String(data: data, encoding: .utf8) ?? ""
+
+                                print("↩️ Product \(pid) mode=restore (miniAppId \(miniId)) → HTTP \(code)")
+                                print("↩️ Response:", text)
+
+                                if (200...299).contains(code) {
+                                    await MainActor.run {
+                                        safeReloadMenu(reason: "restore product")
+                                    }
+                                }
+                            } catch {
+                                print("❌ Restore error:", error.localizedDescription)
                             }
                         }
                     },
@@ -5320,9 +6510,21 @@ struct CashPointView: View {
 
                 var initialStatus: [Int: Int] = [:]
                 var initialAdjustments: [Int: Int] = [:]
+                var frozen: [String: Bool] = [:]
 
                 for item in items {
-
+                    
+                    
+                    if let groups = item.modifiers {
+                           for g in groups {
+                               for opt in g.items {
+                                   if (opt.status ?? 1) == 0 {
+                                       let key = freezeKey(productId: item.id, groupTitle: g.title, optionName: opt.name)
+                                       frozen[key] = true
+                                   }
+                               }
+                           }
+                       }
                     if let q = item.stockQuantity {
                         // ✅ stockQuantity is the truth (including 0)
                         initialAdjustments[item.id] = max(q, 0)
@@ -5338,7 +6540,7 @@ struct CashPointView: View {
                         initialStatus[item.id] = 1
                     }
                 }
-
+                localFrozenOverrides = frozen
                 // ✅ sync ON/OFF immediately
                 stockToggles.forceServerStatus(initialStatus)
 
@@ -5811,11 +7013,29 @@ struct CashPointView: View {
     private func stableIndex(_ item: ShellMenuItem) -> Int {
         api.items.firstIndex(where: { $0.id == item.id }) ?? Int.max
     }
-    
+    /*
     private func productSortKey(_ item: ShellMenuItem) -> (Int, Int, String) {
         let isActive = stockToggles.isOn(item.id)
         let activeRank = isActive ? 0 : 1
         return (activeRank, stableIndex(item), item.name)
+    }
+    */
+    private func productSortKey(_ item: ShellMenuItem) -> (Int, Int, String) {
+        // MiniApp 12 only: active products first, frozen/out-of-stock at bottom
+        if resolvedMiniAppId == 12 {
+            let isActive: Bool = {
+                if let q = stockAdjustments[item.id] {
+                    return q > 0          // 0 => bottom
+                }
+                return stockToggles.isOn(item.id) // fallback
+            }()
+
+            let activeRank = isActive ? 0 : 1
+            return (activeRank, stableIndex(item), item.name)
+        }
+
+        // Other minis: keep normal manual/category order
+        return (0, stableIndex(item), item.name)
     }
     
     private func addToBasket(item: ShellMenuItem, quantity: Int, subtitle: String?, unitPrice: Double) {
@@ -6707,6 +7927,7 @@ struct CashPointView: View {
     struct BasketBar: View {
         @Environment(\.isRtl) private var isRtl
         @Environment(\.currency) private var currency
+        @Environment(\.colorScheme) private var colorScheme   // ✅ NEW
 
         let isTeamTabMode: Bool
         let teamTitle: String?
@@ -6714,7 +7935,7 @@ struct CashPointView: View {
         let totalQuantity: Int
         let totalPrice: Double
 
-        let onBack: () -> Void      // ✅ NEW
+        let onBack: () -> Void
         let onTap: () -> Void
 
         private var teamButtonTitle: String {
@@ -6724,28 +7945,29 @@ struct CashPointView: View {
             return (isRtl ? "שולחן " : "Table ") + raw
         }
 
+        // ✅ Dark mode -> white pill with black text
+        private var barBackground: Color { colorScheme == .dark ? .white : .black }
+        private var barForeground: Color { colorScheme == .dark ? .black : .white }
+
+        // Badge invert (so it always pops)
+        private var badgeBackground: Color { colorScheme == .dark ? .black : .white }
+        private var badgeForeground: Color { colorScheme == .dark ? .white : .black }
+
         var body: some View {
             HStack {
                 Button {
-
-                    // MAIN TAP (opens basket)
                     onTap()
-
                 } label: {
-
                     ZStack {
 
                         // 🔹 TEAM TAB MODE
                         if isTeamTabMode {
 
                             HStack {
-
-                                // ⬅️ BACK / CLEAR BUTTON
                                 Button {
                                     onBack()
-                                }label: {
+                                } label: {
                                     HStack(spacing: 8) {
-
                                         Image(systemName: "chevron.backward")
                                             .font(.system(size: 18, weight: .bold))
 
@@ -6753,26 +7975,24 @@ struct CashPointView: View {
                                             .font(.system(size: 15, weight: .semibold))
                                             .lineLimit(1)
                                     }
-                                    .foregroundColor(.white)
+                                    .foregroundColor(barForeground)
                                     .padding(.horizontal, 14)
                                     .frame(height: 44)
                                     .background(
                                         RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                            .fill(Color.black.opacity(0.9))
+                                            .fill(barBackground.opacity(0.92))
                                     )
                                 }
                                 .buttonStyle(.plain)
 
                                 Spacer()
 
-                                // 🏷️ CENTER TITLE
                                 Text(teamButtonTitle)
                                     .font(.system(size: 18, weight: .semibold))
-                                    .foregroundColor(.white)
+                                    .foregroundColor(barForeground)
 
                                 Spacer()
 
-                                // spacer to keep title perfectly centered
                                 Color.clear
                                     .frame(width: 44, height: 44)
                             }
@@ -6780,51 +8000,51 @@ struct CashPointView: View {
                             .frame(height: 60)
                             .frame(maxWidth: .infinity)
                             .background(
-                                Color.black
+                                barBackground
                                     .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                             )
 
                         } else {
 
-                            // 🔹 NORMAL MODE (unchanged)
+                            // 🔹 NORMAL MODE
                             HStack {
                                 if isRtl {
                                     HStack(spacing: 12) {
                                         Text("\(totalQuantity)")
                                             .font(.system(size: 15, weight: .semibold))
-                                            .foregroundColor(.black)
+                                            .foregroundColor(badgeForeground)
                                             .frame(width: 28, height: 28)
-                                            .background(Color.white)
+                                            .background(badgeBackground)
                                             .clipShape(Circle())
 
                                         Text("הזמנה")
                                             .font(.system(size: 18, weight: .semibold))
-                                            .foregroundColor(.white)
+                                            .foregroundColor(barForeground)
                                     }
 
                                     Spacer()
 
                                     Text(String(format: "\(currency)%.2f", totalPrice))
                                         .font(.system(size: 18, weight: .semibold))
-                                        .foregroundColor(.white)
+                                        .foregroundColor(barForeground)
 
                                 } else {
                                     Text(String(format: "\(currency)%.2f", totalPrice))
                                         .font(.system(size: 18, weight: .semibold))
-                                        .foregroundColor(.white)
+                                        .foregroundColor(barForeground)
 
                                     Spacer()
 
                                     HStack(spacing: 12) {
                                         Text("Order")
                                             .font(.system(size: 18, weight: .semibold))
-                                            .foregroundColor(.white)
+                                            .foregroundColor(barForeground)
 
                                         Text("\(totalQuantity)")
                                             .font(.system(size: 15, weight: .semibold))
-                                            .foregroundColor(.black)
+                                            .foregroundColor(badgeForeground)
                                             .frame(width: 28, height: 28)
-                                            .background(Color.white)
+                                            .background(badgeBackground)
                                             .clipShape(Circle())
                                     }
                                 }
@@ -6833,7 +8053,7 @@ struct CashPointView: View {
                             .frame(height: 60)
                             .frame(maxWidth: .infinity)
                             .background(
-                                Color.black
+                                barBackground
                                     .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                             )
                         }
@@ -7530,78 +8750,87 @@ struct CashPointView: View {
     
     @ViewBuilder
     func optionChip(entry: BasketEntry, group: ModifierGroup, opt: ModifierItem) -> some View {
-        let isSelected =
-            (optionSelections[entry.id] ?? [:])[group.title] == opt.name
+        if isModifierVisible(opt) {
+            let isSelected = (optionSelections[entry.id] ?? [:])[group.title] == opt.name
+            let key = freezeKey(productId: entry.item.id, groupTitle: group.title, optionName: opt.name)
+            let frozenFromJson = (opt.status ?? 1) == 0
+            let frozenLocal = (localFrozenOverrides[key] == true)
+            let isFrozen = frozenFromJson || frozenLocal
+            let shownName = displayModifierName(opt)
 
-        Text(opt.extraPrice > 0
-             ? "\(opt.name) +\(Int(opt.extraPrice))"
-             : opt.name)
-            .font(.system(size: 17, weight: .medium))   // ⬅️ Bigger
+            Text(
+                modifierPriceLabel(opt.extraPrice).isEmpty
+                ? shownName
+                : "\(shownName) \(modifierPriceLabel(opt.extraPrice))"
+            )
+            .font(.system(size: 17, weight: .medium))
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
-            .background(
-                isSelected
-                    ? (colorScheme == .dark ? .white : .black)
-                    : Color(.systemGray5)
-            )
-            .foregroundColor(
-                isSelected
-                    ? (colorScheme == .dark ? .black : .white)
-                    : .primary
-            )
+            .background(isSelected ? (colorScheme == .dark ? .white : .black) : Color(.systemGray5))
+            .foregroundColor(isSelected ? (colorScheme == .dark ? .black : .white) : .primary)
+            .opacity(isFrozen ? 0.35 : 1.0)
+            .overlay(alignment: .topTrailing) {
+                if isFrozen {
+                    Image(systemName: "snowflake")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.secondary)
+                        .padding(.top, 2)
+                        .padding(.trailing, 2)
+                }
+            }
             .clipShape(Capsule())
             .onTapGesture {
+                guard !isFrozen else { Haptics.error(); return }
                 var map = optionSelections[entry.id] ?? [:]
                 map[group.title] = opt.name
                 optionSelections[entry.id] = map
                 updateEntryPricingAndSubtitle(lineId: entry.id)
                 Haptics.light()
             }
+        }
     }
     
-    @ViewBuilder
-    func additionChip(entry: BasketEntry, group: ModifierGroup, opt: ModifierItem) -> some View {
-        let isSelected = (additionSelections[entry.id] ?? []).contains(opt.name)
-
-        Text(opt.extraPrice > 0
-             ? "\(opt.name) +\(Int(opt.extraPrice))"
-             : opt.name)
-            .font(.system(size: 17, weight: .medium))
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-            .background(
-                isSelected
-                    ? (colorScheme == .dark ? .white : .black)
-                    : Color(.systemGray5)
-            )
-            .foregroundColor(
-                isSelected
-                    ? (colorScheme == .dark ? .black : .white)
-                    : .primary
-            )
-            .clipShape(Capsule())
-            .onTapGesture {
-                var set = additionSelections[entry.id] ?? []
-                if isSelected {
-                    set.remove(opt.name)
-                } else {
-                    set.insert(opt.name)
-                }
-                additionSelections[entry.id] = set
-                updateEntryPricingAndSubtitle(lineId: entry.id)
-                Haptics.light()
-            }
+  
+    private func isGroupRequired(_ group: ModifierGroup) -> Bool {
+        (group.selection?.required ?? 0) > 0
     }
+    
     private func basketRow(_ entry: BasketEntry) -> some View {
-        let isLocked   = lockedLineIds.contains(entry.id)
+        let isLocked = lockedLineIds.contains(entry.id)
         let isExpanded = !isLocked && expandedBasketLineId == entry.id
         let swipeOffset = basketSwipeOffsets[entry.id] ?? 0
-
         let lineTotal = Double(entry.quantity) * entry.unitPrice
+
+        let groups = entry.item.modifiers ?? []
+        let optionsMap = optionSelections[entry.id] ?? [:]
+        let additionsMap = additionSelections[entry.id] ?? [:]
+        let additionsModes = additionGroupModes[entry.id] ?? [:]
+
+        let missingRequiredGroups: Set<String> = {
+            var missing = Set<String>()
+
+            for g in groups where g.type == .options {
+                let isRequired = (g.selection?.required ?? 0) > 0
+                guard isRequired else { continue }
+
+                let selectedValue = optionsMap[g.title]?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+                if selectedValue.isEmpty {
+                    missing.insert(g.title)
+                }
+            }
+
+            return missing
+        }()
+
+        let hasMissingRequired = !missingRequiredGroups.isEmpty
 
         let noteBinding = Binding<String>(
             get: {
-                if let existing = noteDrafts[entry.id] { return existing }
+                if let existing = noteDrafts[entry.id] {
+                    return existing
+                }
                 return noteFromSubtitle(entry.subtitle)
             },
             set: { newValue in
@@ -7610,39 +8839,48 @@ struct CashPointView: View {
             }
         )
 
-        // ✅ Sent styling
         let sentOpacity: Double = isLocked ? 0.42 : 1.0
         let sentBg: Color = isLocked ? Color(.systemGray6) : Color.clear
 
-        // Main content for this row
         let content = ZStack(alignment: .topTrailing) {
-
             VStack(alignment: .leading, spacing: 6) {
-                // MAIN ROW
                 HStack(spacing: 8) {
                     VStack(alignment: .leading, spacing: 6) {
                         Text(entry.item.name)
                             .font(.system(size: 20, weight: .medium))
+                            .foregroundColor(hasMissingRequired ? .purple : .primary)
                             .strikethrough(isLocked, color: .secondary)
-                        
+
                         Text(String(format: "\(currency)%.0f", lineTotal))
                             .font(.system(size: 15, weight: .bold))
                             .foregroundColor(.secondary)
                             .scaleEffect(pricePulseLineId == entry.id ? pricePulseScale : 1.0)
 
-
                         if let s = entry.subtitle, !s.isEmpty, !isExpanded {
-                            Text("• " + (cleanModifierSubtitle(s) ?? s))
-                                .padding(.leading, 6)
-                                .font(.system(size: 13))
-                                .foregroundColor(.secondary)
-                                .lineLimit(1)
+
+                            let parts = (cleanModifierSubtitle(s) ?? s)
+                                .components(separatedBy: ",")
+                                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                                .filter { !$0.isEmpty }
+
+                            if !parts.isEmpty {
+                                FlowLayout(data: parts, spacing: 6) { part in
+                                    Text(part)
+                                        .font(.system(size: 15, weight: .semibold))
+                                        .foregroundColor(.primary)
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 6)
+                                        .background(Color(.systemGray5))
+                                        .clipShape(Capsule())
+                                }
+                                .padding(.leading, 4)
+                                .padding(.top, 2)
+                            }
                         }
                     }
 
                     Spacer()
 
-                    // ✅ RIGHT SIDE: line total + qty controls
                     HStack(spacing: 8) {
                         if !isLocked {
                             Button {
@@ -7657,7 +8895,6 @@ struct CashPointView: View {
                         Text("\(entry.quantity)")
                             .font(.system(size: 17, weight: .semibold))
                             .frame(minWidth: 26)
-                            .frame(minWidth: 26)
 
                         if !isLocked {
                             Button {
@@ -7671,13 +8908,12 @@ struct CashPointView: View {
                     }
                 }
 
-                // EXPANDED: modifiers + notes
                 if isExpanded {
-                    if let groups = entry.item.modifiers, !groups.isEmpty {
+                    if !groups.isEmpty {
                         VStack(alignment: .leading, spacing: 12) {
+                            ForEach(groups.indices, id: \.self) { index in
+                                let g = groups[index]
 
-                            // 🔹 Separator BETWEEN modifier groups
-                            ForEach(Array(groups.enumerated()), id: \.element.id) { index, g in
                                 if index > 0 {
                                     Rectangle()
                                         .fill(Color.black.opacity(0.06))
@@ -7688,138 +8924,237 @@ struct CashPointView: View {
                                 VStack(alignment: .leading, spacing: 6) {
                                     Text(g.title)
                                         .font(.system(size: 14, weight: .semibold))
+                                        .foregroundColor(missingRequiredGroups.contains(g.title) ? .purple : .primary)
 
                                     switch g.type {
                                     case .options:
-                                        if g.items.count > 3 {
-                                            let rowStarts = Array(stride(from: 0, to: g.items.count, by: 3))
+                                        VStack(alignment: .leading, spacing: 8) {
 
-                                            VStack(alignment: isRtl ? .leading : .trailing, spacing: 8) {
-                                                ForEach(rowStarts, id: \.self) { start in
-                                                    let end = min(start + 3, g.items.count)
-                                                    let rowItems = Array(g.items[start..<end])
+                                            FlowLayout(data: g.items, spacing: 8) { opt in
+                                                optionChip(entry: entry, group: g, opt: opt)
+                                            }
 
-                                                    HStack(spacing: 8) {
-                                                        if !isRtl { Spacer() }
-                                                        ForEach(rowItems) { opt in
-                                                            optionChip(entry: entry, group: g, opt: opt)
-                                                        }
-                                                        if isRtl { Spacer() }
-                                                    }
-                                                }
-                                            }
-                                        } else {
-                                            HStack(spacing: 8) {
-                                                if !isRtl { Spacer() }
-                                                ForEach(g.items) { opt in
-                                                    optionChip(entry: entry, group: g, opt: opt)
-                                                }
-                                                if isRtl { Spacer() }
-                                            }
-                                            .frame(maxWidth: .infinity,
-                                                   alignment: isRtl ? .leading : .trailing)
                                         }
+                                        .frame(maxWidth: .infinity, alignment: isRtl ? .leading : .trailing)
+                                        .padding(10)
+                                        .background(
+                                            RoundedRectangle(cornerRadius: 12)
+                                                .fill(missingRequiredGroups.contains(g.title) ? Color.purple.opacity(0.06) : Color.clear)
+                                        )
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 12)
+                                                .stroke(
+                                                    missingRequiredGroups.contains(g.title) ? Color.purple.opacity(0.35) : Color.clear,
+                                                    lineWidth: 1
+                                                )
+                                        )
 
                                     case .additions:
-                                        Group {
-                                            let items = g.items
-                                            let first = items.first
-                                            let rest  = Array(items.dropFirst())
+                                        let selectedMode = additionsModes[g.title] ?? .with
+                                        let groupSelections = additionsMap[g.title] ?? [:]
+                                        let selectedSetForCurrentMode = groupSelections[selectedMode] ?? []
 
-                                            VStack(alignment: isRtl ? .leading : .trailing, spacing: 8) {
+                                        let withItems = Array(groupSelections[.with] ?? []).sorted()
+                                        let withoutItems = Array(groupSelections[.without] ?? []).sorted()
+                                        let sideItems = Array(groupSelections[.side] ?? []).sorted()
 
-                                                // ✅ Row 1: FIRST addition only
-                                                if let first {
-                                                    HStack(spacing: 8) {
-                                                        if !isRtl { Spacer() }
+                                        let withPills = withItems.map { "עם \($0)" }
+                                        let withoutPills = withoutItems.map { "בלי \($0)" }
+                                        let sidePills = sideItems.map { "\($0) בצד" }
 
-                                                        let isSelected =
-                                                        (additionSelections[entry.id] ?? []).contains(first.name)
+                                        let order = additionOrder[entry.id] ?? []
 
-                                                        Text(first.extraPrice > 0
-                                                             ? "\(first.name) +\(Int(first.extraPrice))"
-                                                             : first.name)
+                                        let summaryPills = order.compactMap { name -> String? in
+                                            if additionsMap[g.title]?[.with]?.contains(name) == true {
+                                                return "עם \(name)"
+                                            }
+                                            if additionsMap[g.title]?[.without]?.contains(name) == true {
+                                                return "בלי \(name)"
+                                            }
+                                            if additionsMap[g.title]?[.side]?.contains(name) == true {
+                                                return "\(name) בצד"
+                                            }
+                                            return nil
+                                        }
+
+                                        VStack(alignment: .leading, spacing: 10) {
+                                            HStack(spacing: 8) {
+                                                if !isRtl { Spacer() }
+
+                                                additionModeChip(
+                                                    title: "עם",
+                                                    selected: selectedMode == .with
+                                                ) {
+                                                    var map = additionGroupModes[entry.id] ?? [:]
+                                                    map[g.title] = .with
+                                                    additionGroupModes[entry.id] = map
+                                                    Haptics.light()
+                                                }
+
+                                                additionModeChip(
+                                                    title: "בלי",
+                                                    selected: selectedMode == .without
+                                                ) {
+                                                    var map = additionGroupModes[entry.id] ?? [:]
+                                                    map[g.title] = .without
+                                                    additionGroupModes[entry.id] = map
+                                                    Haptics.light()
+                                                }
+
+                                                additionModeChip(
+                                                    title: "בצד",
+                                                    selected: selectedMode == .side
+                                                ) {
+                                                    var map = additionGroupModes[entry.id] ?? [:]
+                                                    map[g.title] = .side
+                                                    additionGroupModes[entry.id] = map
+                                                    Haptics.light()
+                                                }
+
+                                                if isRtl { Spacer() }
+                                            }
+
+                                            if !summaryPills.isEmpty {
+                                                FlowLayout(data: summaryPills, spacing: 8) { text in
+                                                    Text(text)
+                                                        .font(.system(size: 15, weight: .semibold))
+                                                        .foregroundColor(.primary)
+                                                        .padding(.horizontal, 10)
+                                                        .padding(.vertical, 6)
+                                                        .background(Color.white.opacity(0.15))
+                                                        .clipShape(Capsule())
+                                                }
+                                            }
+                                            let rowStarts = Array(stride(from: 0, to: g.items.count, by: 3))
+
+                                            ForEach(rowStarts, id: \.self) { start in
+                                                let end = min(start + 3, g.items.count)
+                                                let rowItems = Array(g.items[start..<end])
+
+                                                HStack(spacing: 8) {
+                                                    if !isRtl { Spacer() }
+
+                                                    ForEach(rowItems.filter { isModifierVisible($0) }) { opt in
+                                                        let isSelected = selectedSetForCurrentMode.contains(opt.name)
+                                                        let key = freezeKey(productId: entry.item.id, groupTitle: g.title, optionName: opt.name)
+                                                        let frozenFromJson = (opt.status ?? 1) == 0
+                                                        let frozenLocal = (localFrozenOverrides[key] == true)
+                                                        let isFrozen = frozenFromJson || frozenLocal
+
+                                                        let shownName = displayModifierName(opt)
+
+                                                        Text(
+                                                            modifierPriceLabel(opt.extraPrice).isEmpty
+                                                            ? shownName
+                                                            : "\(shownName) \(modifierPriceLabel(opt.extraPrice))"
+                                                        )
                                                         .font(.system(size: 17, weight: .medium))
                                                         .padding(.horizontal, 16)
                                                         .padding(.vertical, 8)
                                                         .background(
                                                             isSelected
-                                                                ? (colorScheme == .dark ? .white : .black)
-                                                                : Color(.systemGray5)
+                                                            ? (colorScheme == .dark ? .white : .black)
+                                                            : Color(.systemGray5)
                                                         )
                                                         .foregroundColor(
                                                             isSelected
-                                                                ? (colorScheme == .dark ? .black : .white)
-                                                                : .primary
+                                                            ? (colorScheme == .dark ? .black : .white)
+                                                            : .primary
                                                         )
+                                                        .opacity(isFrozen ? 0.35 : 1.0)
+                                                        .overlay(alignment: .topTrailing) {
+                                                            if isFrozen {
+                                                                Image(systemName: "snowflake")
+                                                                    .font(.system(size: 10, weight: .bold))
+                                                                    .foregroundColor(.secondary)
+                                                                    .padding(.top, 2)
+                                                                    .padding(.trailing, 2)
+                                                            }
+                                                        }
                                                         .clipShape(Capsule())
                                                         .onTapGesture {
-                                                            // ✅ Default behaves like "None": selects ONLY itself (clears others)
-                                                            additionSelections[entry.id] = [first.name]
+                                                            guard !isFrozen else {
+                                                                Haptics.error()
+                                                                return
+                                                            }
+
+                                                            var lineMap = additionSelections[entry.id] ?? [:]
+                                                            var groupMap = lineMap[g.title] ?? [
+                                                                .with: [],
+                                                                .without: [],
+                                                                .side: []
+                                                            ]
+
+                                                            if isSelected {
+                                                                groupMap[selectedMode]?.remove(opt.name)
+
+                                                                additionOrder[entry.id]?.removeAll { $0 == opt.name }
+
+                                                            } else {
+                                                                groupMap[.with]?.remove(opt.name)
+                                                                groupMap[.without]?.remove(opt.name)
+                                                                groupMap[.side]?.remove(opt.name)
+
+                                                                groupMap[selectedMode, default: []].insert(opt.name)
+
+                                                                var order = additionOrder[entry.id] ?? []
+                                                                order.removeAll { $0 == opt.name }
+                                                                order.append(opt.name)            // ⭐ preserves tap order
+                                                                additionOrder[entry.id] = order
+                                                            }
+
+                                                            lineMap[g.title] = groupMap
+                                                            additionSelections[entry.id] = lineMap
+
                                                             updateEntryPricingAndSubtitle(lineId: entry.id)
                                                             Haptics.light()
                                                         }
+                                                        .contextMenu {
+                                                            Button(isFrozen ? "הפשר" : "הקפא") {
+                                                                let targetEnabled = isFrozen
+                                                                let optimisticFrozen = !targetEnabled
 
-                                                        if isRtl { Spacer() }
-                                                    }
-                                                }
+                                                                localFrozenOverrides[freezeKey(
+                                                                    productId: entry.item.id,
+                                                                    groupTitle: g.title,
+                                                                    optionName: opt.name
+                                                                )] = optimisticFrozen
 
-                                                // ✅ Row 2+: the rest in rows of 3
-                                                if !rest.isEmpty {
-                                                    let rowStarts = Array(stride(from: 0, to: rest.count, by: 3))
+                                                                Haptics.light()
 
-                                                    ForEach(rowStarts, id: \.self) { start in
-                                                        let end = min(start + 3, rest.count)
-                                                        let rowItems = Array(rest[start..<end])
+                                                                Task {
+                                                                    let ok = await ModifierStatusAPI.setItemStatus(
+                                                                        productId: entry.item.id,
+                                                                        groupId: g.groupId,
+                                                                        title: g.title,
+                                                                        optionName: opt.name,
+                                                                        enabled: targetEnabled
+                                                                    )
 
-                                                        HStack(spacing: 8) {
-                                                            if !isRtl { Spacer() }
-
-                                                            ForEach(rowItems) { opt in
-                                                                let isSelected =
-                                                                (additionSelections[entry.id] ?? []).contains(opt.name)
-
-                                                                Text(opt.extraPrice > 0
-                                                                     ? "\(opt.name) +\(Int(opt.extraPrice))"
-                                                                     : opt.name)
-                                                                .font(.system(size: 17, weight: .medium))
-                                                                .padding(.horizontal, 16)
-                                                                .padding(.vertical, 8)
-                                                                .background(
-                                                                    isSelected
-                                                                        ? (colorScheme == .dark ? .white : .black)
-                                                                        : Color(.systemGray5)
-                                                                )
-                                                                .foregroundColor(
-                                                                    isSelected
-                                                                        ? (colorScheme == .dark ? .black : .white)
-                                                                        : .primary
-                                                                )
-                                                                .clipShape(Capsule())
-                                                                .onTapGesture {
-                                                                    var set = additionSelections[entry.id] ?? []
-
-                                                                    // ✅ If you pick any non-default, remove the default
-                                                                    set.remove(first?.name ?? "")
-
-                                                                    if isSelected {
-                                                                        set.remove(opt.name)
-                                                                    } else {
-                                                                        set.insert(opt.name)
+                                                                    await MainActor.run {
+                                                                        if ok {
+                                                                            Haptics.success()
+                                                                            safeReloadMenu(reason: "modifier freeze")
+                                                                        } else {
+                                                                            localFrozenOverrides[freezeKey(
+                                                                                productId: entry.item.id,
+                                                                                groupTitle: g.title,
+                                                                                optionName: opt.name
+                                                                            )] = frozenFromJson
+                                                                            Haptics.error()
+                                                                        }
                                                                     }
-
-                                                                    additionSelections[entry.id] = set
-                                                                    updateEntryPricingAndSubtitle(lineId: entry.id)
-                                                                    Haptics.light()
                                                                 }
                                                             }
-
-                                                            if isRtl { Spacer() }
                                                         }
+                                                        .environment(\.layoutDirection, .rightToLeft)
                                                     }
+
+                                                    if isRtl { Spacer() }
                                                 }
                                             }
                                         }
+                                        .padding(10)
                                     }
                                 }
                             }
@@ -7832,9 +9167,8 @@ struct CashPointView: View {
                             .font(.system(size: 13, weight: .semibold))
 
                         Button {
-                            let currentText = noteBinding.wrappedValue
                             noteEditingLineId = entry.id
-                            noteEditingText = currentText
+                            noteEditingText = noteBinding.wrappedValue
                         } label: {
                             HStack {
                                 if noteBinding.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -7857,7 +9191,6 @@ struct CashPointView: View {
                 }
             }
 
-            // ✅ Sent badge
             if isLocked {
                 Text(isRtl ? "נשלח" : "Sent")
                     .font(.system(size: 12, weight: .bold))
@@ -7889,8 +9222,6 @@ struct CashPointView: View {
         .offset(x: swipeOffset)
         .contentShape(Rectangle())
         .simultaneousGesture(basketSwipeGesture(for: entry))
-
-        // ✅ KEEP ONLY ONE note sheet (you had it twice)
         .sheet(item: Binding(
             get: { noteEditingLineId.map { NoteEditHandle(id: $0) } },
             set: { handle in noteEditingLineId = handle?.id }
@@ -7911,7 +9242,8 @@ struct CashPointView: View {
             .presentationDragIndicator(.hidden)
         }
         .onTapGesture {
-            guard !isLocked else { return } // ✅ don’t expand sent rows
+            guard !isLocked else { return }
+
             withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                 if expandedBasketLineId == entry.id {
                     expandedBasketLineId = nil
@@ -7921,40 +9253,73 @@ struct CashPointView: View {
             }
         }
         .onAppear {
+            print("🧪 basketRow product =", entry.item.name)
+
+            for g in groups {
+                print("""
+                🧪 group title = \(g.title)
+                   type = \(g.type)
+                   required = \(g.selection?.required ?? -1)
+                   defaultFirst = \(g.selection?.defaultFirst ?? -1)
+                   selected now = \(optionSelections[entry.id]?[g.title] ?? "nil")
+                   items = \(g.items.map(\.name))
+                """)
+            }
+
             if optionSelections[entry.id] == nil {
                 var map = optionsFromSubtitle(entry.subtitle)
 
-                if let groups = entry.item.modifiers, !groups.isEmpty {
-                    for g in groups where g.type == .options {
-                        if map[g.title] == nil {
-                            map[g.title] = g.items.first?.name
-                        }
+                for g in groups where g.type == .options {
+                    if map[g.title] != nil { continue }
+
+                    let isRequired = (g.selection?.required ?? 0) > 0
+
+                    print("🧪 deciding group \(g.title) isRequired=\(isRequired)")
+
+                    if isRequired {
+                        print("🧪 required group -> leave empty")
+                        continue
                     }
-                    optionSelections[entry.id] = map
-                    updateEntryPricingAndSubtitle(lineId: entry.id)
-                } else {
-                    optionSelections[entry.id] = map
+
+                    if let first = g.items.first?.name {
+                        print("🧪 optional group -> default first =", first)
+                        map[g.title] = first
+                    }
                 }
+
+                print("🧪 final initial map =", map)
+
+                optionSelections[entry.id] = map
+                updateEntryPricingAndSubtitle(lineId: entry.id)
             }
 
-            // ✅ ADDITIONS: default-select the first item of EACH additions group
             if additionSelections[entry.id] == nil {
-                var set: Set<String> = []
+                var lineMap: [String: [AdditionMode: Set<String>]] = [:]
 
-                if let groups = entry.item.modifiers {
-                    for g in groups where g.type == .additions {
-                        if let first = g.items.first?.name {
-                            set.insert(first)
-                        }
-                    }
+                for g in groups where g.type == .additions {
+                    lineMap[g.title] = [
+                        .with: [],
+                        .without: [],
+                        .side: []
+                    ]
                 }
 
-                additionSelections[entry.id] = set
-                updateEntryPricingAndSubtitle(lineId: entry.id)   // 👈 THIS fires even when no modifiers
+                additionSelections[entry.id] = lineMap
             }
+
+            if additionGroupModes[entry.id] == nil {
+                var map: [String: AdditionMode] = [:]
+
+                for g in groups where g.type == .additions {
+                    map[g.title] = .with
+                }
+
+                additionGroupModes[entry.id] = map
+            }
+
+            updateEntryPricingAndSubtitle(lineId: entry.id)
         }
     }
-    
     private func freshQuantityInBasket(for item: ShellMenuItem) -> Int {
         basket.values
             .filter { $0.item.id == item.id }
@@ -8074,43 +9439,129 @@ struct CashPointView: View {
 
 
 
-
-
-
-
 struct CashCategoryRail: View {
     let categories: [String]
     let selected: String
     let onTap: (String) -> Void
     let onOrdersTap: () -> Void
 
-    let enableReorder: Bool   // ✅ NEW
+    let enableReorder: Bool
 
     @Binding var draggingCategory: String?
     @Binding var categoryOrder: [String]
+
+    @Binding var renamingCategory: String?
+    @Binding var renamingText: String
+
+    @Binding var draggingProduct: ShellMenuItem?
+
+    let onRenameCommit: (String, String) -> Void
+    let onProductDroppedToCategory: (Int, String) -> Void
     let onReorderCommitted: () -> Void
+
+    @FocusState private var renameFocusedCategory: String?
+
+    private func normalized(_ s: String) -> String {
+        s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func isSpecialCategory(_ cat: String) -> Bool {
+        cat == "✏️ הערות" || cat == "ארכיון"
+    }
+
+    private func startRename(_ cat: String) {
+        guard !isSpecialCategory(cat) else { return }
+        renamingCategory = cat
+        renamingText = cat
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            renameFocusedCategory = cat
+        }
+    }
+
+    private func cancelRename() {
+        renamingCategory = nil
+        renamingText = ""
+        renameFocusedCategory = nil
+    }
+
+    private func commitRename(for cat: String) {
+        let oldValue = normalized(cat)
+        let newValue = normalized(renamingText)
+
+        renamingCategory = nil
+        renameFocusedCategory = nil
+
+        guard !oldValue.isEmpty, !newValue.isEmpty, oldValue != newValue else { return }
+        onRenameCommit(oldValue, newValue)
+    }
 
     var body: some View {
         ScrollView {
             VStack(spacing: 8) {
                 ForEach(categories, id: \.self) { cat in
-                    let row = HStack {
-                        Text(cat)
-                            .font(.system(size: 17, weight: .medium))
-                            .foregroundColor(cat == selected ? .white : .primary)
+                    let isSelected = (cat == selected)
+                    let isRenaming = (renamingCategory == cat)
+                    let isSpecial = isSpecialCategory(cat)
+
+                    let row =
+                        HStack {
+                            HStack(spacing: 6) {
+                                if cat == "ארכיון" {
+                                    Image(systemName: "archivebox.fill")
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .foregroundColor(isSelected ? .white : .primary)
+                                }
+
+                                if isRenaming {
+                                    TextField("", text: $renamingText)
+                                        .font(.system(size: 17, weight: .medium))
+                                        .foregroundColor(isSelected ? .white : .primary)
+                                        .textFieldStyle(.plain)
+                                        .submitLabel(.done)
+                                        .focused($renameFocusedCategory, equals: cat)
+                                        .onSubmit {
+                                            commitRename(for: cat)
+                                        }
+                                } else {
+                                    Text(cat)
+                                        .font(.system(size: 17, weight: .medium))
+                                        .foregroundColor(isSelected ? .white : .primary)
+                                        .lineLimit(1)
+                                }
+                            }
                             .padding(.vertical, 10)
                             .padding(.horizontal, 12)
-                        Spacer()
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(
-                        RoundedRectangle(cornerRadius: 12)
-                            .fill(cat == selected ? .black : Color.clear)
-                    )
-                    .contentShape(Rectangle())
-                    .onTapGesture { onTap(cat) }
 
-                    if enableReorder {
+                            Spacer()
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            RoundedRectangle(cornerRadius: 12)
+                                .fill(isSelected ? .black : Color.clear)
+                        )
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            if renamingCategory != nil {
+                                cancelRename()
+                            }
+                            onTap(cat)
+                        }
+                        .onTapGesture(count: 2) {
+                            if !isRenaming {
+                                startRename(cat)
+                            }
+                        }
+                        .onDrop(
+                            of: [.text],
+                            delegate: CashPointView.ProductToCategoryDropDelegate(
+                                targetCategory: cat,
+                                draggingProduct: $draggingProduct,
+                                onMove: onProductDroppedToCategory
+                            )
+                        )
+
+                    if enableReorder && !isRenaming && !isSpecial {
                         row
                             .onDrag {
                                 draggingCategory = cat
@@ -8136,6 +9587,8 @@ struct CashCategoryRail: View {
         }
         .background(Color(.systemGray6))
     }
+    
+    
 }
 
 
@@ -8144,10 +9597,9 @@ struct CashProductTile: View {
     let item: ShellMenuItem
     let quantityInBasket: Int?
     let isOutOfStock: Bool
+    let isArchived: Bool
 
     var body: some View {
-        let inBasket = (quantityInBasket ?? 0) > 0
-
         ZStack(alignment: .topTrailing) {
 
             VStack(alignment: .leading, spacing: 6) {
@@ -8155,8 +9607,10 @@ struct CashProductTile: View {
                     Text(item.name)
                         .font(.system(size: 20, weight: .regular))
                         .lineLimit(2)
+
                     Spacer()
                 }
+
                 Text(item.priceLabel)
                     .font(.system(size: 14, weight: .medium))
                     .foregroundColor(.secondary)
@@ -8164,7 +9618,6 @@ struct CashProductTile: View {
                 if let qty = quantityInBasket, qty > 0 {
                     Text("\(qty)x")
                         .font(.system(size: 18, weight: .bold))
-                       
                 }
             }
             .padding(10)
@@ -8177,19 +9630,30 @@ struct CashProductTile: View {
                 RoundedRectangle(cornerRadius: 16)
                     .stroke(Color.black.opacity(0.05), lineWidth: 1)
             )
-            .opacity(isOutOfStock ? 0.4 : 1.0)
+            .opacity(isOutOfStock ? 0.4 : (isArchived ? 0.72 : 1.0))
 
-            // 🔴 OUT OF STOCK BADGE
-            if isOutOfStock {
-                Text("")
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundColor(.gray)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                //.background(Color.gray)
-                    .clipShape(Capsule())
-                    .padding(6)
+            VStack(alignment: .trailing, spacing: 6) {
+                if isArchived {
+                    Text("ארכיון")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Color(.systemGray5))
+                        .clipShape(Capsule())
+                }
+
+                if isOutOfStock {
+                    Text("אזל")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color(.systemGray5))
+                        .clipShape(Capsule())
+                }
             }
+            .padding(6)
         }
     }
 }

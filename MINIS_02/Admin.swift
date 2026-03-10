@@ -1,7 +1,12 @@
 import SwiftUI
 import Kingfisher
 
-// MARK: - A mutable draft of a product used for editing/creating
+import UniformTypeIdentifiers
+
+extension UTType {
+    static let minisModifierGroup = UTType(exportedAs: "com.minis.modifier-group")
+    static let minisModifierItem  = UTType(exportedAs: "com.minis.modifier-item")
+}
 
 struct AdminProductDraft: Identifiable {
     let id = UUID()
@@ -13,24 +18,27 @@ struct AdminProductDraft: Identifiable {
     var description: String
     var imageURL: String
     var modifierGroups: [AdminModifierGroupDraft]
-    var legacyPrinter: String = "Bar"   // Bar / Kitchen / Bakery
-    // ✅ PRIMARY (single route)
+    var legacyPrinter: String = "Bar"
     var printerId: String
-
-    // ✅ OPTIONAL (multi route) — checkboxes
     var printerIds: Set<String> = []
-
-    // ✅ NEW: ask for phone
     var isPhoneRequired: Bool = false
+    var isArchived: Bool = false
+    // ✅ NEW BUNDLE FIELDS
+    var bundleEnabled: Bool = false
+    var bundleSetProductIdsText: String = ""   // "834,835"
+    var bundleMaxFreeQty: Int = 1
+    var bundleStrategy: String = "most_expensive"
 }
 
 // MARK: - Modifier drafts
 
 struct AdminModifierGroupDraft: Identifiable, Hashable {
-    enum Kind: String, CaseIterable, Identifiable {
+    enum Kind: String, CaseIterable, Identifiable, Codable {   // 👈 ADD Codable
         case options
         case additions
+
         var id: String { rawValue }
+
         var title: String {
             switch self {
             case .options:   return "Options"
@@ -43,12 +51,16 @@ struct AdminModifierGroupDraft: Identifiable, Hashable {
     var title: String
     var kind: Kind
     var items: [AdminModifierItemDraft]
+    var defaultFirst: Bool = false
 }
 
 struct AdminModifierItemDraft: Identifiable, Hashable {
     var id = UUID()
     var name: String
-    var extraPriceText: String   // text field backing for price
+    var extraPriceText: String
+    var linkedProductId: Int? = nil
+    var useLinkedName: Bool = true
+    var useLinkedPrice: Bool = false
 }
 
 struct AdminProductEditorMode {
@@ -58,26 +70,137 @@ struct AdminProductEditorMode {
     }
 }
 
-// MARK: - Admin Product Editor
+struct ModifierGroupLibraryItem: Identifiable, Hashable {
+    let id: String                 // stable dedupe key
+    let title: String
+    let kind: AdminModifierGroupDraft.Kind
+    let items: [AdminModifierItemDraft]
+    let sourceProductName: String
+}
+
 
 struct AdminProductEditorView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.isRtl)   private var isRtl
-
+    @State private var showDeleteAlert = false
+    @State private var showArchiveAlert = false
+    @State private var showRemoveAlert = false
     @State private var draft: AdminProductDraft
     @State private var lastAddedGroupId: AdminModifierGroupDraft.ID?
-
-    // 👇 keep a live local preview of the picked image
+    @State private var draggingGroupId: UUID? = nil
+    @State private var showTemplatesAdmin = false
     @State private var pickedImage: UIImage? = nil
     @State private var showImagePicker = false
     @State private var isUploadingImage = false
+    @State private var pendingModifierLink: (groupId: UUID, itemId: UUID)? = nil
+    @State private var showModifierProductPicker = false
+    @State private var modifierProductSearchText: String = ""
+    @StateObject private var templatesStore = ModifierTemplatesStore.shared
+    @State private var showTemplatesPicker = false
+    
+    // ✅ NEW: bundle picker
+    @State private var showBundlePicker = false
+    @State private var bundleSearchText: String = ""
 
+    // ✅ NEW: all products for bundle search (pass api.items from CashPointView)
+    let allProducts: [ShellMenuItem]
+    @State private var showModifierLibraryPicker = false
+    @State private var modifierLibrarySearchText: String = ""
     private let mode: AdminProductEditorMode.Mode
     private let onSave: (AdminProductDraft) -> Void
-    private let onDelete: (() -> Void)?
+    private let onArchive: (() -> Void)?
+    private let onRemoveFromMini: (() -> Void)?
+    private let onRestore: (() -> Void)?
     private let onChangeImage: (() -> Void)?
+
     private let categories: [String]
-   
+
+    
+    private func normalizeModifierTitle(_ s: String) -> String {
+        s.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+    }
+
+    private func normalizeModifierItemName(_ s: String) -> String {
+        s.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+    }
+
+    private func modifierLibraryKey(
+        title: String,
+        kind: AdminModifierGroupDraft.Kind,
+        items: [AdminModifierItemDraft]
+    ) -> String {
+        let itemKey = items
+            .map {
+                let price = Double($0.extraPriceText.replacingOccurrences(of: ",", with: ".")) ?? 0
+                return "\(normalizeModifierItemName($0.name)):\(String(format: "%.2f", price))"
+            }
+            .joined(separator: "|")
+
+        return "\(normalizeModifierTitle(title))__\(kind.rawValue)__\(itemKey)"
+    }
+
+    private var modifierLibraryGroups: [ModifierGroupLibraryItem] {
+        var seen = Set<String>()
+        var out: [ModifierGroupLibraryItem] = []
+
+        for product in allProducts {
+            guard let groups = product.modifiers, !groups.isEmpty else { continue }
+
+            for g in groups {
+                let kind: AdminModifierGroupDraft.Kind = (g.type == .options) ? .options : .additions
+
+                let items: [AdminModifierItemDraft] = g.items.map { opt in
+                    AdminModifierItemDraft(
+                        name: opt.name,
+                        extraPriceText: String(format: "%.2f", opt.extraPrice)
+                    )
+                }
+
+                let cleanTitle = g.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard cleanTitle.count >= 2 else { continue }
+                guard !items.isEmpty else { continue }
+
+                let key = modifierLibraryKey(title: cleanTitle, kind: kind, items: items)
+                guard seen.insert(key).inserted else { continue }
+
+                out.append(
+                    ModifierGroupLibraryItem(
+                        id: key,
+                        title: cleanTitle,
+                        kind: kind,
+                        items: items,
+                        sourceProductName: product.name
+                    )
+                )
+            }
+        }
+
+        return out.sorted {
+            if $0.title != $1.title { return $0.title < $1.title }
+            return $0.sourceProductName < $1.sourceProductName
+        }
+    }
+    
+    private func addLibraryModifierGroup(_ item: ModifierGroupLibraryItem) {
+        let copied = AdminModifierGroupDraft(
+            id: UUID(),
+            title: item.title,
+            kind: item.kind,
+            items: item.items.map {
+                AdminModifierItemDraft(
+                    id: UUID(),
+                    name: $0.name,
+                    extraPriceText: $0.extraPriceText
+                )
+            }
+        )
+
+        draft.modifierGroups.append(copied)
+        lastAddedGroupId = copied.id
+        Haptics.light()
+    }
     private func applyLegacyStation(_ s: LegacyStation) {
         draft.legacyPrinter = s.rawValue
 
@@ -92,18 +215,236 @@ struct AdminProductEditorView: View {
         ensurePrinterSelectionNotEmpty()
         syncLegacySegmentFromCurrentSelection()
     }
+
     // ✅ printers config store (UserDefaults-backed)
     @ObservedObject private var printerStore = PrintersConfigStore.shared
 
+    private var mainFieldsSectionWithoutBundle: some View {
+        VStack(alignment: .leading, spacing: 12) {
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(isRtl ? "שם המוצר" : "Name")
+                    .font(.primariesDemi(14))
+                TextField("",
+                          text: $draft.name,
+                          prompt: Text(isRtl ? "שם המוצר" : "Name"))
+                    .font(.custom(primariesFontName, size: 18))
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(isRtl ? "מחיר" : "Price")
+                        .font(.primariesDemi(14))
+                    PriceTextField(text: $draft.priceText)
+                        .frame(height: 36)
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(isRtl ? "קטגוריה" : "Category")
+                        .font(.primariesDemi(14))
+
+                    CategoryPickerField(
+                        isRtl: isRtl,
+                        categories: categories,
+                        selected: $draft.category
+                    )
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(isRtl ? "תיאור" : "Description")
+                    .font(.primariesDemi(14))
+                TextField(isRtl ? "תיאור קצר" : "Short description",
+                          text: $draft.description,
+                          axis: .vertical)
+                    .textFieldStyle(.roundedBorder)
+                    .lineLimit(3, reservesSpace: true)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(isRtl ? "פרטים נוספים" : "Extra")
+                    .font(.primariesDemi(14))
+
+                Toggle(isRtl ? "טלפון נדרש" : "Phone required", isOn: $draft.isPhoneRequired)
+                    .font(.system(size: 16, weight: .semibold))
+                    .toggleStyle(.switch)
+                    .tint(.blue)
+            }
+            .padding(.top, 4)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text(isRtl ? "מדפסות" : "Printers")
+                    .font(.primariesDemi(14))
+
+                if activeStations.isEmpty {
+                    Text(isRtl ? "לא הוגדרו מדפסות עדיין" : "No printers configured yet")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.secondary)
+                        .padding(.vertical, 6)
+                } else {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(isRtl ? "בחירה מהירה" : "Quick route")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(.secondary)
+
+                        Picker("", selection: $legacyStation) {
+                            ForEach(LegacyStation.allCases) { s in
+                                Text(s.title(isRtl: isRtl)).tag(s)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .tint(.primary)
+                        .onChange(of: legacyStation) { newValue in
+                            switch newValue {
+                            case .none:
+                                draft.printerId = ""
+                                draft.printerIds = []
+                                draft.legacyPrinter = ""
+
+                            case .bar:
+                                draft.printerId = "s2"
+                                draft.printerIds = ["s2"]
+                                draft.legacyPrinter = "Bar"
+
+                            case .kitchen:
+                                draft.printerId = "s1"
+                                draft.printerIds = ["s1"]
+                                draft.legacyPrinter = "Kitchen"
+
+                            case .bakery:
+                                draft.printerId = "s3"
+                                draft.printerIds = ["s3"]
+                                draft.legacyPrinter = "Bakery"
+                            }
+
+                            Haptics.light()
+                        }
+                    }
+                    .padding(.bottom, 6)
+
+                    if draft.printerId.isEmpty {
+                        Text(isRtl ? "נבחרו: ללא מדפסת" : "Selected: No printer")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(.secondary)
+                            .padding(.top, 2)
+                    } else {
+                        let selectedLabels = activeStations
+                            .filter { draft.printerIds.contains($0.id) }
+                            .map { $0.label }
+
+                        if !selectedLabels.isEmpty {
+                            Text((isRtl ? "נבחרו: " : "Selected: ") + selectedLabels.joined(separator: ", "))
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundColor(.secondary)
+                                .padding(.top, 2)
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    private var bundleSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(isRtl ? "עסקית" : "Bundle")
+                .font(.primariesDemi(14))
+
+           
+            // ✅ ALWAYS SHOW THE BUTTON
+            Button {
+                draft.bundleEnabled = true
+                bundleSearchText = ""
+                showBundlePicker = true
+                Haptics.light()
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "plus.circle.fill")
+                    Text(isRtl ? "הוסף מוצר לעסקית" : "Add product to bundle")
+                        .font(.system(size: 15, weight: .semibold))
+                    Spacer()
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(Color(.systemGray5))
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+            }
+            .buttonStyle(.plain)
+
+            if draft.bundleEnabled {
+                let ids = bundleSelectedIds
+
+                if ids.isEmpty {
+                    Text(isRtl ? "לא נבחרו מוצרים עדיין" : "No products selected yet")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.secondary)
+                } else {
+                    VStack(spacing: 8) {
+                        ForEach(ids, id: \.self) { pid in
+                            HStack(spacing: 10) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(bundleDisplayName(for: pid))
+                                        .font(.system(size: 15, weight: .semibold))
+                                    Text("#\(pid)")
+                                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                        .foregroundColor(.secondary)
+                                }
+
+                                Spacer()
+
+                                Button {
+                                    removeBundleProduct(id: pid)
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.system(size: 18, weight: .bold))
+                                        .foregroundColor(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 10)
+                            .background(Color(.secondarySystemBackground))
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                        }
+                    }
+                }
+
+                HStack(spacing: 12) {
+                    Stepper(value: $draft.bundleMaxFreeQty, in: 1...9) {
+                        Text(isRtl ? "כמות חינם: \(draft.bundleMaxFreeQty)" : "Free qty: \(draft.bundleMaxFreeQty)")
+                            .font(.system(size: 14, weight: .semibold))
+                    }
+                    Spacer()
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(isRtl ? "אסטרטגיה" : "Strategy")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.secondary)
+
+                    Picker("", selection: $draft.bundleStrategy) {
+                        Text(isRtl ? "הכי יקר" : "Most expensive").tag("most_expensive")
+                        Text(isRtl ? "הכי זול" : "Cheapest").tag("cheapest")
+                        Text(isRtl ? "ראשון" : "First added").tag("first_added")
+                    }
+                    .pickerStyle(.segmented)
+                }
+            }
+        }
+        .padding(.vertical, 4)
+    }
     // ✅ KEEP OLD QUICK PICKER (segment) while testing
     private enum LegacyStation: String, CaseIterable, Identifiable {
+        case none = ""
         case bar = "Bar"
         case kitchen = "Kitchen"
         case bakery = "Bakery"
-        var id: String { rawValue }
+
+        var id: String { rawValue + "_\(self.hashValue)" }
 
         func title(isRtl: Bool) -> String {
             switch self {
+            case .none:    return isRtl ? "ללא מדפסת" : "No printer"
             case .bar:     return isRtl ? "בר" : "Bar"
             case .kitchen: return isRtl ? "מטבח" : "Kitchen"
             case .bakery:  return isRtl ? "מאפייה" : "Bakery"
@@ -111,61 +452,190 @@ struct AdminProductEditorView: View {
         }
     }
 
+    private func openModifierProductLink(groupId: UUID, itemId: UUID) {
+        pendingModifierLink = (groupId: groupId, itemId: itemId)
+        modifierProductSearchText = ""
+        showModifierProductPicker = true
+    }
+    
+    private struct ModifierGroupDropDelegate: DropDelegate {
+        let targetId: UUID
+        @Binding var groups: [AdminModifierGroupDraft]
+        @Binding var draggingGroupId: UUID?
+
+        func dropEntered(info: DropInfo) {
+            guard info.hasItemsConforming(to: [UTType.minisModifierGroup]) else { return }
+            guard let dragging = draggingGroupId, dragging != targetId else { return }
+
+            guard let from = groups.firstIndex(where: { $0.id == dragging }),
+                  let to   = groups.firstIndex(where: { $0.id == targetId })
+            else { return }
+
+            withAnimation(.spring(response: 0.22, dampingFraction: 0.85)) {
+                let moved = groups.remove(at: from)
+                groups.insert(moved, at: to)
+            }
+        }
+
+        func performDrop(info: DropInfo) -> Bool {
+            draggingGroupId = nil
+            return true
+        }
+
+        func dropUpdated(info: DropInfo) -> DropProposal? {
+            DropProposal(operation: .move)
+        }
+    }
+    
     @State private var legacyStation: LegacyStation = .bar
 
     init(
         draft: AdminProductDraft,
         mode: AdminProductEditorMode.Mode,
         categories: [String],
+        allProducts: [ShellMenuItem] = [],
         onSave: @escaping (AdminProductDraft) -> Void,
-        onDelete: (() -> Void)? = nil,
+        onArchive: (() -> Void)? = nil,
+        onRemoveFromMini: (() -> Void)? = nil,
+        onRestore: (() -> Void)? = nil,
         onChangeImage: (() -> Void)? = nil
     ) {
-        _draft = State(initialValue: draft)
+        var normalizedDraft = draft
+
+        // ✅ Normalize incoming modifier toggle state from existing saved data
+        normalizedDraft.modifierGroups = normalizedDraft.modifierGroups.map { group in
+            var g = group
+
+            // options only; additions never use this toggle
+            if g.kind == .options {
+                // If the draft was built from DB correctly this will already be right,
+                // but this makes sure the editor state is always consistent.
+                //
+                // TEMP RULE:
+                // required = 0  => toggle ON  => defaultFirst = true
+                // required = 1  => toggle OFF => defaultFirst = false
+                //
+                // Since AdminModifierGroupDraft currently only stores Bool,
+                // we keep whatever came in unless you explicitly want a fallback.
+                // If missing, default to ON.
+                if g.defaultFirst != true && g.defaultFirst != false {
+                    g.defaultFirst = true
+                }
+            } else {
+                g.defaultFirst = false
+            }
+
+            return g
+        }
+
+        _draft = State(initialValue: normalizedDraft)
         self.categories = categories
-        if draft.priceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        self.allProducts = allProducts
+
+        if normalizedDraft.priceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             self._draft.wrappedValue.priceText = "0.0"
         }
 
         self.mode = mode
         self.onSave = onSave
-        self.onDelete = onDelete
+        self.onArchive = onArchive
+        self.onRemoveFromMini = onRemoveFromMini
+        self.onRestore = onRestore
         self.onChangeImage = onChangeImage
     }
-
+    
     var body: some View {
         NavigationStack {
             ScrollViewReader { proxy in
                 List {
                     Section { headerImageSection }
-                    Section { mainFieldsSection }
+                        Section { mainFieldsSectionWithoutBundle }
+                        Section { bundleSection }
+
 
                     Section(
                         header:
-                            HStack {
-                                Text(isRtl ? "תוספות / אפשרויות" : "Options & Extras")
-                                    .font(.primariesDemi(18))
-                                Spacer()
-                                Button {
-                                    addNewModifierGroup()
-                                } label: {
-                                    Image(systemName: "plus.circle.fill")
-                                }
-                            }
+                            Text(isRtl ? "תוספות / אפשרויות" : "Options & Extras")
+                                .font(.primariesDemi(18))
                     ) {
+
                         if draft.modifierGroups.isEmpty {
                             Text(isRtl ? "אין תוספות" : "No modifiers yet")
                                 .foregroundColor(.secondary)
                         } else {
                             ForEach(draft.modifierGroups) { group in
-                                AdminModifierGroupEditor(
-                                    group: binding(for: group),
-                                    onDelete: { removeModifierGroup(group) }
+                                HStack(spacing: 10) {
+
+                                    // ✅ GROUP DRAG HANDLE (one per group)
+                                    Image(systemName: "line.3.horizontal")
+                                        .font(.system(size: 16, weight: .bold))
+                                        .foregroundColor(.secondary)
+                                        .padding(.vertical, 8)
+                                        .contentShape(Rectangle())
+                                        .onDrag {
+                                            draggingGroupId = group.id
+                                            return NSItemProvider(item: group.id.uuidString as NSString,
+                                                                  typeIdentifier: UTType.minisModifierGroup.identifier)
+                                        }
+
+                                    // Your editor (no drag here)
+                                    AdminModifierGroupEditor(
+                                        group: binding(for: group),
+                                        allProducts: allProducts,
+                                        onDelete: { removeModifierGroup(group) },
+                                        onLinkProduct: { itemId in
+                                            openModifierProductLink(groupId: group.id, itemId: itemId)
+                                        },
+                                        onPickTemplate: { template in
+                                            let newGroup = template.toAdminModifierGroupDraft()
+                                            draft.modifierGroups.append(newGroup)
+                                            lastAddedGroupId = newGroup.id
+                                        }
+                                    )
+                                    .id(group.id)
+                                }
+                                .onDrop(
+                                    of: [UTType.minisModifierGroup],
+                                    delegate: ModifierGroupDropDelegate(
+                                        targetId: group.id,
+                                        groups: $draft.modifierGroups,
+                                        draggingGroupId: $draggingGroupId
+                                    )
                                 )
-                                .id(group.id)
                             }
                             .onMove(perform: moveModifierGroups)
                         }
+
+                        // ✅ NEW BOTTOM BUTTON
+                        // ✅ PRIMARY ADD GROUP BUTTON
+                        Button {
+                            addNewModifierGroup()
+                            Haptics.medium()
+                        } label: {
+                            Text(isRtl ? "הוסף קבוצת אפשרויות" : "Add option group")
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundColor(.black)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 48)
+                                .background(Color.white)
+                                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.top, 10)
+                        
+                        Button {
+                            showTemplatesPicker = true
+                            Haptics.light()
+                        } label: {
+                            Text(isRtl ? "הוסף מתבניות מוכנות" : "Add from templates")
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundColor(.primary)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 48)
+                                .background(Color(.systemGray5))
+                                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
                 .listStyle(.insetGrouped)
@@ -173,6 +643,36 @@ struct AdminProductEditorView: View {
                     guard let id else { return }
                     withAnimation { proxy.scrollTo(id, anchor: .bottom) }
                 }
+            }
+            .alert(
+                isRtl ? "להעביר לארכיון?" : "Archive product?",
+                isPresented: $showArchiveAlert
+            ) {
+                Button(isRtl ? "ביטול" : "Cancel", role: .cancel) { }
+
+                Button(isRtl ? "העבר לארכיון" : "Archive", role: .destructive) {
+                    onArchive?()
+                    dismiss()
+                }
+            } message: {
+                Text(isRtl ? "המוצר יועבר לארכיון." : "The product will be moved to archive.")
+            }
+            .alert(
+                isRtl ? "להסיר מהמיני?" : "Remove from mini?",
+                isPresented: $showRemoveAlert
+            ) {
+                Button(isRtl ? "ביטול" : "Cancel", role: .cancel) { }
+
+                Button(isRtl ? "הסר" : "Remove", role: .destructive) {
+                    onRemoveFromMini?()
+                    dismiss()
+                }
+            } message: {
+                Text(
+                    isRtl
+                    ? "המוצר יוסר מהמיני אבל יישאר במסד הנתונים, וניתן יהיה להחזיר אותו בהמשך."
+                    : "The product will be removed from this mini but kept in the database so it can be restored later."
+                )
             }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -186,24 +686,110 @@ struct AdminProductEditorView: View {
                     Text(modeTitle)
                         .font(.primariesDemi(18))
                 }
-                if mode == .edit, let onDelete {
-                    ToolbarItem(placement: .navigationBarTrailing) {
-                        Button(role: .destructive) {
-                            onDelete()
-                            dismiss()
-                        } label: {
-                            Image(systemName: "trash")
+                if mode == .edit {
+                    ToolbarItemGroup(placement: .navigationBarTrailing) {
+                        if draft.isArchived {
+                            if let onRestore {
+                                Button {
+                                    onRestore()
+                                    dismiss()
+                                } label: {
+                                    Image(systemName: "arrow.uturn.backward.circle")
+                                }
+                            }
+
+                            if onRemoveFromMini != nil {
+                                Button(role: .destructive) {
+                                    showRemoveAlert = true
+                                } label: {
+                                    Image(systemName: "trash")
+                                }
+                            }
+                        } else {
+                            if onArchive != nil {
+                                Button(role: .destructive) {
+                                    showArchiveAlert = true
+                                } label: {
+                                    Image(systemName: "archivebox")
+                                }
+                            }
                         }
                     }
                 }
             }
             .safeAreaInset(edge: .bottom) { bottomBar }
+            .sheet(isPresented: $showTemplatesPicker) {
+                ModifierTemplatesAdminView(
+                    allProducts: allProducts,
+                    onPick: { template in
+                        let newGroup = template.toAdminModifierGroupDraft()
+                        draft.modifierGroups.append(newGroup)
+                        lastAddedGroupId = newGroup.id
+                        showTemplatesPicker = false
+                        Haptics.light()
+                    }
+                )
+                .navigationBarHidden(true)
+            }
+        
+            .sheet(isPresented: $showModifierProductPicker) {
+                ModifierProductPickerSheet(
+                    isRtl: isRtl,
+                    currency: UserDefaults.standard.string(forKey: "currency") ?? "₪",
+                    products: allProducts,
+                    searchText: $modifierProductSearchText,
+                    onPick: { product in
+                        guard let pending = pendingModifierLink else { return }
+
+                        if let groupIndex = draft.modifierGroups.firstIndex(where: { $0.id == pending.groupId }),
+                           let itemIndex = draft.modifierGroups[groupIndex].items.firstIndex(where: { $0.id == pending.itemId }) {
+
+                            draft.modifierGroups[groupIndex].items[itemIndex].linkedProductId = product.id
+                            draft.modifierGroups[groupIndex].items[itemIndex].name = product.name
+                        }
+
+                        pendingModifierLink = nil
+                        showModifierProductPicker = false
+                    },
+                    onUnlink: {
+                        guard let pending = pendingModifierLink else { return }
+
+                        if let groupIndex = draft.modifierGroups.firstIndex(where: { $0.id == pending.groupId }),
+                           let itemIndex = draft.modifierGroups[groupIndex].items.firstIndex(where: { $0.id == pending.itemId }) {
+                            draft.modifierGroups[groupIndex].items[itemIndex].linkedProductId = nil
+                        }
+
+                        pendingModifierLink = nil
+                        showModifierProductPicker = false
+                    },
+                    onClose: {
+                        pendingModifierLink = nil
+                        showModifierProductPicker = false
+                    }
+                )
+            }
             .sheet(isPresented: $showImagePicker) {
                 AdminImagePicker { image in
                     handlePickedImage(image)
                 }
             }
+            .sheet(isPresented: $showBundlePicker) {
+                BundlePickerSheet(
+                    isRtl: isRtl,
+                    currency: UserDefaults.standard.string(forKey: "currency") ?? "₪",
+                    products: allProducts,
+                    selectedIds: Set(bundleSelectedIds),
+                    searchText: $bundleSearchText,
+                    onPick: { item in
+                        addBundleProduct(id: item.id)
+                        showBundlePicker = false
+                    },
+                    onClose: { showBundlePicker = false }
+                )
+                .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
+            }
         }
+        
         .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
         .onAppear {
             ensureValidPrinterId()
@@ -217,11 +803,295 @@ struct AdminProductEditorView: View {
         }
     }
 
+    private struct ModifierGroupLibraryPickerSheet: View {
+        let isRtl: Bool
+        let groups: [ModifierGroupLibraryItem]
+        @Binding var searchText: String
+        let onPick: (ModifierGroupLibraryItem) -> Void
+        let onClose: () -> Void
+
+        private var filtered: [ModifierGroupLibraryItem] {
+            let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if q.isEmpty { return groups }
+
+            return groups.filter { g in
+                g.title.lowercased().contains(q)
+                || g.sourceProductName.lowercased().contains(q)
+                || g.items.contains(where: { $0.name.lowercased().contains(q) })
+            }
+        }
+
+        var body: some View {
+            NavigationStack {
+                VStack(spacing: 10) {
+
+                    HStack(spacing: 10) {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundColor(.secondary)
+
+                        TextField(
+                            isRtl ? "חפש קבוצת תוספות…" : "Search modifier group…",
+                            text: $searchText
+                        )
+                        .textInputAutocapitalization(.none)
+                        .autocorrectionDisabled()
+
+                        if !searchText.isEmpty {
+                            Button { searchText = "" } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundColor(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .background(Color(.secondarySystemBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .padding(.horizontal, 16)
+                    .padding(.top, 12)
+
+                    List {
+                        ForEach(filtered) { group in
+                            Button {
+                                onPick(group)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    HStack {
+                                        Text(group.title)
+                                            .font(.system(size: 16, weight: .semibold))
+                                            .foregroundColor(.primary)
+
+                                        Spacer()
+
+                                        Text(group.kind == .options
+                                             ? (isRtl ? "אפשרויות" : "Options")
+                                             : (isRtl ? "תוספות" : "Extras"))
+                                        .font(.system(size: 12, weight: .bold))
+                                        .foregroundColor(.secondary)
+                                    }
+
+                                    Text(group.items.map(\.name).joined(separator: " • "))
+                                        .font(.system(size: 13, weight: .medium))
+                                        .foregroundColor(.secondary)
+                                        .lineLimit(2)
+
+                                    Text((isRtl ? "מוצר מקור: " : "Source: ") + group.sourceProductName)
+                                        .font(.system(size: 12, weight: .medium))
+                                        .foregroundColor(.secondary)
+                                }
+                                .padding(.vertical, 4)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+
+                        if filtered.isEmpty {
+                            Text(isRtl ? "לא נמצאו קבוצות" : "No groups found")
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+                .navigationTitle(isRtl ? "ספריית קבוצות" : "Groups library")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button(action: onClose) {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 16, weight: .bold))
+                                .padding(8)
+                                .background(Color(.systemGray5))
+                                .clipShape(Circle())
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    private struct ModifierProductPickerSheet: View {
+        let isRtl: Bool
+        let currency: String
+        let products: [ShellMenuItem]
+        @Binding var searchText: String
+        let onPick: (ShellMenuItem) -> Void
+        let onUnlink: () -> Void
+        let onClose: () -> Void
+
+        private var filtered: [ShellMenuItem] {
+            let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if q.isEmpty {
+                return products.sorted { $0.name < $1.name }
+            }
+
+            return products.filter { product in
+                product.name.lowercased().contains(q) ||
+                String(product.id).contains(q) ||
+                product.category.lowercased().contains(q)
+            }
+            .sorted { $0.name < $1.name }
+        }
+
+        var body: some View {
+            NavigationStack {
+                VStack(spacing: 10) {
+                    HStack(spacing: 10) {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundColor(.secondary)
+
+                        TextField(
+                            isRtl ? "Search product…" : "Search product…",
+                            text: $searchText
+                        )
+                        .textInputAutocapitalization(.none)
+                        .autocorrectionDisabled()
+
+                        if !searchText.isEmpty {
+                            Button {
+                                searchText = ""
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundColor(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .background(Color(.secondarySystemBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .padding(.horizontal, 16)
+                    .padding(.top, 12)
+
+                    List {
+                        Section {
+                            Button(role: .destructive) {
+                                onUnlink()
+                            } label: {
+                                HStack {
+                                    Image(systemName: "link.badge.minus")
+                                    Text(isRtl ? "Remove link" : "Remove link")
+                                }
+                            }
+                        }
+
+                        ForEach(filtered) { product in
+                            Button {
+                                onPick(product)
+                            } label: {
+                                HStack(spacing: 12) {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(product.name)
+                                            .font(.system(size: 16, weight: .semibold))
+                                            .foregroundColor(.primary)
+
+                                        Text("#\(product.id) • \(product.category) • \(String(format: "\(currency)%.2f", product.price))")
+                                            .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                            .foregroundColor(.secondary)
+                                    }
+
+                                    Spacer()
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                .navigationTitle(isRtl ? "Link to product" : "Link to product")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button(action: onClose) {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 16, weight: .bold))
+                                .padding(8)
+                                .background(Color(.systemGray5))
+                                .clipShape(Circle())
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+  
+    
+    private var hasValidBundleItems: Bool {
+        !parseIds(draft.bundleSetProductIdsText).isEmpty
+    }
+    
     private var modeTitle: String {
         switch mode {
-        case .create: return isRtl ? "מוצר חדש" : "New Product"
-        case .edit:   return isRtl ? "עריכת מוצר" : "Edit Product"
+
+        case .create:
+            let trimmed = draft.name
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if trimmed.isEmpty {
+                return isRtl ? "מוצר חדש" : "New Product"
+            } else {
+                return trimmed
+            }
+
+        case .edit:
+            let trimmed = draft.name
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if trimmed.isEmpty {
+                return isRtl ? "עריכת מוצר" : "Edit Product"
+            } else {
+                return trimmed
+            }
         }
+    }
+    // MARK: - Bundle helpers (store as text, edit as list)
+
+    private func parseIds(_ s: String) -> [Int] {
+        s.split { $0 == "," || $0 == " " || $0 == ";" || $0 == "\n" || $0 == "\t" }
+            .compactMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            .filter { $0 > 0 }
+    }
+
+    private func setIdsText(_ ids: [Int]) {
+        let uniqueSorted = Array(Set(ids)).sorted()
+        draft.bundleSetProductIdsText = uniqueSorted.map(String.init).joined(separator: ",")
+    }
+
+    private var bundleSelectedIds: [Int] {
+        get { parseIds(draft.bundleSetProductIdsText) }
+        set { setIdsText(newValue) }
+    }
+    private func parseBundleIds(_ s: String) -> [Int] {
+        s.split { $0 == "," || $0 == " " || $0 == ";" || $0 == "\n" || $0 == "\t" }
+            .compactMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            .filter { $0 > 0 }
+    }
+
+    private func writeBundleIds(_ ids: [Int]) {
+        let uniqueSorted = Array(Set(ids)).sorted()
+        draft.bundleSetProductIdsText = uniqueSorted.map(String.init).joined(separator: ",")
+    }
+    private func addBundleProduct(id: Int) {
+        var ids = parseBundleIds(draft.bundleSetProductIdsText)
+        guard !ids.contains(id) else { return }
+        ids.append(id)
+        writeBundleIds(ids)
+        Haptics.light()
+    }
+
+    private func removeBundleProduct(id: Int) {
+        var ids = parseBundleIds(draft.bundleSetProductIdsText)
+        ids.removeAll { $0 == id }
+        writeBundleIds(ids)
+        Haptics.light()
+    }
+
+    private func bundleDisplayName(for productId: Int) -> String {
+        if let p = allProducts.first(where: { $0.id == productId }) {
+            return p.name
+        }
+        return "#\(productId)"
     }
 
     // MARK: - Printers helpers (ID routing)
@@ -230,26 +1100,21 @@ struct AdminProductEditorView: View {
         printerStore.config.stations.filter { $0.status != 0 }
     }
 
-    /// Accepts:
-    /// - station id (preferred) e.g. "s1"
-    /// - legacy strings like "Bar"/"Kitchen"/"Bakery" or Hebrew variants
-    /// - label match (if someone stored label instead of id)
-    /// Returns a station id.
     private func normalizePrinterId(_ raw: String) -> String {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty { return activeStations.first?.id ?? "" }
 
-        // already a valid station id?
+        // ✅ allow empty = No printer
+        if trimmed.isEmpty { return "" }
+
         if activeStations.contains(where: { $0.id == trimmed }) { return trimmed }
 
-        // If someone stored legacy strings ("Bar"/"Bakery"/"Kitchen"), map them to your forced ids:
         let t = trimmed.lowercased()
         if t.contains("bar") || t.contains("בר") { return "s2" }
         if t.contains("bakery") || t.contains("מאפ") || t.contains("ויטרינה") { return "s3" }
-        if t.contains("kitchen") || t.contains("מטבח") { return "s1" } // will still become Bakery by your rule
+        if t.contains("kitchen") || t.contains("מטבח") { return "s1" }
 
-        // fallback
-        return activeStations.first?.id ?? ""
+        // ✅ unknown value -> empty, not fallback
+        return ""
     }
 
     private func ensureValidPrinterId() {
@@ -257,33 +1122,20 @@ struct AdminProductEditorView: View {
         if draft.printerId != normalized {
             draft.printerId = normalized
         }
-
-        // If still empty (no stations configured), leave empty (UI will show "לא מוגדר")
-        if draft.printerId.isEmpty, let first = activeStations.first?.id {
-            draft.printerId = first
-        }
     }
 
     private func ensurePrinterSelectionNotEmpty() {
-        // If no stations: just keep empty (UI will say "not configured")
-        guard !activeStations.isEmpty else { return }
-
-        // If multi set empty -> seed from primary or first station
-        if draft.printerIds.isEmpty {
-            if !draft.printerId.isEmpty {
-                draft.printerIds = [draft.printerId]
-            } else if let first = activeStations.first?.id {
-                draft.printerId = first
-                draft.printerIds = [first]
-            }
+        // ✅ No printer is valid
+        if draft.printerId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            draft.printerId = ""
+            draft.printerIds = []
+            return
         }
 
-        // Ensure primary is always in the set
         if !draft.printerId.isEmpty, !draft.printerIds.contains(draft.printerId) {
             draft.printerIds.insert(draft.printerId)
         }
 
-        // Ensure primary isn't empty if set has items
         if draft.printerId.isEmpty, let any = draft.printerIds.first {
             draft.printerId = any
         }
@@ -296,37 +1148,43 @@ struct AdminProductEditorView: View {
 
     private func stationId(for legacy: LegacyStation) -> String? {
         switch legacy {
+
+        case .none:
+            return nil
+
         case .bar:
             return activeStations.first(where: {
                 $0.label.lowercased().contains("bar") || $0.label.contains("בר")
             })?.id
+
         case .kitchen:
             return activeStations.first(where: {
                 $0.label.lowercased().contains("kitchen") || $0.label.contains("מטבח")
             })?.id
+
         case .bakery:
             return activeStations.first(where: {
-                $0.label.lowercased().contains("bakery") || $0.label.contains("מאפ") || $0.label.contains("ויטרינה")
+                $0.label.lowercased().contains("bakery")
+                || $0.label.contains("מאפ")
+                || $0.label.contains("ויטרינה")
             })?.id
         }
     }
 
     private func syncLegacySegmentFromCurrentSelection() {
-
-        // ✅ 1) Prefer the legacy value coming from DB
-        let raw = draft.legacyPrinter.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        
-        // ✅ 2) Fallback: if legacy is missing, infer from printerId (s1/s2/s3 or labels)
         let pid = draft.printerId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 
-        if pid == "s1" { legacyStation = .kitchen; return }
-        if pid == "s2" { legacyStation = .bar;     return }
-        if pid == "s3" { legacyStation = .bakery;  return }
+        if pid.isEmpty {
+            legacyStation = .none
+            return
+        }
 
-        // If printerId is not sX, try station label (your existing logic)
+        if pid == "s1" { legacyStation = .kitchen; return }
+        if pid == "s2" { legacyStation = .bar; return }
+        if pid == "s3" { legacyStation = .bakery; return }
+
         guard let st = activeStations.first(where: { $0.id == draft.printerId }) else {
-            legacyStation = .bar
+            legacyStation = .none
             return
         }
 
@@ -335,21 +1193,20 @@ struct AdminProductEditorView: View {
             legacyStation = .kitchen
         } else if l.contains("bakery") || st.label.contains("מאפ") || st.label.contains("ויטרינה") {
             legacyStation = .bakery
-        } else {
+        } else if l.contains("bar") || st.label.contains("בר") {
             legacyStation = .bar
+        } else {
+            legacyStation = .none
         }
     }
 
     private func toggleStation(_ id: String) {
-        // Prevent empty selection
         if draft.printerIds.contains(id) {
             if draft.printerIds.count <= 1 {
                 Haptics.error()
                 return
             }
             draft.printerIds.remove(id)
-
-            // if removing primary, pick a new primary
             if draft.printerId == id {
                 draft.printerId = draft.printerIds.first ?? ""
             }
@@ -367,8 +1224,6 @@ struct AdminProductEditorView: View {
 
     private var headerImageSection: some View {
         VStack(spacing: 8) {
-
-            // Resolve a remote URL only when we *don't* have a local preview
             let remoteURL: URL? = {
                 let trimmed = draft.imageURL.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !trimmed.isEmpty else { return nil }
@@ -441,7 +1296,6 @@ struct AdminProductEditorView: View {
         .padding(.vertical, 4)
     }
 
-    /// Called when the user picks an image from the gallery.
     private func handlePickedImage(_ image: UIImage) {
         self.pickedImage = image
         isUploadingImage = true
@@ -474,6 +1328,7 @@ struct AdminProductEditorView: View {
     // MARK: - Main fields
 
     private var mainFieldsSection: some View {
+        
         VStack(alignment: .leading, spacing: 12) {
 
             // NAME
@@ -487,9 +1342,8 @@ struct AdminProductEditorView: View {
                     .textFieldStyle(.roundedBorder)
             }
 
-            // PRICE + CATEGORY (picker + add)
+            // PRICE + CATEGORY
             HStack(spacing: 12) {
-
                 VStack(alignment: .leading, spacing: 6) {
                     Text(isRtl ? "מחיר" : "Price")
                         .font(.primariesDemi(14))
@@ -503,7 +1357,7 @@ struct AdminProductEditorView: View {
 
                     CategoryPickerField(
                         isRtl: isRtl,
-                        categories: categories,          // ✅ requires `let categories: [String]` in the view
+                        categories: categories,
                         selected: $draft.category
                     )
                 }
@@ -520,7 +1374,7 @@ struct AdminProductEditorView: View {
                     .lineLimit(3, reservesSpace: true)
             }
 
-            // EXTRA: PHONE REQUIRED
+            // PHONE REQUIRED
             VStack(alignment: .leading, spacing: 6) {
                 Text(isRtl ? "פרטים נוספים" : "Extra")
                     .font(.primariesDemi(14))
@@ -531,7 +1385,97 @@ struct AdminProductEditorView: View {
             }
             .padding(.top, 4)
 
-            // ✅ PRINTERS: keep old segment + new multi-select checkboxes
+            // ✅ BUNDLE UI (friendly)
+            VStack(alignment: .leading, spacing: 10) {
+                Text(isRtl ? "עסקית" : "Bundle")
+                    .font(.primariesDemi(14))
+
+                Toggle(isRtl ? "הפעל עסקית" : "Enable bundle", isOn: $draft.bundleEnabled)
+                    .font(.system(size: 16, weight: .semibold))
+                    .toggleStyle(.switch)
+
+                if draft.bundleEnabled {
+                    let ids = bundleSelectedIds
+
+                    if ids.isEmpty {
+                        Text(isRtl ? "לא נבחרו מוצרים עדיין" : "No products selected yet")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(.secondary)
+                    } else {
+                        VStack(spacing: 8) {
+                            ForEach(ids, id: \.self) { pid in
+                                HStack(spacing: 10) {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(bundleDisplayName(for: pid))
+                                            .font(.system(size: 15, weight: .semibold))
+                                        Text("#\(pid)")
+                                            .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                            .foregroundColor(.secondary)
+                                    }
+
+                                    Spacer()
+
+                                    Button {
+                                        removeBundleProduct(id: pid)
+                                    } label: {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .font(.system(size: 18, weight: .bold))
+                                            .foregroundColor(.secondary)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 10)
+                                .background(Color(.secondarySystemBackground))
+                                .clipShape(RoundedRectangle(cornerRadius: 12))
+                            }
+                        }
+                    }
+
+                    Button {
+                        bundleSearchText = ""
+                        showBundlePicker = true
+                        Haptics.light()
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "plus.circle.fill")
+                            Text(isRtl ? "הוסף מוצר לעסקית" : "Add product to bundle")
+                                .font(.system(size: 15, weight: .semibold))
+                            Spacer()
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .background(Color(.systemGray5))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                    }
+                    .buttonStyle(.plain)
+
+                    HStack(spacing: 12) {
+                        Stepper(value: $draft.bundleMaxFreeQty, in: 1...9) {
+                            Text(isRtl ? "כמות חינם: \(draft.bundleMaxFreeQty)" : "Free qty: \(draft.bundleMaxFreeQty)")
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                        Spacer()
+                    }
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(isRtl ? "אסטרטגיה" : "Strategy")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(.secondary)
+
+                        Picker("", selection: $draft.bundleStrategy) {
+                            Text(isRtl ? "הכי יקר" : "Most expensive").tag("most_expensive")
+                            Text(isRtl ? "הכי זול" : "Cheapest").tag("cheapest")
+                            Text(isRtl ? "ראשון" : "First added").tag("first_added")
+                        }
+                        .pickerStyle(.segmented)
+                    }
+                }
+            }
+            .padding(.top, 4)
+            .padding(.top, 4)
+
+            // PRINTERS
             VStack(alignment: .leading, spacing: 8) {
                 Text(isRtl ? "מדפסות" : "Printers")
                     .font(.primariesDemi(14))
@@ -542,15 +1486,18 @@ struct AdminProductEditorView: View {
                         .foregroundColor(.secondary)
                         .padding(.vertical, 6)
                 } else {
-                  
-                    // ✅ OLD (KEEP): segmented quick route
                     VStack(alignment: .leading, spacing: 6) {
                         Text(isRtl ? "בחירה מהירה" : "Quick route")
                             .font(.system(size: 13, weight: .semibold))
                             .foregroundColor(.secondary)
 
                         Picker("", selection: $legacyStation) {
-                            ForEach(LegacyStation.allCases) { s in
+                            ForEach(
+                                isRtl
+                                ? ([.none] + LegacyStation.allCases.filter { $0 != .none })
+                                : (LegacyStation.allCases.filter { $0 != .none } + [.none]),
+                                id: \.self
+                            ) { s in
                                 Text(s.title(isRtl: isRtl)).tag(s)
                             }
                         }
@@ -558,19 +1505,32 @@ struct AdminProductEditorView: View {
                         .tint(.primary)
                         .onChange(of: legacyStation) { newValue in
                             switch newValue {
-                            case .bar:     draft.printerId = "s2"; draft.printerIds = ["s2"]
-                            case .kitchen: draft.printerId = "s1"; draft.printerIds = ["s1"]
-                            case .bakery:  draft.printerId = "s3"; draft.printerIds = ["s3"]
+                            case .none:
+                                draft.printerId = ""
+                                draft.printerIds = []
+                                draft.legacyPrinter = ""
+
+                            case .bar:
+                                draft.printerId = "s2"
+                                draft.printerIds = ["s2"]
+                                draft.legacyPrinter = "Bar"
+
+                            case .kitchen:
+                                draft.printerId = "s1"
+                                draft.printerIds = ["s1"]
+                                draft.legacyPrinter = "Kitchen"
+
+                            case .bakery:
+                                draft.printerId = "s3"
+                                draft.printerIds = ["s3"]
+                                draft.legacyPrinter = "Bakery"
                             }
-                            draft.legacyPrinter = legacyNameForStationId(draft.printerId) // forced
-                            ensurePrinterSelectionNotEmpty()
+
                             Haptics.light()
                         }
                     }
                     .padding(.bottom, 6)
-                  
-
-                    // ✅ NEW: multi-select checkboxes
+                    /*
                     VStack(alignment: .leading, spacing: 6) {
                         Text(isRtl ? "הדפס גם ל…" : "Also print to…")
                             .font(.system(size: 13, weight: .semibold))
@@ -618,8 +1578,7 @@ struct AdminProductEditorView: View {
                             }
                         }
                     }
-
-                    // Selected summary
+                    */
                     let selectedLabels = activeStations
                         .filter { draft.printerIds.contains($0.id) }
                         .map { $0.label }
@@ -634,7 +1593,6 @@ struct AdminProductEditorView: View {
         }
     }
 
-    // MARK: - Category picker + add new
     private struct CategoryPickerField: View {
         let isRtl: Bool
         let categories: [String]
@@ -644,7 +1602,6 @@ struct AdminProductEditorView: View {
         @State private var newCategory = ""
 
         private var cleanedCategories: [String] {
-            // unique + stable order + no blanks
             var seen = Set<String>()
             return categories.compactMap { raw in
                 let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -663,7 +1620,7 @@ struct AdminProductEditorView: View {
                         Button(c) { selected = c }
                     }
 
-                    // if draft.category is custom and not in list, keep it visible
+                    // keep current value selectable even if not in list
                     let current = selected.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !current.isEmpty, !cleanedCategories.contains(current) {
                         Divider()
@@ -678,6 +1635,7 @@ struct AdminProductEditorView: View {
                     } label: {
                         Label(isRtl ? "קטגוריה חדשה" : "Add category", systemImage: "plus")
                     }
+
                 } label: {
                     HStack {
                         Text(selected.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -685,7 +1643,9 @@ struct AdminProductEditorView: View {
                              : selected)
                             .foregroundColor(.primary)
                             .lineLimit(1)
+
                         Spacer()
+
                         Image(systemName: "chevron.down")
                             .foregroundColor(.secondary)
                             .font(.system(size: 13, weight: .semibold))
@@ -740,7 +1700,6 @@ struct AdminProductEditorView: View {
             }
         }
     }
-
     // MARK: - Bottom bar
 
     private var bottomBar: some View {
@@ -751,15 +1710,17 @@ struct AdminProductEditorView: View {
                 var cleanDraft = cleanedForSave(draft)
                 cleanDraft.priceText = String(format: "%.2f", price)
 
-                // ✅ ensure printer selections are valid + non-empty
                 cleanDraft.printerId = normalizePrinterId(cleanDraft.printerId)
 
-                if cleanDraft.printerIds.isEmpty {
-                    if !cleanDraft.printerId.isEmpty {
-                        cleanDraft.printerIds = [cleanDraft.printerId]
-                    }
+                if cleanDraft.printerId.isEmpty {
+                    cleanDraft.printerIds = []
+                    cleanDraft.legacyPrinter = ""
                 } else {
-                    cleanDraft.printerIds.insert(cleanDraft.printerId)
+                    if cleanDraft.printerIds.isEmpty {
+                        cleanDraft.printerIds = [cleanDraft.printerId]
+                    } else {
+                        cleanDraft.printerIds.insert(cleanDraft.printerId)
+                    }
                 }
 
                 onSave(cleanDraft)
@@ -767,7 +1728,7 @@ struct AdminProductEditorView: View {
             } label: {
                 Text(mode == .create ? (isRtl ? "הוסף מוצר" : "Create")
                                      : (isRtl ? "שמור שינויים" : "Save"))
-                    .font(.primariesDemi(17))
+                .font(.system(size: 16, weight: .bold))
                     .foregroundColor(.black)
                     .frame(maxWidth: .infinity)
                     .frame(height: 52)
@@ -785,27 +1746,65 @@ struct AdminProductEditorView: View {
     private func cleanedForSave(_ draft: AdminProductDraft) -> AdminProductDraft {
         var copy = draft
 
-        // (your existing modifier cleanup stays)
-
         copy.printerId = normalizePrinterId(copy.printerId)
 
-        if copy.printerIds.isEmpty {
-            if !copy.printerId.isEmpty { copy.printerIds = [copy.printerId] }
+        if copy.printerId.isEmpty {
+            copy.printerIds = []
+            copy.legacyPrinter = ""
         } else {
-            if !copy.printerId.isEmpty { copy.printerIds.insert(copy.printerId) }
+            if copy.printerIds.isEmpty {
+                copy.printerIds = [copy.printerId]
+            } else {
+                copy.printerIds.insert(copy.printerId)
+            }
+            copy.legacyPrinter = legacyNameForStationId(copy.printerId)
         }
-
-        // ✅ FORCE legacy string from station id (ignore segment)
+        
         copy.legacyPrinter = legacyNameForStationId(copy.printerId)
 
-        return copy
+        // ✅ Clean modifier groups/items before save
+        copy.modifierGroups = copy.modifierGroups.compactMap { group in
+            let cleanTitle = group.title.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            let cleanItems = group.items.compactMap { item -> AdminModifierItemDraft? in
+                let cleanName = item.name.trimmingCharacters(in: .whitespacesAndNewlines)
+
+                guard cleanName.count >= 2 else { return nil }
+
+                var cleanedItem = item
+                cleanedItem.name = cleanName
+
+                let raw = item.extraPriceText
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .replacingOccurrences(of: ",", with: ".")
+
+                let price = Double(raw) ?? 0
+                cleanedItem.extraPriceText = String(format: "%.2f", price)
+
+                return cleanedItem
+            }
+
+            // ✅ remove groups with empty title or no valid items
+            guard cleanTitle.count >= 2 else { return nil }
+            guard !cleanItems.isEmpty else { return nil }
+
+            var cleanedGroup = group
+            cleanedGroup.title = cleanTitle
+            cleanedGroup.items = cleanItems
+            return cleanedGroup
+        }
+
+        // ✅ keep bundle ids clean
+        let ids = parseIds(copy.bundleSetProductIdsText)
+        copy.bundleSetProductIdsText = Array(Set(ids)).sorted().map(String.init).joined(separator: ",")
+
+        // ✅ if empty, keep toggle visually allowed but do not treat as real active bundle
+          return copy
     }
 
     private func binding(for group: AdminModifierGroupDraft) -> Binding<AdminModifierGroupDraft> {
         Binding(
-            get: {
-                draft.modifierGroups.first(where: { $0.id == group.id }) ?? group
-            },
+            get: { draft.modifierGroups.first(where: { $0.id == group.id }) ?? group },
             set: { newValue in
                 if let idx = draft.modifierGroups.firstIndex(where: { $0.id == group.id }) {
                     draft.modifierGroups[idx] = newValue
@@ -825,28 +1824,182 @@ struct AdminProductEditorView: View {
     }
 
     private func addNewModifierGroup() {
-        let new = AdminModifierGroupDraft(
-            title: "",
-            kind: .options,
-            items: []
-        )
+        let new = AdminModifierGroupDraft(title: "", kind: .options, items: [])
         draft.modifierGroups.append(new)
         lastAddedGroupId = new.id
+    }
+
+    // MARK: - Bundle picker sheet
+
+    private struct BundlePickerSheet: View {
+        let isRtl: Bool
+        let currency: String
+        let products: [ShellMenuItem]
+        let selectedIds: Set<Int>
+        @Binding var searchText: String
+        let onPick: (ShellMenuItem) -> Void
+        let onClose: () -> Void
+
+        private var filtered: [ShellMenuItem] {
+            let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if q.isEmpty { return products.sorted { $0.id < $1.id } }
+
+            return products.filter { p in
+                p.name.lowercased().contains(q)
+                || p.displayName.lowercased().contains(q)
+                || String(p.id).contains(q)
+            }
+            .sorted { $0.id < $1.id }
+        }
+
+        var body: some View {
+            NavigationStack {
+                VStack(spacing: 10) {
+
+                    // Search
+                    HStack(spacing: 10) {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundColor(.secondary)
+
+                        TextField(isRtl ? "חפש מוצר…" : "Search product…", text: $searchText)
+                            .textInputAutocapitalization(.none)
+                            .autocorrectionDisabled()
+
+                        if !searchText.isEmpty {
+                            Button { searchText = "" } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundColor(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .background(Color(.secondarySystemBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .padding(.horizontal, 16)
+                    .padding(.top, 12)
+
+                    List {
+                        ForEach(filtered) { item in
+                            let already = selectedIds.contains(item.id)
+
+                            Button {
+                                guard !already else { return }
+                                onPick(item)
+                            } label: {
+                                HStack(spacing: 12) {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(item.name)
+                                            .font(.system(size: 16, weight: .semibold))
+                                            .foregroundColor(.primary)
+                                            .lineLimit(1)
+                                        Text("#\(item.id)  •  \(String(format: "\(currency)%.2f", item.price))")
+                                            .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                            .foregroundColor(.secondary)
+                                    }
+
+                                    Spacer()
+
+                                    Image(systemName: already ? "checkmark.circle.fill" : "plus.circle.fill")
+                                        .font(.system(size: 18, weight: .bold))
+                                        .foregroundColor(already ? .secondary : .primary)
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(already)
+                        }
+
+                        if products.isEmpty {
+                            Text(isRtl ? "לא נטענו מוצרים (pass api.items)" : "No products loaded (pass api.items)")
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+                .navigationTitle(isRtl ? "הוסף מוצר לבאנדל" : "Add bundle product")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button(action: onClose) {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 16, weight: .bold))
+                                .padding(8)
+                                .background(Color(.systemGray5))
+                                .clipShape(Circle())
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
 // MARK: - Modifier Group Editor (unchanged)
+private struct ModifierItemDropDelegate: DropDelegate {
+    let targetId: UUID
+    @Binding var items: [AdminModifierItemDraft]
+    @Binding var draggingItemId: UUID?
+
+    func dropEntered(info: DropInfo) {
+        guard info.hasItemsConforming(to: [UTType.minisModifierItem]) else { return }
+        guard let dragging = draggingItemId,
+              dragging != targetId,
+              let from = items.firstIndex(where: { $0.id == dragging }),
+              let to   = items.firstIndex(where: { $0.id == targetId })
+        else { return }
+
+        withAnimation(.spring(response: 0.22, dampingFraction: 0.85)) {
+            let moved = items.remove(at: from)
+            items.insert(moved, at: to)
+        }
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        draggingItemId = nil
+        return true
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+}
 
 struct AdminModifierGroupEditor: View {
     @Environment(\.isRtl) private var isRtl
     @State private var showDeleteAlert = false
     @Binding var group: AdminModifierGroupDraft
+
+    let allProducts: [ShellMenuItem]
     let onDelete: () -> Void
+    let onLinkProduct: (UUID) -> Void
+    let onPickTemplate: (ModifierTemplateDraft) -> Void
 
+    @State private var showTemplatesPicker = false
+    @State private var draggingItemId: UUID? = nil
     @FocusState private var isTitleFocused: Bool
-
+    
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 6) {
+
+            HStack {
+                Spacer()
+
+                Button {
+                    showTemplatesPicker = true
+                    Haptics.light()
+                } label: {
+                    Image(systemName: "square.grid.2x2")
+                        .font(.system(size: 14, weight: .semibold))
+                        .padding(6)
+                        .background(Color(.systemGray5))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+                .buttonStyle(.plain)
+            }
+
+            HStack{
+            
             HStack(alignment: .top, spacing: 8) {
                 VStack(alignment: .leading, spacing: 4) {
                     TextField(
@@ -857,14 +2010,24 @@ struct AdminModifierGroupEditor: View {
                     .font(.primariesDemi(15))
                     .textFieldStyle(.roundedBorder)
                     .focused($isTitleFocused)
-
-                    Picker("", selection: $group.kind) {
-                        Text(isRtl ? "אפשרויות" : "Options")
-                            .tag(AdminModifierGroupDraft.Kind.options)
-                        Text(isRtl ? "תוספות" : "Additions")
-                            .tag(AdminModifierGroupDraft.Kind.additions)
+                    HStack{
+                        Picker("", selection: $group.kind) {
+                            Text(isRtl ? "אפשרויות" : "Options")
+                                .tag(AdminModifierGroupDraft.Kind.options)
+                            Text(isRtl ? "תוספות" : "Additions")
+                                .tag(AdminModifierGroupDraft.Kind.additions)
+                        }
+                        .pickerStyle(.segmented)
+                        
+                        if group.kind == .options {
+                            Toggle("התחל עם ברירת מחדל", isOn: $group.defaultFirst)
+                                .font(.system(size: 15, weight: .semibold))
+                                .toggleStyle(.switch)
+                                .tint(.blue)
+                        }
+                        
                     }
-                    .pickerStyle(.segmented)
+                }
                 }
 
                 Spacer()
@@ -874,16 +2037,18 @@ struct AdminModifierGroupEditor: View {
                 } label: {
                     Image(systemName: "trash")
                         .font(.system(size: 16, weight: .semibold))
-                        .foregroundColor(.red)
+                        .foregroundColor(.white)
                         .padding(6)
                 }
                 .buttonStyle(.borderless)
                 .alert(isPresented: $showDeleteAlert) {
                     Alert(
                         title: Text(isRtl ? "למחוק קבוצה?" : "Delete group?"),
-                        message: Text(isRtl
-                                      ? "האם אתה בטוח שברצונך למחוק את קבוצת התוספות הזו?"
-                                      : "Are you sure you want to delete this modifier group?"),
+                        message: Text(
+                            isRtl
+                            ? "האם אתה בטוח שברצונך למחוק את קבוצת התוספות הזו?"
+                            : "Are you sure you want to delete this modifier group?"
+                        ),
                         primaryButton: .destructive(Text(isRtl ? "מחק" : "Delete")) {
                             onDelete()
                         },
@@ -893,33 +2058,72 @@ struct AdminModifierGroupEditor: View {
             }
 
             VStack(spacing: 6) {
-                ForEach(Array(group.items.indices), id: \.self) { index in
+                ForEach(group.items) { item in
+                    let index = group.items.firstIndex(where: { $0.id == item.id }) ?? 0
+
                     HStack(spacing: 8) {
-                        TextField(
-                            group.kind == .options
-                            ? (isRtl ? "אפשרות" : "Option")
-                            : (isRtl ? "תוספת" : "Extra"),
-                            text: $group.items[index].name
-                        )
-                        .textFieldStyle(.roundedBorder)
-                        .onChange(of: group.items[index].name) { newValue in
-                            autoAppendRowIfNeeded(currentIndex: index, newValue: newValue)
+                        VStack(alignment: .leading, spacing: 4) {
+                            TextField(
+                                group.kind == .options
+                                ? (isRtl ? "אפשרות" : "Option")
+                                : (isRtl ? "תוספת" : "Extra"),
+                                text: Binding(
+                                    get: { group.items[index].name },
+                                    set: { newValue in
+                                        group.items[index].name = newValue
+                                        autoAppendRowIfNeeded(currentIndex: index, newValue: newValue)
+                                    }
+                                )
+                            )
+                            .textFieldStyle(.roundedBorder)
+
+                            if let linkedId = group.items[index].linkedProductId {
+                                Text("#\(linkedId)")
+                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                                    .padding(.horizontal, 4)
+                            }
                         }
 
-                        PriceTextField(text: $group.items[index].extraPriceText)
-                            .frame(width: 60)
+                        PriceTextField(
+                            text: Binding(
+                                get: { group.items[index].extraPriceText },
+                                set: { group.items[index].extraPriceText = $0 }
+                            )
+                        )
+                        .frame(width: 60)
 
                         Button {
                             removeItem(at: index)
                         } label: {
                             Image(systemName: "minus.circle.fill")
-                                .foregroundColor(.red.opacity(0.7))
+                                .foregroundColor(.white.opacity(0.7))
                                 .font(.system(size: 18, weight: .bold))
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 6)
                         }
                         .buttonStyle(.plain)
+
+                        Button {
+                            onLinkProduct(item.id)
+                        } label: {
+                            Image(systemName: group.items[index].linkedProductId == nil ? "link" : "link.circle.fill")
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundColor(group.items[index].linkedProductId == nil ? .secondary : .primary)
+                                .padding(.horizontal, 4)
+                        }
+                        .buttonStyle(.plain)
                     }
+                    .padding(.vertical, 2)
+                    .contentShape(Rectangle())
+                    .onDrop(
+                        of: [UTType.minisModifierItem],
+                        delegate: ModifierItemDropDelegate(
+                            targetId: item.id,
+                            items: $group.items,
+                            draggingItemId: $draggingItemId
+                        )
+                    )
                 }
 
                 Button {
@@ -939,6 +2143,16 @@ struct AdminModifierGroupEditor: View {
                 }
                 .buttonStyle(.plain)
             }
+        }
+        .sheet(isPresented: $showTemplatesPicker) {
+            ModifierTemplatesAdminView(
+                allProducts: allProducts,
+                onPick: { template in
+                    onPickTemplate(template)
+                    showTemplatesPicker = false
+                }
+            )
+            .navigationBarHidden(true)
         }
         .padding(12)
         .background(Color(.secondarySystemBackground))
@@ -967,18 +2181,25 @@ struct AdminModifierGroupEditor: View {
     private func removeItem(at index: Int) {
         guard group.items.indices.contains(index) else { return }
         group.items.remove(at: index)
-        if group.items.isEmpty { appendEmptyItem() }
+        if group.items.isEmpty {
+            appendEmptyItem()
+        }
     }
 
     private func autoAppendRowIfNeeded(currentIndex: Int, newValue: String) {
         guard currentIndex == group.items.count - 1 else { return }
-        let trimmed = newValue.trimmingCharacters(in: .whitespaces)
-        if trimmed.count == 1 { appendEmptyItem() }
+
+        let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.count >= 2 {
+            let hasTrailingEmpty = group.items.last?.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? false
+            if !hasTrailingEmpty {
+                appendEmptyItem()
+            }
+        }
     }
 }
 
 // MARK: - PriceTextField (unchanged)
-
 struct PriceTextField: UIViewRepresentable {
     @Binding var text: String
 
@@ -988,14 +2209,16 @@ struct PriceTextField: UIViewRepresentable {
 
     func makeUIView(context: Context) -> UITextField {
         let tf = UITextField()
-        tf.keyboardType = .decimalPad
+        tf.keyboardType = .numbersAndPunctuation
         tf.textAlignment = .right
         tf.borderStyle = .roundedRect
         tf.delegate = context.coordinator
         tf.text = text
-        tf.addTarget(context.coordinator,
-                     action: #selector(Coordinator.textChanged(_:)),
-                     for: .editingChanged)
+        tf.addTarget(
+            context.coordinator,
+            action: #selector(Coordinator.textChanged(_:)),
+            for: .editingChanged
+        )
         return tf
     }
 
@@ -1005,7 +2228,7 @@ struct PriceTextField: UIViewRepresentable {
         }
     }
 
-    class Coordinator: NSObject, UITextFieldDelegate {
+    final class Coordinator: NSObject, UITextFieldDelegate {
         @Binding var text: String
 
         init(text: Binding<String>) {
@@ -1020,6 +2243,43 @@ struct PriceTextField: UIViewRepresentable {
             DispatchQueue.main.async {
                 textField.selectAll(nil)
             }
+        }
+
+        func textField(
+            _ textField: UITextField,
+            shouldChangeCharactersIn range: NSRange,
+            replacementString string: String
+        ) -> Bool {
+            let current = textField.text ?? ""
+            guard let swiftRange = Range(range, in: current) else { return false }
+
+            let newValue = current.replacingCharacters(in: swiftRange, with: string)
+
+            if newValue.isEmpty { return true }
+            if newValue == "-" { return true }
+            if newValue == "." { return true }
+            if newValue == "-." { return true }
+
+            let allowed = CharacterSet(charactersIn: "-0123456789.,")
+            if string.rangeOfCharacter(from: allowed.inverted) != nil {
+                return false
+            }
+
+            let minusCount = newValue.filter { $0 == "-" }.count
+            if minusCount > 1 { return false }
+            if let minusIndex = newValue.firstIndex(of: "-"), minusIndex != newValue.startIndex {
+                return false
+            }
+
+            let normalized = newValue.replacingOccurrences(of: ",", with: ".")
+            let dotCount = normalized.filter { $0 == "." }.count
+            if dotCount > 1 { return false }
+
+            let test = normalized == "-" || normalized == "." || normalized == "-."
+                ? "0"
+                : normalized
+
+            return Double(test) != nil
         }
     }
 }
@@ -1125,7 +2385,7 @@ private func legacyNameForStationId(_ id: String) -> String {
     case "s1": return "Kitchen"
     case "s2": return "Bar"
     case "s3": return "Bakery"
-    default:   return "Bar"
+    default:   return ""
     }
 }
 
@@ -1135,6 +2395,13 @@ private func legacyNameForStationId(_ id: String) -> String {
 
 extension AdminProductDraft {
 
+    private struct BundleJson: Encodable {
+        let SetProductIds: [Int]
+        let MaxFreeQty: Int
+        let Strategy: String
+    }
+    
+    
     /// Build the payload for the upsert API.
     /// IMPORTANT: pass `stations` snapshot from MainActor (so we don't touch MainActor state here).
     func toUpsertPayload(shopId: Int, stations: [PrinterStation]) -> MinisProductAPI.UpsertPayload {
@@ -1145,20 +2412,38 @@ extension AdminProductDraft {
         let groups: [[String: Any]] = modifierGroups.map { group in
             let items: [[String: Any]] = group.items.map { item in
                 let price = Double(item.extraPriceText.replacingOccurrences(of: ",", with: ".")) ?? 0
-                return [
+
+                var dict: [String: Any] = [
                     "OptionName": item.name,
                     "ExtraPrice": price
                 ]
+
+                if let linkedProductId = item.linkedProductId, linkedProductId > 0 {
+                    dict["LinkedProductId"] = linkedProductId
+                }
+
+                return dict
             }
 
             let selection: [String: Any] = {
                 switch group.kind {
                 case .options:
-                    return ["mode": "single", "min": 1, "max": 1]
+                    return [
+                        "mode": "single",
+                        "min": 1,
+                        "max": 1,
+                        "required": group.defaultFirst ? 0 : 1
+                    ]
                 case .additions:
-                    return ["mode": "multi", "min": 0, "max": max(items.count, 1)]
+                    return [
+                        "mode": "multi",
+                        "min": 0,
+                        "max": max(items.count, 1)
+                    ]
                 }
             }()
+            
+            
 
             return [
                 "GroupId": group.id.uuidString,
@@ -1185,6 +2470,9 @@ extension AdminProductDraft {
             groups: groups
         )
 
+        if let modifierGroups = baseJsonDict["ModifierGroups"] {
+            print("🧨 baseJsonDict ModifierGroups =", modifierGroups)
+        }
         // -----------------------------
         // 3) Inject BOTH systems:
         // - old: "Printer" = "Bar/Kitchen/Bakery"
@@ -1199,6 +2487,36 @@ extension AdminProductDraft {
 
         // ✅ NEW: persist phone requirement into JsonData
         injectedJsonDict["isPhone"] = .init(isPhoneRequired ? 1 : 0)
+        let ids: [Int] = self.bundleSetProductIdsText
+            .split { $0 == "," || $0 == " " || $0 == ";" || $0 == "\n" || $0 == "\t" }
+            .compactMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            .filter { $0 > 0 }
+
+        let effectiveBundleEnabled = self.bundleEnabled && !ids.isEmpty
+
+        if effectiveBundleEnabled {
+            let strategy = self.bundleStrategy
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+
+            let safeStrategy: String = {
+                if strategy == "most_expensive" || strategy == "cheapest" || strategy == "first_added" {
+                    return strategy
+                }
+                return "cheapest"
+            }()
+
+            let payload = BundleJson(
+                SetProductIds: Array(Set(ids)).sorted(),
+                MaxFreeQty: max(1, self.bundleMaxFreeQty),
+                Strategy: safeStrategy
+            )
+
+            injectedJsonDict["Bundle"] = .init(payload)
+        } else {
+            // ✅ if no ids yet, don't send Bundle at all
+            injectedJsonDict.removeValue(forKey: "Bundle")
+        }
 
         // -----------------------------
         // 4) Other fields
@@ -1210,9 +2528,40 @@ extension AdminProductDraft {
 
         let rawImage = imageURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanImage = rawImage.isEmpty
-            ? "https://beithaam.com/wp-content/uploads/2024/12/share.jpg"
+            ? "https://d25t2285lxl5rf.cloudfront.net/images/shops/28596.png"
             : rawImage
 
+        let debugLinkedItems = modifierGroups.flatMap { group in
+            group.items.compactMap { item -> String? in
+                guard let linkedId = item.linkedProductId else { return nil }
+                return "\(group.title) -> \(item.name) [LinkedProductId: \(linkedId)]"
+            }
+        }
+        if let data = try? JSONSerialization.data(withJSONObject: groups, options: [.prettyPrinted]),
+           let text = String(data: data, encoding: .utf8) {
+            print("🧩 FINAL GROUPS BEFORE buildJsonData:")
+            print(text)
+        }
+        print("🧩 UPSERT PRODUCT DEBUG")
+        print("Name:", name)
+        print("ProductId:", productId ?? -1)
+        print("PrinterId:", printerId)
+        print("PrinterIds:", Array(printerIds).sorted())
+        print("ModifierGroups count:", modifierGroups.count)
+
+        for g in modifierGroups {
+            print("➡️ GROUP RAW:",
+                  "title=\(g.title)",
+                  "kind=\(g.kind.rawValue)",
+                  "defaultFirstBool=\(g.defaultFirst)")
+        }
+
+        if let jsonData = try? JSONSerialization.data(withJSONObject: groups, options: [.prettyPrinted]),
+           let jsonString = String(data: jsonData, encoding: .utf8) {
+            print("📦 ModifierGroups payload:")
+            print(jsonString)
+        }
+        
         return .init(
             Id: productId,
             MiniAppId: shopId,
@@ -1253,20 +2602,82 @@ extension AdminProductDraft {
         }()
 
         let stationForLegacy = cleanedPrimary.isEmpty ? (idsArray.first ?? "") : cleanedPrimary
-
-        // ✅ FORCE legacy string using the hard rule
         let legacy = legacyNameForStationId(stationForLegacy)
 
         var dict = baseJsonData
 
-        // ✅ old world (string)
-        dict["Printer"] = .init(legacy)
-
-        // ✅ new world (ids)
-        dict["PrinterId"]  = .init(stationForLegacy)
-        dict["PrinterIds"] = .init(idsArray)
+        if stationForLegacy.isEmpty {
+            // ✅ No printer
+            dict["Printer"] = .init("")
+            dict["PrinterId"] = .init("")
+            dict["PrinterIds"] = .init([String]())
+        } else {
+            dict["Printer"] = .init(legacy)
+            dict["PrinterId"] = .init(stationForLegacy)
+            dict["PrinterIds"] = .init(idsArray)
+        }
 
         return dict
     }
 }
 
+
+struct ModifierTemplatesPickerSheet: View {
+    let isRtl: Bool
+    let templates: [ModifierTemplateDraft]
+    let onPick: (ModifierTemplateDraft) -> Void
+    let onClose: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(templates) { template in
+                    Button {
+                        onPick(template)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text(template.title)
+                                    .font(.system(size: 16, weight: .semibold))
+                                    .foregroundColor(.primary)
+
+                                Spacer()
+
+                                Text(template.kind == .options
+                                     ? (isRtl ? "אפשרויות" : "Options")
+                                     : (isRtl ? "תוספות" : "Extras"))
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundColor(.secondary)
+                            }
+
+                            Text(template.items.map(\.name).joined(separator: " • "))
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundColor(.secondary)
+                                .lineLimit(2)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                if templates.isEmpty {
+                    Text(isRtl ? "אין תבניות שמורות" : "No saved templates")
+                        .foregroundColor(.secondary)
+                }
+            }
+            .navigationTitle(isRtl ? "בחר תבנית" : "Choose Template")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(action: onClose) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 16, weight: .bold))
+                            .padding(8)
+                            .background(Color(.systemGray5))
+                            .clipShape(Circle())
+                    }
+                }
+            }
+        }
+    }
+}

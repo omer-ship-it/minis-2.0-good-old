@@ -226,7 +226,9 @@ private struct MGSelectionDTO: Encodable {
 private struct MGItemDTO: Encodable {
     let OptionName: String
     let ExtraPrice: Double
+    let LinkedProductId: Int?
 }
+
 private struct ModifierGroupDTO: Encodable {
     let GroupId: String
     let Title: String
@@ -276,7 +278,15 @@ private func makeGroupsDTO(from groups: [[String: Any]]) -> [ModifierGroupDTO] {
         let items: [MGItemDTO] = itemsArr.compactMap { it in
             let name = str(it["OptionName"])
             guard !name.isEmpty else { return nil }
-            return MGItemDTO(OptionName: name, ExtraPrice: dbl(it["ExtraPrice"]))
+
+            let linkedIdRaw = int(it["LinkedProductId"], 0)
+            let linkedId: Int? = linkedIdRaw > 0 ? linkedIdRaw : nil
+
+            return MGItemDTO(
+                OptionName: name,
+                ExtraPrice: dbl(it["ExtraPrice"]),
+                LinkedProductId: linkedId
+            )
         }
 
         return ModifierGroupDTO(GroupId: gid, Title: title, Selection: sel, Items: items)
@@ -286,7 +296,7 @@ private func makeGroupsDTO(from groups: [[String: Any]]) -> [ModifierGroupDTO] {
 
 func buildJsonData(
     description: String,
-    printer: String?,                          // ✅ NEW
+    printer: String?,
     optionsArr: [[String: Any]],
     additionsArr: [[String: Any]],
     removalsArr: [[String: Any]],
@@ -304,42 +314,109 @@ func buildJsonData(
         }
     }()
 
-    // 1️⃣ Build groups DTO from the "new" structured editor model
-    let groupsDTO = makeGroupsDTO(from: groups)
+    if let rawGroupsData = try? JSONSerialization.data(withJSONObject: groups, options: [.prettyPrinted]),
+       let rawGroupsString = String(data: rawGroupsData, encoding: .utf8) {
+        print("🧩 RAW GROUPS INPUT:")
+        print(rawGroupsString)
+    }
 
-    // 2️⃣ If we have real groups → prefer them and DO NOT also flatten everything
-    if !groupsDTO.isEmpty {
+    // ✅ keep raw groups exactly as received, but convert recursively to AnyEncodable
+    if !groups.isEmpty {
+        let encodableGroups: [[String: MinisProductAPI.AnyEncodable]] = groups.map { group in
+            encodeDictionary(group)
+        }
+
         return [
             "Description":    .init(description),
-            "Printer":        .init(resolvedPrinter),          // ✅ NEW (top-level)
-            // keep flat Modifiers empty when using groups, so the backend
-            // doesn't re-flatten them into a default "אפשרויות" group
+            "Printer":        .init(resolvedPrinter),
             "Modifiers":      .init([] as [ModifierDTO]),
-            "ModifierGroups": .init(groupsDTO)
+            "ModifierGroups": .init(encodableGroups)
         ]
     }
 
-    // 3️⃣ Legacy path: no groups → fall back to flat Modifiers
+    // legacy path
     let modifiers: [ModifierDTO] =
         optionsArr.compactMap { row in
             guard let name = row["OptionName"] as? String else { return nil }
-            return ModifierDTO(OptionName: name, ExtraPrice: dbl(row["ExtraPrice"]), kind: "Options")
+            return ModifierDTO(
+                OptionName: name,
+                ExtraPrice: dbl(row["ExtraPrice"]),
+                kind: "Options"
+            )
         }
         + additionsArr.compactMap { row in
             guard let name = row["OptionName"] as? String else { return nil }
-            return ModifierDTO(OptionName: name, ExtraPrice: dbl(row["ExtraPrice"]), kind: "Additions")
+            return ModifierDTO(
+                OptionName: name,
+                ExtraPrice: dbl(row["ExtraPrice"]),
+                kind: "Additions"
+            )
         }
         + removalsArr.compactMap { row in
             guard let name = row["OptionName"] as? String else { return nil }
-            return ModifierDTO(OptionName: name, ExtraPrice: 0.0, kind: "Removals")
+            return ModifierDTO(
+                OptionName: name,
+                ExtraPrice: 0.0,
+                kind: "Removals"
+            )
         }
 
     return [
         "Description": .init(description),
-        "Printer":     .init(resolvedPrinter),                 // ✅ NEW (top-level)
+        "Printer":     .init(resolvedPrinter),
         "Modifiers":   .init(modifiers)
-        // no ModifierGroups key in pure legacy mode
     ]
+}
+
+private func encodeDictionary(_ dict: [String: Any]) -> [String: MinisProductAPI.AnyEncodable] {
+    var out: [String: MinisProductAPI.AnyEncodable] = [:]
+
+    for (key, value) in dict {
+        if let encoded = encodeAny(value) {
+            out[key] = encoded
+        }
+    }
+
+    return out
+}
+
+private func encodeArray(_ array: [Any]) -> [MinisProductAPI.AnyEncodable] {
+    array.compactMap { encodeAny($0) }
+}
+
+private func encodeAny(_ value: Any) -> MinisProductAPI.AnyEncodable? {
+    switch value {
+    case let v as String:
+        return .init(v)
+
+    case let v as Int:
+        return .init(v)
+
+    case let v as Double:
+        return .init(v)
+
+    case let v as Bool:
+        return .init(v)
+
+    case let v as NSNumber:
+        return .init(v.doubleValue)
+
+    case let v as [String: Any]:
+        return .init(encodeDictionary(v))
+
+    case let v as [[String: Any]]:
+        return .init(v.map { encodeDictionary($0) })
+
+    case let v as [Any]:
+        return .init(encodeArray(v))
+
+    case _ as NSNull:
+        return nil
+
+    default:
+        print("⚠️ encodeAny unsupported type:", type(of: value))
+        return nil
+    }
 }
 
 //

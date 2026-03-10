@@ -478,7 +478,7 @@ struct QRShareSheet: View {
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color(.systemGroupedBackground))
+                .background(.clear)
                 .onAppear { angle.start() }
                 .onDisappear { angle.stop() }
             }
