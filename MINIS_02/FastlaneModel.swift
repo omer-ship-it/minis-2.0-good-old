@@ -2000,9 +2000,27 @@ struct ZCreditResult {
     var approved: Bool { status == .approved }
 }
 
+struct ZCreditUnifiedSubmitContext {
+    let entries: [BasketEntry]
+    let orderTotal: Double
+    let diningMode: DiningMode
+    let customerName: String?
+    let customerPhone: String?
+    let source: String
+}
+
 
 final class ZCreditPaymentHandler {
     static let shared = ZCreditPaymentHandler()
+
+    enum CardStartMode {
+        case legacyStart
+        case unifiedSubmit
+    }
+
+    // One-line rollback switch for production.
+    private let cardStartMode: CardStartMode = .unifiedSubmit
+    private let shouldFallbackToLegacyStart = true
 
     private let baseURL = URL(string: "https://minis.studio")!
 
@@ -2041,6 +2059,43 @@ final class ZCreditPaymentHandler {
 
         // ✅ final fallback = no terminal
         return "111111"
+    }
+
+    private func resolveTPN(miniAppId: Int) -> String {
+        let d = UserDefaults.standard
+
+        let perMini = (d.string(forKey: "tpn.\(miniAppId)") ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !perMini.isEmpty { return perMini }
+
+        let legacy = (d.string(forKey: "tpn") ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !legacy.isEmpty { return legacy }
+
+        switch miniAppId {
+        case 13:
+            return "2679742012"
+        default:
+            return ""
+        }
+    }
+
+    private func resolveCurrency(miniAppId: Int) -> String {
+        if miniAppId == 3 { return "GBP" }
+        let currency = (UserDefaults.standard.string(forKey: "currency") ?? "ILS")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return currency.isEmpty ? "ILS" : currency
+    }
+
+    private func legacyBadURLResult() -> ZCreditResult {
+        ZCreditResult(
+            status: .unknown,
+            message: "שגיאה בכתובת השרת",
+            referenceNumber: nil,
+            transactionId: nil,
+            rawPath: "client_bad_url",
+            rawReturnCode: nil
+        )
     }
 
     private func finishFromResponse(
@@ -2161,32 +2216,23 @@ final class ZCreditPaymentHandler {
             completion(result)
         }
     }
-    // MARK: - Main entry point
-
-    func pay(
+    private func payLegacyStart(
         amount: Double,
         orderId: Int?,
-        transactionType: String = "01",   // ✅ NEW: "01" = regular, "53" = refund
+        transactionType: String,
         completion: @escaping (ZCreditResult) -> Void
     ) {
-
-        // You still hard-code pinpads – leaving your logic as-is
-    //    UserDefaults.standard.set("48796294", forKey: "pinpadId")
-  //   UserDefaults.standard.set("48796855", forKey: "pinpadId")
-   //   UserDefaults.standard.set("48796856", forKey: "pinpadId")
-
         let _ = CashpointID(rawValue: UserDefaults.standard.integer(forKey: "cashpointID")) ?? .one
 
-        let safeAmount    = max(0, amount)
+        let safeAmount = max(0, amount)
         let mid = resolveMiniAppId()
-        
         let pinpadId = resolvePinpadId(miniAppId: mid)
 
         print("💳 ZCREDIT PAY mid=\(mid) pinpadId=\(pinpadId) perMini=\(UserDefaults.standard.string(forKey: "pinpadId.\(mid)") ?? "nil") legacy=\(UserDefaults.standard.string(forKey: "pinpadId") ?? "nil")")
         let correlationId = UUID().uuidString
 
         currentCorrelationId = correlationId
-        currentPinpadId      = pinpadId
+        currentPinpadId = pinpadId
 
         let startBody: [String: Any] = [
             "amount": safeAmount,
@@ -2194,21 +2240,11 @@ final class ZCreditPaymentHandler {
             "authOnly": false,
             "orderId": orderId != nil ? String(orderId!) : "",
             "pinpadId": pinpadId,
-
-            // ✅ NEW: tell backend which ZCredit transaction type to run
             "transactionType": transactionType
         ]
 
         guard let startURL = URL(string: "/payments/zcredit/start", relativeTo: baseURL) else {
-            let result = ZCreditResult(
-                status: .unknown,
-                message: "שגיאה בכתובת השרת",
-                referenceNumber: nil,
-                transactionId: nil,
-                rawPath: "client_bad_url",
-                rawReturnCode: nil
-            )
-            DispatchQueue.main.async { completion(result) }
+            DispatchQueue.main.async { completion(self.legacyBadURLResult()) }
             return
         }
 
@@ -2218,19 +2254,17 @@ final class ZCreditPaymentHandler {
         req.setValue(correlationId, forHTTPHeaderField: "x-correlation-id")
         req.setValue(pinpadId, forHTTPHeaderField: "x-pinpad-id")
         if mid != 12 {
-          req.setValue(String(mid), forHTTPHeaderField: "x-miniapp-id")
+            req.setValue(String(mid), forHTTPHeaderField: "x-miniapp-id")
         }
-        
+
         req.httpBody = try? JSONSerialization.data(withJSONObject: startBody)
 
-        // 🔍 Debug: print the full curl for /payments/zcredit/start
         print("🔵 ZCredit /payments/zcredit/start cURL:")
         print(req.curlDebug)
 
         URLSession.shared.dataTask(with: req) { [weak self] data, resp, error in
             guard let self = self else { return }
 
-            // Network / transport error → unknown
             if let error = error {
                 let json: [String: Any] = [
                     "ok": false,
@@ -2265,7 +2299,6 @@ final class ZCreditPaymentHandler {
                 return
             }
 
-            // Stash session info for potential /cancel
             if let sid = (obj["sessionId"] as? String) ?? (obj["SessionId"] as? String) {
                 self.currentSessionId = sid
             }
@@ -2273,10 +2306,228 @@ final class ZCreditPaymentHandler {
                 self.currentReferenceOrSession = ref
             }
 
-            // ✅ Let the helper map json → ZCreditResult (approved / declined / unknown)
             self.finishFromResponse(json: obj, completion: completion)
-
         }.resume()
+    }
+
+    private func buildUnifiedSubmitPayload(
+        amount: Double,
+        transactionType: String,
+        miniAppId: Int,
+        pinpadId: String,
+        context: ZCreditUnifiedSubmitContext
+    ) -> [String: Any] {
+        let defaults = UserDefaults.standard
+        let safeAmount = max(0, amount)
+        let currency = resolveCurrency(miniAppId: miniAppId)
+        let requestUUID = UUID().uuidString
+
+        let basketPayload: [[String: Any]] = context.entries.map { entry in
+            let qty = max(entry.quantity, 0)
+            let unitPrice = entry.unitPrice > 0 ? entry.unitPrice : entry.item.price
+            return [
+                "lineId": entry.id,
+                "productId": entry.item.id,
+                "name": entry.item.name,
+                "quantity": qty,
+                "unitPrice": unitPrice,
+                "lineTotal": unitPrice * Double(qty),
+                "modifiers": entry.subtitle ?? ""
+            ]
+        }
+
+        let basketSubtotal = basketPayload.reduce(0.0) { partial, line in
+            partial + ((line["lineTotal"] as? Double) ?? 0)
+        }
+
+        let trimmedName = (context.customerName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedPhone = (context.customerPhone ?? defaults.string(forKey: "userPhone") ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedEmail = (defaults.string(forKey: "userEmail") ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        var orderPayload: [String: Any] = [
+            "uuid": requestUUID,
+            "miniAppId": miniAppId,
+            "customerId": "1",
+            "email": trimmedEmail.isEmpty ? "customer@example.com" : trimmedEmail,
+            "name": trimmedName.isEmpty ? "Customer" : trimmedName,
+            "phone": trimmedPhone.isEmpty ? "0545456305" : trimmedPhone,
+            "service": context.diningMode == .takeAway ? "ta" : "sit",
+            "source": context.source,
+            "basket": basketPayload,
+            "totals": [
+                "basket": basketSubtotal,
+                "discount": max(0, basketSubtotal - context.orderTotal),
+                "excluded": 0,
+                "total": context.orderTotal,
+                "currency": currency
+            ]
+        ]
+
+        if miniAppId == 13 {
+            let pickupV2 = (defaults.string(forKey: "pickup.location.v2") ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let pickupV1 = (defaults.string(forKey: "pickup.location") ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if let pickupLocation = canonicalPickupLocation(!pickupV2.isEmpty ? pickupV2 : pickupV1) {
+                orderPayload["pickupLocation"] = pickupLocation
+            }
+        }
+
+        return [
+            "context": "cashpoint",
+            "miniAppId": miniAppId,
+            "intent": "update",
+            "amount": safeAmount,
+            "currency": currency,
+            "order": orderPayload,
+            "payment": [
+                "mode": "card",
+                "amount": safeAmount,
+                "currency": currency,
+                "pinpadId": pinpadId,
+                "tpn": resolveTPN(miniAppId: miniAppId),
+                "transactionType": transactionType
+            ]
+        ]
+    }
+
+    private func extractUnifiedEnvelope(from json: [String: Any]) -> [String: Any]? {
+        if json["resultStatus"] != nil || json["returnCode"] != nil || json["path"] != nil {
+            return json
+        }
+
+        for key in ["payment", "zcredit", "transaction", "result"] {
+            if let nested = json[key] as? [String: Any],
+               nested["resultStatus"] != nil || nested["returnCode"] != nil || nested["path"] != nil {
+                return nested
+            }
+        }
+
+        return nil
+    }
+
+    private func payUnifiedSubmit(
+        amount: Double,
+        transactionType: String,
+        context: ZCreditUnifiedSubmitContext,
+        fallback: @escaping () -> Void,
+        completion: @escaping (ZCreditResult) -> Void
+    ) {
+        let mid = resolveMiniAppId()
+        let pinpadId = resolvePinpadId(miniAppId: mid)
+        let correlationId = UUID().uuidString
+
+        currentCorrelationId = correlationId
+        currentPinpadId = pinpadId
+
+        let payload = buildUnifiedSubmitPayload(
+            amount: amount,
+            transactionType: transactionType,
+            miniAppId: mid,
+            pinpadId: pinpadId,
+            context: context
+        )
+
+        guard let url = URL(string: "https://staging-api.minis.studio/orders/submit") else {
+            fallback()
+            return
+        }
+
+        var req = URLRequest(url: url, timeoutInterval: 60)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue(correlationId, forHTTPHeaderField: "x-correlation-id")
+        req.setValue(pinpadId, forHTTPHeaderField: "x-pinpad-id")
+        req.setValue(String(mid), forHTTPHeaderField: "x-miniapp-id")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+
+        print("🔵 ZCredit /orders/submit cURL:")
+        print(req.curlDebug)
+
+        URLSession.shared.dataTask(with: req) { [weak self] data, resp, error in
+            guard let self = self else { return }
+
+            if let error = error {
+                print("🟠 unified card start failed, fallback to legacy: \(error.localizedDescription)")
+                fallback()
+                return
+            }
+
+            guard let http = resp as? HTTPURLResponse,
+                  let data = data,
+                  (200...299).contains(http.statusCode),
+                  !data.isEmpty
+            else {
+                print("🟠 unified card start HTTP fallback to legacy")
+                fallback()
+                return
+            }
+
+            guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let envelope = self.extractUnifiedEnvelope(from: obj)
+            else {
+                print("🟠 unified card start payload fallback to legacy")
+                fallback()
+                return
+            }
+
+            if let sid = (envelope["sessionId"] as? String) ?? (envelope["SessionId"] as? String) {
+                self.currentSessionId = sid
+            }
+            if let ref = (envelope["referenceNumber"] as? String) ?? (envelope["ReferenceNumber"] as? String) {
+                self.currentReferenceOrSession = ref
+            }
+
+            self.finishFromResponse(json: envelope, completion: completion)
+        }.resume()
+    }
+
+    // MARK: - Main entry point
+
+    func pay(
+        amount: Double,
+        orderId: Int?,
+        transactionType: String = "01",   // ✅ NEW: "01" = regular, "53" = refund
+        unifiedContext: ZCreditUnifiedSubmitContext? = nil,
+        completion: @escaping (ZCreditResult) -> Void
+    ) {
+        let canUseUnifiedSubmit = (
+            cardStartMode == .unifiedSubmit &&
+            transactionType == "01" &&
+            unifiedContext != nil
+        )
+
+        if canUseUnifiedSubmit, let unifiedContext {
+            payUnifiedSubmit(
+                amount: amount,
+                transactionType: transactionType,
+                context: unifiedContext,
+                fallback: { [weak self] in
+                    guard let self = self else { return }
+                    if self.shouldFallbackToLegacyStart {
+                        self.payLegacyStart(
+                            amount: amount,
+                            orderId: orderId,
+                            transactionType: transactionType,
+                            completion: completion
+                        )
+                    } else {
+                        DispatchQueue.main.async { completion(self.legacyBadURLResult()) }
+                    }
+                },
+                completion: completion
+            )
+            return
+        }
+
+        payLegacyStart(
+            amount: amount,
+            orderId: orderId,
+            transactionType: transactionType,
+            completion: completion
+        )
     }
 
     // MARK: - Cancel

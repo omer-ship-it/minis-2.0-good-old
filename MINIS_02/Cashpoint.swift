@@ -6247,6 +6247,7 @@ struct CashPointView: View {
                     },
 
                     total: finalTotal,
+                    entries: basketEntriesSorted,
                     isRtl: isRtl,
                     diningMode: $diningMode,
                     requiresPhoneStep: basketRequiresPhone,

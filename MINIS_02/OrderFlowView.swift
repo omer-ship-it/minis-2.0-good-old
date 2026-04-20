@@ -841,6 +841,7 @@ struct OrderFlowView: View {
     }
 
     let total: Double
+    let entries: [BasketEntry]
     let isRtl: Bool
     @Binding var diningMode: DiningMode
     let requiresPhoneStep: Bool
@@ -876,6 +877,27 @@ struct OrderFlowView: View {
             method: method,
             cashAmount: cash,
             cardAmount: card
+        )
+    }
+
+    private func buildUnifiedCardContext() -> ZCreditUnifiedSubmitContext? {
+        guard cashPointMode, !entries.isEmpty else { return nil }
+
+        let liveName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let savedName = posSavedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalName = !liveName.isEmpty ? liveName : (!savedName.isEmpty ? savedName : nil)
+
+        let livePhone = phoneDigits.filter(\.isNumber)
+        let savedPhone = posSavedPhone.filter(\.isNumber)
+        let finalPhone = !livePhone.isEmpty ? livePhone : (!savedPhone.isEmpty ? savedPhone : nil)
+
+        return ZCreditUnifiedSubmitContext(
+            entries: entries,
+            orderTotal: round2(totalWithTip),
+            diningMode: diningMode,
+            customerName: finalName,
+            customerPhone: finalPhone,
+            source: "cashpoint"
         )
     }
 
@@ -940,6 +962,7 @@ struct OrderFlowView: View {
     init(
         onSendToKitchen: @escaping () -> Void,
         total: Double,
+        entries: [BasketEntry] = [],
         isRtl: Bool,
         diningMode: Binding<DiningMode>,
         requiresPhoneStep: Bool,
@@ -954,6 +977,7 @@ struct OrderFlowView: View {
     ) {
         self.onSendToKitchen = onSendToKitchen
         self.total = total
+        self.entries = entries
         self.isRtl = isRtl
         self._diningMode = diningMode
         self.requiresPhoneStep = requiresPhoneStep
@@ -2737,7 +2761,11 @@ struct OrderFlowView: View {
                  amount: amt,
                  reason: "payOnBillWithCard pay() begin")
         }
-        ZCreditPaymentHandler.shared.pay(amount: amt, orderId: nil) { result in
+        ZCreditPaymentHandler.shared.pay(
+            amount: amt,
+            orderId: nil,
+            unifiedContext: buildUnifiedCardContext()
+        ) { result in
             DispatchQueue.main.async {
                 self.isPaying = false
 
@@ -2990,7 +3018,11 @@ struct OrderFlowView: View {
                  amount: amountToCharge,
                  reason: "startPayment pay() begin")
         }
-        ZCreditPaymentHandler.shared.pay(amount: amountToCharge, orderId: nil) { result in
+        ZCreditPaymentHandler.shared.pay(
+            amount: amountToCharge,
+            orderId: nil,
+            unifiedContext: buildUnifiedCardContext()
+        ) { result in
             Task { @MainActor in
                 let ms = Int(Date().timeIntervalSince(t0) * 1000)
                       if self.ticketNow > 0 {
@@ -4232,7 +4264,11 @@ struct OrderFlowView: View {
                  reason: "split pay() begin idx=\(index)")
         }
 
-        ZCreditPaymentHandler.shared.pay(amount: amount, orderId: nil) { result in
+        ZCreditPaymentHandler.shared.pay(
+            amount: amount,
+            orderId: nil,
+            unifiedContext: buildUnifiedCardContext()
+        ) { result in
             Task { @MainActor in
                 let ms = Int(Date().timeIntervalSince(t0) * 1000)
                 if self.ticketNow > 0 {
