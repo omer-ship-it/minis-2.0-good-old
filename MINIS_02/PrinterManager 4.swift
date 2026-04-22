@@ -1918,7 +1918,9 @@ final class PrinterManager {
 
             if shouldShowMinisRow {
                 job += EscPos.feed(1)
-                job += makeBlackTitle("MINIS", totalWidth: 24)
+                job += EscPos.align(1)
+                job += EscPos.style(doubleHeight: true, doubleWidth: true, bold: true)
+                job += asciiLine("MINIS")
                 job += EscPos.feed(1)
             }
 
@@ -1977,7 +1979,9 @@ final class PrinterManager {
 
             if shouldShowMinisRow {
                 job += EscPos.feed(1)
-                job += makeBlackTitle("MINIS", totalWidth: 24)
+                job += EscPos.align(1)
+                job += EscPos.style(doubleHeight: true, doubleWidth: true, bold: true)
+                job += asciiLine("MINIS")
                 job += EscPos.feed(1)
             }
 

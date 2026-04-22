@@ -249,10 +249,7 @@ struct HomeView: View {
 
     @ViewBuilder
     private func MenuCover() -> some View {
-        @AppStorage("deliveryLoc") var deliveryLoc: String = ""
-
         let isRtlDirection = (UserDefaults.standard.string(forKey: "direction") == "rtl")
-        let forceDark = !deliveryLoc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 
         Group {
             if isRtlDirection {
@@ -273,7 +270,6 @@ struct HomeView: View {
                 }
             }
         }
-        .preferredColorScheme(forceDark ? .dark : nil)
     }
 
     // MARK: - Referrals Persistence
@@ -565,6 +561,24 @@ private func loadAllMiniReferralsFromAppGroup() -> [MiniReferral] {
 
 // MARK: - RTL Helper
 
+private struct ForceRTLSemanticHost: UIViewControllerRepresentable {
+    func makeUIViewController(context: Context) -> UIViewController { ForceRTLSemanticController() }
+    func updateUIViewController(_ uiViewController: UIViewController, context: Context) {}
+}
+
+private final class ForceRTLSemanticController: UIViewController {
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        view.semanticContentAttribute = .forceRightToLeft
+        navigationController?.view.semanticContentAttribute = .forceRightToLeft
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        navigationController?.view.semanticContentAttribute = .unspecified
+    }
+}
+
 struct ForceRTL<Content: View>: View {
     let content: Content
     init(@ViewBuilder _ content: () -> Content) { self.content = content() }
@@ -572,24 +586,6 @@ struct ForceRTL<Content: View>: View {
     var body: some View {
         content
             .environment(\.layoutDirection, .rightToLeft)
-            .background(SemanticHost())
-    }
-
-    private struct SemanticHost: UIViewControllerRepresentable {
-        func makeUIViewController(context: Context) -> UIViewController { Controller() }
-        func updateUIViewController(_ uiViewController: UIViewController, context: Context) {}
-
-        final class Controller: UIViewController {
-            override func viewDidAppear(_ animated: Bool) {
-                super.viewDidAppear(animated)
-                view.semanticContentAttribute = .forceRightToLeft
-                navigationController?.view.semanticContentAttribute = .forceRightToLeft
-            }
-
-            override func viewWillDisappear(_ animated: Bool) {
-                super.viewWillDisappear(animated)
-                navigationController?.view.semanticContentAttribute = .unspecified
-            }
-        }
+            .background(ForceRTLSemanticHost())
     }
 }

@@ -536,6 +536,8 @@ struct menuView: View {
     @AppStorage("assistance.requested") private var assistanceRequested: Bool = false
     @AppStorage(AppSettings.Key.cashPointMode) private var cashPointMode: Bool = AppSettings.Defaults.cashPointMode
     @AppStorage("miniAppId") private var miniAppId: Int = 0    // 👈 Use this instead of shopId
+    @AppStorage("miniTitle") private var miniTitle: String = ""
+    @AppStorage("miniSubtitle") private var miniSubtitle: String = ""
     @State private var lastOrder: OrderSnapshot?
     @State private var confirmationOrder: OrderSnapshot?
     @State private var categorySyncResumeAt: Date = .distantPast
@@ -574,6 +576,20 @@ struct menuView: View {
     
     // MARK: - Idle suppression around Welcome
     @State private var idleBlockUntil: Date = .distantPast
+
+    private var headerTitleText: String {
+        let stored = miniTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !stored.isEmpty { return stored }
+        if miniAppId == 13 { return "vitamin" }
+        return isRtl ? "" : "Beigel Bake · Brick Ln"
+    }
+
+    private var headerSubtitleText: String {
+        let stored = miniSubtitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !stored.isEmpty { return stored }
+        if miniAppId == 13 { return "בריא · מהיר · טבעי" }
+        return isRtl ? "" : "Delivered in around 20 minutes"
+    }
 
     private func resetIdleBaseline(blockSeconds: TimeInterval = 0) {
         markGlobalInteraction()
@@ -1640,8 +1656,73 @@ struct menuView: View {
 
    
 
+    private let redeemableCoffeeNames: Set<String> = [
+        "אספרסו",
+        "הפוך",
+        "אמריקנו",
+        "מקיאטו",
+        "קורטדו",
+        "שוקו חם",
+        "מאצ'ה חם",
+        "מוקה חם",
+        "צ'אי חם",
+        "קפה שחור",
+        "תה",
+        "תה חורף",
+        "גולדן מילק",
+        "פאמפקין ספייס לאטה",
+        "תה קר",
+        "קפה קר",
+        "אמריקנו קר",
+        "מאצ'ה קר",
+        "שוקו קר",
+        "מוקה קר",
+        "צ'אי קר"
+    ]
+
+    private func normalizedRedeemableCoffeeName(_ value: String) -> String {
+        value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\u{200F}", with: "")
+            .replacingOccurrences(of: "\u{200E}", with: "")
+            .replacingOccurrences(of: "\u{00A0}", with: " ")
+    }
+
+    private func isRedeemableCoffeeProduct(_ name: String) -> Bool {
+        let normalizedName = normalizedRedeemableCoffeeName(name)
+        return redeemableCoffeeNames.contains {
+            normalizedName == $0 || normalizedName.hasPrefix($0)
+        }
+    }
+
     private func incrementEntry(_ id: Int) {
         guard let entry = basket[id] else { return }
+
+        let freeCoffeeKey = "member.freeCoffeeLineId"
+        let freeCoffeeLineId = UserDefaults.standard.integer(forKey: freeCoffeeKey)
+
+        if id == freeCoffeeLineId && isRedeemableCoffeeProduct(entry.item.name) {
+            if let paidLineId = matchingPaidCoffeeLineId(for: entry) {
+                basket[paidLineId]?.quantity += 1
+            } else {
+                let lineId = nextBasketLineId
+                nextBasketLineId += 1
+
+                basket[lineId] = BasketEntry(
+                    id: lineId,
+                    item: entry.item,
+                    quantity: 1,
+                    subtitle: entry.subtitle,
+                    unitPrice: entry.unitPrice,
+                    selectedOptions: entry.selectedOptions,
+                    selectedAdditions: entry.selectedAdditions
+                )
+            }
+
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            return
+        }
+
         basket[id]?.quantity = entry.quantity + 1
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
     }
@@ -1715,6 +1796,22 @@ struct menuView: View {
     }
     private func decrementEntry(_ id: Int) {
         guard let entry = basket[id] else { return }
+        let freeCoffeeKey = "member.freeCoffeeLineId"
+        let freeCoffeeLineId = UserDefaults.standard.integer(forKey: freeCoffeeKey)
+
+        if id == freeCoffeeLineId && isRedeemableCoffeeProduct(entry.item.name) {
+            basket[id] = nil
+            UserDefaults.standard.removeObject(forKey: freeCoffeeKey)
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+
+            if basket.isEmpty {
+                DispatchQueue.main.async {
+                    showBasketSheet = false
+                }
+            }
+            return
+        }
+
         let newQty = entry.quantity - 1
 
         if newQty <= 0 {
@@ -1731,6 +1828,47 @@ struct menuView: View {
                 showBasketSheet = false
             }
         }
+    }
+
+    private func matchingPaidCoffeeLineId(for rewardEntry: BasketEntry) -> Int? {
+        basket.first { lineId, entry in
+            lineId != rewardEntry.id
+                && entry.item.id == rewardEntry.item.id
+                && entry.subtitle == rewardEntry.subtitle
+                && abs(entry.unitPrice - rewardEntry.unitPrice) < 0.0001
+                && entry.selectedOptions == rewardEntry.selectedOptions
+                && entry.selectedAdditions == rewardEntry.selectedAdditions
+        }?.key
+    }
+
+    private func redeemFreeCoffeeInBasket() {
+        let freeCoffeeKey = "member.freeCoffeeLineId"
+        guard UserDefaults.standard.integer(forKey: freeCoffeeKey) == 0 else { return }
+
+        let coffeeLines = basket.values.filter { isRedeemableCoffeeProduct($0.item.name) && $0.quantity > 0 }
+        guard let target = coffeeLines.min(by: { $0.unitPrice < $1.unitPrice }) else { return }
+
+        if target.quantity > 1 {
+            basket[target.id]?.quantity = target.quantity - 1
+
+            let rewardLineId = nextBasketLineId
+            nextBasketLineId += 1
+
+            basket[rewardLineId] = BasketEntry(
+                id: rewardLineId,
+                item: target.item,
+                quantity: 1,
+                subtitle: target.subtitle,
+                unitPrice: target.unitPrice,
+                selectedOptions: target.selectedOptions,
+                selectedAdditions: target.selectedAdditions
+            )
+
+            UserDefaults.standard.set(rewardLineId, forKey: freeCoffeeKey)
+            return
+        }
+
+        UserDefaults.standard.set(target.id, forKey: freeCoffeeKey)
     }
 
     private var availableCategories: [String] {
@@ -1991,11 +2129,7 @@ if miniAppId == 12  || miniAppId == 13 {
                                         } else {
 
                                             // TITLE (original)
-                                            Text(
-                                                miniAppId == 13
-                                                ? "vitamin"
-                                                : (isRtl ? "" : "Beigel Bake · Brick Ln")
-                                            )
+                                            Text(headerTitleText)
                                             .padding(.top, 15)
                                             .font(
                                                 miniAppId == 13
@@ -2010,13 +2144,7 @@ if miniAppId == 12  || miniAppId == 13 {
                                             }
 
                                             // SUBTITLE (original)
-                                            Text(
-                                                miniAppId == 13
-                                                ? "בריא · מהיר · טבעי"
-                                                : (isRtl
-                                                    ? ""
-                                                    : "Delivered in around 20 minutes")
-                                            )
+                                            Text(headerSubtitleText)
                                             .font(.menuRegular(isRtl ? 15 : 18))
                                             .foregroundColor(
                                                 Color(UIColor { trait in
@@ -3028,6 +3156,7 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
                 totalPrice: basketTotalPrice,
                 onIncrement: { id in incrementEntry(id) },
                 onDecrement: { id in decrementEntry(id) },
+                onRedeemFreeCoffee: { redeemFreeCoffeeInBasket() },
                 onConfirm: { orderNumber, diningMode in
                     let snapshot = OrderSnapshot(
                         orderNumber: orderNumber,
@@ -3070,8 +3199,6 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
                 }
             )
             .trackGlobalInteraction()
-            
-            .preferredColorScheme(forceDark ? .dark : nil)
             .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
         }
 
@@ -5029,6 +5156,7 @@ struct BasketSheet: View {
     let totalPrice: Double
     let onIncrement: (Int) -> Void
     let onDecrement: (Int) -> Void
+    let onRedeemFreeCoffee: () -> Void
     let onConfirm: (Int, DiningMode) -> Void
     let onProductTap: (Int, ShellMenuItem) -> Void
 
@@ -5377,9 +5505,8 @@ struct BasketSheet: View {
 
   
     private var skipApplePay: Bool {
-      
-        return UserDefaults.standard.bool(forKey: "debugSkipApplePay")
-        
+        let storedValue = UserDefaults.standard.object(forKey: "debugSkipApplePay") as? Bool
+        return storedValue ?? false
     }
     
     private var bottomAreaEstimatedH: CGFloat {
@@ -5510,7 +5637,7 @@ struct BasketSheet: View {
 
                     print("🎟️ BasketSheet discount:", activeDiscount as Any)
 
-                    UserDefaults.standard.set(true, forKey: "debugSkipApplePay")
+                    UserDefaults.standard.set(false, forKey: "debugSkipApplePay")
 
                     // ✅ always derive diningMode from the shared intent
                     syncDiningModeFromIntent()
@@ -5544,17 +5671,15 @@ struct BasketSheet: View {
                     name: $tempName,
                     phone: $tempPhone,
                     isRtl: isRtl,
-                    needsPhone: (miniAppId == 3)
+                    needsPhone: true
                 ) { finalName, finalPhone in
                     let n = finalName.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !n.isEmpty else { return }
                     UserDefaults.standard.set(n, forKey: "userName")
 
-                    if miniAppId == 3 {
-                        let p = finalPhone.trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !p.isEmpty else { return }
-                        UserDefaults.standard.set(p, forKey: "userPhone")
-                    }
+                    let p = finalPhone.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !p.isEmpty else { return }
+                    UserDefaults.standard.set(p, forKey: "userPhone")
 
                     showNameSheet = false
 
@@ -5738,7 +5863,7 @@ struct BasketSheet: View {
                 if canRedeemCoffeeNow {
                     Button {
                         let coffeesNow = coffeeUnitsInOrder(coffeeEntries)
-                        applyFreeCoffeeToBasket()
+                        onRedeemFreeCoffee()
                         redeemFreeCoffeeAndAdjustStamps(coffeesEarned: coffeesNow)
                         Haptics.success()
                     } label: {
@@ -5822,7 +5947,7 @@ struct BasketSheet: View {
                                 let storedPhone = (UserDefaults.standard.string(forKey: "userPhone") ?? "")
                                     .trimmingCharacters(in: .whitespacesAndNewlines)
 
-                                let needsPhone = (miniAppId == 3)
+                                let needsPhone = true
                                 let missing = storedName.isEmpty || (needsPhone && storedPhone.isEmpty)
                                 if missing {
                                     tempName = storedName
@@ -6443,7 +6568,22 @@ struct BasketSheet: View {
         "אמריקנו",
         "מקיאטו",
         "קורטדו",
-        "קפה שחור"
+        "שוקו חם",
+        "מאצ'ה חם",
+        "מוקה חם",
+        "צ'אי חם",
+        "קפה שחור",
+        "תה",
+        "תה חורף",
+        "גולדן מילק",
+        "פאמפקין ספייס לאטה",
+        "תה קר",
+        "קפה קר",
+        "אמריקנו קר",
+        "מאצ'ה קר",
+        "שוקו קר",
+        "מוקה קר",
+        "צ'אי קר"
     ]
     
     private func normName(_ s: String) -> String {
@@ -6592,9 +6732,7 @@ struct BasketSheet: View {
             diningMode: diningMode,
             source: source,
             customerName: UserDefaults.standard.string(forKey: "userName"),
-            customerPhone: (miniAppId == 3)
-                ? UserDefaults.standard.string(forKey: "userPhone")
-                : "+447522552608",
+            customerPhone: UserDefaults.standard.string(forKey: "userPhone"),
             zcreditMeta: finalMeta.isEmpty ? nil : finalMeta
         ) { result in
             DispatchQueue.main.async {
@@ -6660,7 +6798,7 @@ struct BasketSheet: View {
         let storedPhone = (UserDefaults.standard.string(forKey: "userPhone") ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        let needsPhone = (miniAppId == 3)
+        let needsPhone = true
         let missing = storedName.isEmpty || (needsPhone && storedPhone.isEmpty)
 
         if missing {
@@ -6794,12 +6932,20 @@ struct NameSheetView: View {
     }
     
     private var isValidUkMobile: Bool {
-        phoneDigits.hasPrefix("07") && phoneDigits.count == 11
+        let trimmed = phone.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("+") {
+            return (9...15).contains(phoneDigits.count)
+        }
+        return (9...15).contains(phoneDigits.count)
     }
     
     private var normalizedUkPhone: String {
         guard isValidUkMobile else { return "" }
-        return "+44" + phoneDigits.dropFirst(1)
+        let trimmed = phone.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("+") {
+            return "+" + phoneDigits
+        }
+        return phoneDigits
     }
     
     private var canContinue: Bool {
@@ -7359,6 +7505,8 @@ struct KioskWelcomeView: View {
     @AppStorage(CheckoutKeys.intent) private var checkoutIntentRaw: String = ""
     @AppStorage(CheckoutKeys.serviceLabel) private var serviceModeLabel: String = ""
     @AppStorage(CheckoutKeys.didShowWelcome) private var didShowWelcome: Bool = false
+    @AppStorage("miniTitle") private var miniTitle: String = ""
+    @AppStorage("miniSubtitle") private var miniSubtitle: String = ""
 
     // ✅ Language + global RTL (single source of truth is app.isRtl)
     @AppStorage(LangKeys.lang) private var lang: String = "he"   // "he" | "ar" | "en"
@@ -7413,8 +7561,15 @@ struct KioskWelcomeView: View {
     }
 
     // ✅ Labels
-    private var welcomeTitle: String { effectiveIsRtl ? "ברוכים הבאים" : "Welcome" }
-    private var welcomeSubtitle: String { effectiveIsRtl ? "לחצו להזמנה" : "Tap to order" }
+    private var welcomeTitle: String {
+        let stored = miniTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        return stored.isEmpty ? (effectiveIsRtl ? "ברוכים הבאים" : "Welcome") : stored
+    }
+
+    private var welcomeSubtitle: String {
+        let stored = miniSubtitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        return stored.isEmpty ? (effectiveIsRtl ? "לחצו להזמנה" : "Tap to order") : stored
+    }
     private var dineInLabel: String { effectiveIsRtl ? "לשבת" : "Dine-in" }
     private var takeawayLabel: String { effectiveIsRtl ? "לקחת" : "Takeaway" }
 
@@ -7479,17 +7634,6 @@ struct KioskWelcomeView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
 
-        // ✅ Place pill safely under top bars
-        .safeAreaInset(edge: .top) {
-            HStack {
-                Spacer()
-                languagePill
-            }
-            .padding(.horizontal, 16)
-            .padding(.top, 10)
-            .padding(.bottom, 6)
-        }
-
        // .toolbar(.hidden, for: .navigationBar)
         //.navigationBarHidden(true)
 
@@ -7549,38 +7693,6 @@ struct KioskWelcomeView: View {
 
     // MARK: - UI bits
 
-    private var languagePill: some View {
-        HStack(spacing: 6) {
-            langButton(title: "EN", value: "en")
-            Divider().frame(height: 16).opacity(0.25)
-            langButton(title: "ع", value: "ar")
-            Divider().frame(height: 16).opacity(0.25)
-            langButton(title: "עב", value: "he")
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(.ultraThinMaterial)
-        .clipShape(Capsule())
-    }
-
-    private func langButton(title: String, value: String) -> some View {
-        let selected = (effectiveLang == value)
-
-        return Button {
-            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            lang = value
-        } label: {
-            Text(title)
-                .font(.menuRegular(15).weight(.bold))
-                .foregroundColor(selected ? .white : .white.opacity(0.85))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(selected ? Color.black.opacity(0.35) : .clear)
-                .clipShape(Capsule())
-        }
-        .buttonStyle(.plain)
-    }
-    
     private func kioskButton(title: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title)

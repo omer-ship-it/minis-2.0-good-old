@@ -183,7 +183,6 @@ struct MINIS_02App: App {
                         .environment(\.isRtl, appIsRtl)
                 } else {
                     menuView()
-                               .preferredColorScheme(.dark)
                                .environment(\.layoutDirection, .leftToRight)
                                .environment(\.locale, appLocale)
                                   .environment(\.isRtl, appIsRtl)   // your custom env key

@@ -6253,6 +6253,8 @@ struct CashPointView: View {
                     requiresPhoneStep: basketRequiresPhone,
 
                     onCancel: {
+                        PaymentAttemptStore.shared.clearIfTerminal()
+                        UserDefaults.standard.set(0, forKey: "pos.ticketNumber")
                         showOrderFlow = false
                         if let first = categories.first {
                             selectedCategory = first
@@ -6272,6 +6274,8 @@ struct CashPointView: View {
                     },
                     // ✅ NEW: waiter clicks "סיים" inside OrderFlowView → only then we close & reset
                     onFinish: {
+                        PaymentAttemptStore.shared.clearIfTerminal()
+                        UserDefaults.standard.set(0, forKey: "pos.ticketNumber")
                         showOrderFlow = false
 
                         // Keep your reset in ONE place (here)
