@@ -474,20 +474,11 @@ struct PrinterSetupSheet: View {
 
                 // debug curl
                 if let body = req.httpBody, let s = String(data: body, encoding: .utf8) {
-                    print("""
-                    🖨️ PRINTERS UPSERT cURL:
-                    curl -i -X POST "\(url.absoluteString)" \\
-                      -H "Content-Type: application/json" \\
-                      -H "Accept: application/json" \\
-                      -d '\(s)'
-                    """)
                 }
 
                 let (data, resp) = try await URLSession.shared.data(for: req)
                 let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
                 let raw = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
-                print("🌍 printers/upsert HTTP \(code)")
-                print("📦 printers/upsert RAW (first 600): \(String(raw.prefix(600)))")
 
                 guard (200..<300).contains(code) else {
                     throw NSError(domain: "http", code: code, userInfo: [NSLocalizedDescriptionKey: raw])
@@ -525,7 +516,6 @@ struct PrinterSetupSheet: View {
                     isSyncing = false
                     lastSyncError = error.localizedDescription
                     toast = "Sync failed"
-                    print("❌ printers sync failed:", error.localizedDescription)
                 }
             }
         }
@@ -1166,20 +1156,12 @@ enum PrintersAdminAPI {
 
         // ✅ debug curl
         if let body = req.httpBody, let s = String(data: body, encoding: .utf8) {
-            print("""
-            🖨️ PRINTERS UPSERT cURL:
-            curl -i -X POST "\(url.absoluteString)" \\
-              -H "Content-Type: application/json" \\
-              -d '\(s)'
-            """)
         }
 
         let (data, resp) = try await URLSession.shared.data(for: req)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
         let text = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
 
-        print("🌍 printers/upsert HTTP \(code)")
-        print("📦 printers/upsert RAW (first 600): \(String(text.prefix(600)))")
 
         guard (200..<300).contains(code) else {
             throw ApiError(message: "HTTP \(code): \(text)")

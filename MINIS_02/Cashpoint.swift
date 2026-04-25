@@ -266,7 +266,6 @@ struct CashPointView: View {
     private func renameCategoryOnServer(oldName: String, newName: String) {
         let miniAppId = resolvedMiniAppId
         guard miniAppId > 0 else {
-            print("❌ categories/rename: missing miniAppId")
             return
         }
 
@@ -276,7 +275,6 @@ struct CashPointView: View {
         guard !cleanOld.isEmpty, !cleanNew.isEmpty, cleanOld != cleanNew else { return }
 
         guard let url = URL(string: "https://minis.studio/api/categories/rename") else {
-            print("❌ categories/rename: bad URL")
             return
         }
 
@@ -287,16 +285,9 @@ struct CashPointView: View {
         ]
 
         guard let jsonData = try? JSONSerialization.data(withJSONObject: body) else {
-            print("❌ categories/rename: encode failed")
             return
         }
 
-        print("""
-        🌀 CATEGORY RENAME cURL:
-        curl -X POST "https://minis.studio/api/categories/rename" \
-          -H "Content-Type: application/json" \
-          -d '\(String(data: jsonData, encoding: .utf8) ?? "{}")'
-        """)
 
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
@@ -308,14 +299,11 @@ struct CashPointView: View {
                 let (data, resp) = try await URLSession.shared.data(for: req)
                 let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
                 let text = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
-                print("🌍 categories/rename HTTP \(code)")
-                print("📦 categories/rename RESPONSE:", text)
 
                 await MainActor.run {
                     safeReloadMenu(reason: "rename category")
                 }
             } catch {
-                print("❌ categories/rename network error:", error.localizedDescription)
             }
         }
     }
@@ -376,7 +364,6 @@ struct CashPointView: View {
             : (Int(UserDefaults.standard.string(forKey: "shopId") ?? "0") ?? 0)
 
         guard miniId > 0 else {
-            print("❌ archiveProduct: missing miniAppId/shopId")
             return
         }
 
@@ -394,7 +381,6 @@ struct CashPointView: View {
           -H "Content-Type: application/json" \\
           -d '{ "miniAppId": \(miniId), "mode": "\(mode)" }'
         """
-        print("🔎 Product action DEBUG CURL:\n\(debugCurl)")
 
         struct ArchiveBody: Encodable {
             let miniAppId: Int
@@ -412,13 +398,11 @@ struct CashPointView: View {
             do {
                 let (_, resp) = try await URLSession.shared.data(for: req)
                 let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
-                print("📦 product \(productId) mode=\(mode) miniAppId=\(miniId) → HTTP \(code)")
 
                 await MainActor.run {
                     safeReloadMenu(reason: "product \(mode)")
                 }
             } catch {
-                print("❌ product \(mode) error:", error.localizedDescription)
             }
         }
     }
@@ -435,6 +419,7 @@ struct CashPointView: View {
     private var isTeamTabMode: Bool { activeTeamTab != nil }
     @State private var pendingFinishAfterSubmit: Bool = false
     @State private var showClearStockConfirm = false
+    @State private var quickStockPickerItem: ShellMenuItem? = nil
     @State private var isCategoryReorderMode: Bool = false
     @Environment(\.dismiss) private var dismiss
     @State private var frozenOrderIds: [Int] = []
@@ -509,10 +494,8 @@ struct CashPointView: View {
                 let (data, resp) = try await URLSession.shared.data(for: req)
                 let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
                 let txt = String(data: data, encoding: .utf8) ?? ""
-                print("🧊 modifier/status HTTP \(code): \(txt.prefix(240))")
                 return (200...299).contains(code)
             } catch {
-                print("❌ modifier/status error:", error.localizedDescription)
                 return false
             }
         }
@@ -535,7 +518,6 @@ struct CashPointView: View {
         let mid = resolvedMiniAppId
         let stored = PinpadStore.load(miniAppId: mid)
         let legacy = UserDefaults.standard.string(forKey: "pinpadId") ?? "nil"
-        print("💳[\(tag)] mid=\(mid) state=\(pinpadId) stored=\(stored) legacy=\(legacy)")
         
         
     }
@@ -564,7 +546,6 @@ struct CashPointView: View {
         // keep @AppStorage var in sync immediately
         pickupLocationV2 = migrated
 
-        print("📍 pickup migration old='\(old)' -> v2='\(migrated)'")
     }
     // ✅ TEMP (v1): local role gate (later replace with server-loaded grant role)
     @AppStorage("admin.role") private var adminRole: String = "cashier"   // cashier/admin/grandManager/owner
@@ -746,19 +727,16 @@ struct CashPointView: View {
                     if (200...299).contains(code) {
                         mobileIsOpen = open
                         Haptics.success()
-                        print("✅ miniApp IsOpen updated:", text)
                         // optional: refresh cached menu json
                         safeReloadMenu(reason: "toggle isOpen")
                     } else {
                         Haptics.error()
-                        print("❌ miniApp open toggle failed HTTP \(code):", text)
                     }
                 }
             } catch {
                 await MainActor.run {
                     mobileToggleBusy = false
                     Haptics.error()
-                    print("❌ miniApp open toggle network error:", error.localizedDescription)
                 }
             }
         }
@@ -823,6 +801,15 @@ struct CashPointView: View {
             dirtyStockIds.remove(productId)
             stockText[productId] = nil
 
+            // protect committed ID from stale JSON overwrite
+            recentlyCommittedStockWork?.cancel()
+            recentlyCommittedStockIds.insert(productId)
+            let work = DispatchWorkItem { [self] in
+                recentlyCommittedStockIds = []
+            }
+            recentlyCommittedStockWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: work)
+
             // close editor UI
             focusedStockProductId = nil
             if editingStockProductId == productId {
@@ -838,6 +825,122 @@ struct CashPointView: View {
             // keep editor open so user can retry / keep changing
         }
     }
+    // MARK: - Quick Stock Picker
+
+    private func applyQuickStock(_ amount: Int, for item: ShellMenuItem) {
+        if amount < 0 {
+            stockAdjustments[item.id] = nil
+        } else {
+            stockAdjustments[item.id] = amount
+        }
+        stockText[item.id] = nil
+        dirtyStockIds.insert(item.id)
+        applyLocalAvailabilityFromStock(productId: item.id)
+
+        recentlyCommittedStockWork?.cancel()
+        recentlyCommittedStockIds.insert(item.id)
+        let work = DispatchWorkItem { [self] in
+            recentlyCommittedStockIds.remove(item.id)
+        }
+        recentlyCommittedStockWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: work)
+
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.9)) {
+            quickStockPickerItem = nil
+        }
+
+        let qty: Int? = amount < 0 ? nil : amount
+        Task { _ = await StockQuantityAPI.setStock(productId: item.id, quantity: qty) }
+        dirtyStockIds.remove(item.id)
+    }
+
+    @ViewBuilder
+    private func quickStockPickerOverlay(for item: ShellMenuItem) -> some View {
+        let isDark = colorScheme == .dark
+        let sheetBg = isDark ? Color(white: 0.11) : Color(white: 0.96)
+        let primaryText = isDark ? Color.white : Color.black
+        let secondaryText = isDark ? Color.white.opacity(0.6) : Color.black.opacity(0.5)
+        let optionBg = isDark ? Color.white.opacity(0.08) : Color.white
+        let optionStroke = isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.06)
+
+        ZStack {
+            Color.black.opacity(0.36)
+                .ignoresSafeArea()
+                .onTapGesture {
+                    withAnimation(.spring(response: 0.42, dampingFraction: 0.9)) {
+                        quickStockPickerItem = nil
+                    }
+                }
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text(item.name)
+                    .font(.system(size: 20, weight: .bold))
+                    .foregroundColor(primaryText)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                Text(isRtl ? "בחר מלאי מהיר" : "Quick stock")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(secondaryText)
+
+                ScrollView(showsIndicators: false) {
+                    VStack(spacing: 10) {
+                        Button {
+                            adminDraft = makeAdminDraft(from: item)
+                            withAnimation(.spring(response: 0.42, dampingFraction: 0.9)) {
+                                quickStockPickerItem = nil
+                            }
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "pencil")
+                                    .font(.system(size: 16, weight: .bold))
+                                Text(isRtl ? "ערוך מוצר" : "Edit product")
+                                    .font(.system(size: 17, weight: .bold))
+                            }
+                            .foregroundColor(primaryText)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 50)
+                            .background(optionBg, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(optionStroke, lineWidth: 1))
+                        }
+                        .buttonStyle(.plain)
+
+                        Button { applyQuickStock(-1, for: item) } label: {
+                            Text("∞")
+                                .font(.system(size: 24, weight: .bold))
+                                .foregroundColor(primaryText)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 50)
+                                .background(optionBg, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                                .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(optionStroke, lineWidth: 1))
+                        }
+                        .buttonStyle(.plain)
+
+                        ForEach(0...30, id: \.self) { amount in
+                            Button { applyQuickStock(amount, for: item) } label: {
+                                Text("\(amount)")
+                                    .font(.system(size: 22, weight: .bold))
+                                    .foregroundColor(amount == 0 ? .red : primaryText)
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: 50)
+                                    .background(optionBg, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                                    .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(optionStroke, lineWidth: 1))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                .frame(maxHeight: 560)
+            }
+            .padding(24)
+            .frame(maxWidth: 360)
+            .background(sheetBg)
+            .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+            .shadow(color: .black.opacity(0.28), radius: 24, y: 14)
+            .padding(.horizontal, 24)
+        }
+        .transition(.opacity.combined(with: .scale(scale: 0.98)))
+    }
+
     // ✅ NOTE routing helper (station IDs)
     private func makeNoteItem(id: Int, name: String, stationId: String, legacy: String) -> ShellMenuItem {
         ShellMenuItem(
@@ -892,15 +995,12 @@ struct CashPointView: View {
     }
     
     private func flushDirtyStockAndExit() async {
-        print("✅ flushDirtyStockAndExit() ENTER dirty=\(dirtyStockIds.sorted()) inFlight=\(stockCommitInFlight)")
 
         guard !stockCommitInFlight else {
-            print("⛔️ flush EXIT: inFlight already true")
             return
         }
 
         guard !dirtyStockIds.isEmpty else {
-            print("⛔️ flush EXIT: no dirty ids")
             withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
                 isStockEditMode = false
             }
@@ -933,6 +1033,15 @@ struct CashPointView: View {
         if failed.isEmpty {
             // clear typed cache if you want
             for pid in ids { stockText[pid] = nil }
+
+            // protect committed IDs from stale JSON overwrite
+            recentlyCommittedStockWork?.cancel()
+            recentlyCommittedStockIds.formUnion(ids)
+            let work = DispatchWorkItem { [self] in
+                recentlyCommittedStockIds = []
+            }
+            recentlyCommittedStockWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: work)
 
             // ✅ refresh canonical JSON immediately after successful writes
             safeReloadMenu(reason: "toggle isOpen")
@@ -1070,7 +1179,6 @@ struct CashPointView: View {
 
             ZCreditPaymentHandler.shared.cancelCurrent()
             Haptics.success()
-            print("✅ pinpad disabled mid=\(mid) id=\(NO_TERMINAL_PINPAD)")
             return
         }
 
@@ -1270,7 +1378,6 @@ struct CashPointView: View {
     private func sendCategoryOrderToServer() {
         let miniAppId = Int(UserDefaults.standard.string(forKey: "shopId") ?? "12") ?? 12
         guard miniAppId > 0 else {
-            print("❌ categories/reorder: missing shopId")
             return
         }
 
@@ -1281,7 +1388,6 @@ struct CashPointView: View {
         let payload = ReorderCategoriesReq(miniAppId: miniAppId, order: cleanOrder)
 
         guard let url = URL(string: "https://minis.studio/api/categories/reorder") else {
-            print("❌ categories/reorder: bad URL")
             return
         }
 
@@ -1289,18 +1395,11 @@ struct CashPointView: View {
         encoder.outputFormatting = [.withoutEscapingSlashes]
 
         guard let body = try? encoder.encode(payload) else {
-            print("❌ categories/reorder: encode failed")
             return
         }
 
         // Debug cURL
         let jsonString = String(data: body, encoding: .utf8) ?? "{}"
-        print("""
-        🌀 CATEGORY REORDER cURL:
-        curl -X POST "https://minis.studio/api/categories/reorder" \
-          -H "Content-Type: application/json" \
-          -d '\(jsonString)'
-        """)
 
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
@@ -1312,10 +1411,7 @@ struct CashPointView: View {
                 let (data, resp) = try await URLSession.shared.data(for: req)
                 let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
                 let text = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
-                print("🌍 categories/reorder HTTP \(code)")
-                print("📦 categories/reorder RESPONSE:", text)
             } catch {
-                print("❌ categories/reorder network error:", error.localizedDescription)
             }
         }
     }
@@ -1443,8 +1539,6 @@ struct CashPointView: View {
         categoryOrder = merged
         UserDefaults.standard.set(merged, forKey: categoryOrderKey)
 
-        print("🟣 menuCats =", menuCats)
-        print("🟣 categoryOrder =", categoryOrder)
     }
     
     private func persistCategoryOrder() {
@@ -1543,7 +1637,6 @@ struct CashPointView: View {
                  //   nextBasketLineId = 1
                     Haptics.success()
                 case .failure(let err):
-                    print("❌ close tab failed:", err)
                     Haptics.error()
                 }
             }
@@ -1574,7 +1667,6 @@ struct CashPointView: View {
         guard let existingId = unpaidOrderId else {
               if isTeamTabMode {
                   Haptics.error()
-                  print("⚠️ teamTab print: unpaidOrderId not ready yet")
                   return
               }
 
@@ -1601,7 +1693,6 @@ struct CashPointView: View {
         guard !newEntries.isEmpty else {
             // ✅ Nothing new → do nothing, don’t print twice
             Haptics.selection()
-            print("ℹ️ print: no new lines to print")
             return
         }
 
@@ -1640,7 +1731,6 @@ struct CashPointView: View {
 
         // Green check overlay immediately
        // playPrintSuccess()
-        print(phoneSnapshot)
         // (Optional) snapshot for confirmation / debugging
         lastOrder = CashOrderSnapshot(
             orderNumber: existingId,
@@ -1654,8 +1744,9 @@ struct CashPointView: View {
         // 🔹 2) FIRE & FORGET: print + submit to server in the background
 
         // Print only the new lines
-        Task {
-            await MainActor.run { printInFlight = true }
+        Task { @MainActor in
+            printInFlight = true
+            defer { printInFlight = false }
             let ok = await PrinterManager.shared.printCashPointSplit(
                 orderNumber: existingId,
                 entries: newEntries,
@@ -1664,7 +1755,6 @@ struct CashPointView: View {
                 customerName: nameSnapshot,
                 customerPhone: phoneSnapshot
             )
-            await MainActor.run { printInFlight = false }
 
             await MainActor.run {
                 if ok {
@@ -1673,7 +1763,6 @@ struct CashPointView: View {
                     playPrintSuccess()
                 } else {
                     // ❌ At least one station failed or expired
-                    print("❌ printCashPointSplit failed for order \(existingId)")
 
                     Haptics.error()
 
@@ -1704,7 +1793,6 @@ struct CashPointView: View {
             DispatchQueue.main.async {
                 if case .failure(let err) = result {
                     // You can keep this minimal or add a small toast
-                    print("❌ submitOrder unpaid update \(existingId) failed:", err)
                     Haptics.error()
                     // Optional: show a small banner saying “Sync failed, please check admin”
                 }
@@ -1746,6 +1834,8 @@ struct CashPointView: View {
     @State private var messageTargetIsKitchen: Bool = false
     @State private var messageTargetIsBakery: Bool = false
     @State private var stockAdjustments: [Int: Int] = [:]   // productId -> amount (1–3)
+    @State private var recentlyCommittedStockIds: Set<Int> = []
+    @State private var recentlyCommittedStockWork: DispatchWorkItem? = nil
     @State private var editingStockProductId: Int? = nil
     @State private var stockEditWorkItem: DispatchWorkItem? = nil
     @State private var isStockEditMode: Bool = false
@@ -2398,7 +2488,6 @@ struct CashPointView: View {
 
                                 guard unpaidOrderId != nil else {
                                     Haptics.error()
-                                    print("⚠️ teamTab print blocked: unpaidOrderId missing")
                                     return
                                 }
 
@@ -2557,9 +2646,7 @@ struct CashPointView: View {
     private func printInvoice(for snapshot: CashOrderSnapshot) {
 
         // 🔎 DEBUG what we are about to invoice
-        print("🧾 invoice debug — entries=\(snapshot.entries.count)")
         for e in snapshot.entries {
-            print("• \(e.quantity)x \(e.item.name) unitPrice=\(e.unitPrice) item.price=\(e.item.price)")
         }
 
         let items: [InvoiceItem] = snapshot.entries.map { entry in
@@ -2625,7 +2712,6 @@ struct CashPointView: View {
     private func saveProductCategoryToServer(productId: Int, newCategory: String) {
         let shopId = resolvedMiniAppId
         guard shopId > 0 else {
-            print("❌ saveProductCategoryToServer: missing shopId")
             return
         }
 
@@ -2722,7 +2808,6 @@ struct CashPointView: View {
         let payload = BulkReorderReq(miniAppId: miniAppId, items: updates)
 
         guard let url = URL(string: "https://minis.studio/api/products/reorder") else {
-            print("❌ reorder: bad URL")
             return
         }
 
@@ -2730,7 +2815,6 @@ struct CashPointView: View {
         encoder.outputFormatting = [.withoutEscapingSlashes]
 
         guard let jsonData = try? encoder.encode(payload) else {
-            print("❌ reorder: encode failed")
             return
         }
         let jsonString = String(data: jsonData, encoding: .utf8) ?? "{}"
@@ -2741,8 +2825,6 @@ struct CashPointView: View {
           -H "Content-Type: application/json" \\
           -d '\(jsonString)'
         """
-        print("🌀 REORDER cURL:")
-        print(curl)
 
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
@@ -2754,10 +2836,7 @@ struct CashPointView: View {
                 let (data, resp) = try await URLSession.shared.data(for: req)
                 let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
                 let body = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
-                print("🌍 reorder HTTP \(code)")
-                print("📦 reorder RESPONSE:", body)
             } catch {
-                print("❌ reorder network error:", error.localizedDescription)
             }
         }
     }
@@ -2807,7 +2886,6 @@ struct CashPointView: View {
     private func syncAdminDraftToServer(_ draft: AdminProductDraft) async {
         let shopId = resolvedMiniAppId
         guard shopId > 0 else {
-            print("❌ syncAdminDraftToServer: missing shopId")
             return
         }
 
@@ -2820,21 +2898,17 @@ struct CashPointView: View {
             let returnedId = try await productApi.upsertProduct(payload)
             if returnedId > 0 {
                 // If this was a new product, we should update its productId for future edits
-                print("🟢 upsertProduct → productId =", returnedId)
             }
 
            // try await productApi.publish(shopId: shopId)
 
-            print("🟢 publish(shopId:\(shopId)) succeeded")
 
             // Optional: reload menu from server so CashPoint reflects the canonical state
             await MainActor.run {
                 safeReloadMenu(reason: "toggle isOpen")
             }
         } catch let MinisProductAPI.APIError.badResponse(code, body) {
-            print("❌ Admin upsert bad response: HTTP \(code)\n\(body)")
         } catch {
-            print("❌ Admin upsert/publish error:", error.localizedDescription)
         }
     }
     @MainActor
@@ -3100,16 +3174,13 @@ struct CashPointView: View {
         /// - Retries on network errors + 408/429/502/503/504
         /// - Logs requestId + response body prefix for debugging
         static func setStock(productId: Int, quantity: Int?) async -> Bool {
-            print("🔥 StockQuantityAPI.setStock CALLED productId=\(productId) qty=\(String(describing: quantity))")
 
             let miniAppId = resolvedMiniAppId()
             guard miniAppId > 0 else {
-                print("❌ setStock: missing miniAppId/shopId")
                 return false
             }
 
             guard let url = URL(string: "https://minis.studio/api/products/\(productId)/stock") else {
-                print("❌ setStock: bad URL for productId=\(productId)")
                 return false
             }
 
@@ -3132,8 +3203,6 @@ struct CashPointView: View {
             req.httpBody = bodyData
 
             // Debug
-            print("📤 setStock reqId=\(requestId) product=\(productId) qty=\(String(describing: quantity)) miniAppId=\(miniAppId)")
-            print(req.curlDebug)
 
             // Retry policy
             // 0s, 0.4s, 0.9s, 1.8s (small exponential-ish backoff)
@@ -3158,7 +3227,6 @@ struct CashPointView: View {
                         ?? http?.value(forHTTPHeaderField: "X-Request-Id")
                         ?? http?.value(forHTTPHeaderField: "x-correlation-id")
 
-                    print("📥 setStock resp reqId=\(requestId) serverReqId=\(serverReqId ?? "nil") attempt=\(attempt+1) HTTP \(code) body=\(prefix)")
 
                     if (200...299).contains(code) {
                         return true
@@ -3173,7 +3241,6 @@ struct CashPointView: View {
                     return false
 
                 } catch {
-                    print("❌ setStock network reqId=\(requestId) attempt=\(attempt+1) err=\(error.localizedDescription)")
                     // Retry on network errors
                     if attempt < delays.count - 1 { continue }
                     return false
@@ -3250,7 +3317,6 @@ struct CashPointView: View {
             }
         }
 
-        print("📦 pending stock:", stockAdjustments, "dirty:", dirtyStockIds)
 
         // ✅ keep the 2s auto-commit alive when editing a single product
         if editingStockProductId == productId && !isStockEditMode {
@@ -4114,13 +4180,16 @@ struct CashPointView: View {
                 let isOut: Bool = {
                     guard selectedCategory != "✏️ הערות" else { return false }
 
+                    // ✅ Status disables the product even when stock > 0
+                    if !stockToggles.isOn(item.id) { return true }
+
                     // ✅ If we have a stock number locally, it wins immediately
                     if let q = stockAdjustments[item.id] {
                         return q <= 0
                     }
 
-                    // ✅ Otherwise fall back to the legacy on/off toggle + remaining
-                    return (!stockToggles.isOn(item.id)) || ((remainingForItem ?? 1) <= 0)
+                    // ✅ Otherwise fall back to remaining
+                    return (remainingForItem ?? 1) <= 0
                 }()
                 let canAdd = remaining > 0 && !isOut && selectedCategory != "✏️ הערות"
                 let canRemove = quantityInBasket(for: item) > 0
@@ -4763,7 +4832,6 @@ struct CashPointView: View {
                 }
             } catch {
                 // If precheck fails, safest: don’t allow Z
-                print("❌ z precheck failed:", error.localizedDescription)
                 await MainActor.run {
                     adminMode = .endOfDay
                     showOrdersAdmin = true
@@ -4775,12 +4843,10 @@ struct CashPointView: View {
      */
     private func printXReport() {
         // TODO: hook your real X-report logic here
-        print("🧾 Printing X report…")
     }
 
     private func printZReport() {
         // TODO: hook your real Z-report logic here
-        print("🧾 Printing Z report…")
     }
 
     private struct SideMenuRow: View {
@@ -5191,13 +5257,17 @@ struct CashPointView: View {
                                             // אינסוף
                                             for item in items {
                                                 stockAdjustments[item.id] = nil
+                                                stockText[item.id] = nil
                                                 dirtyStockIds.insert(item.id)
+                                                applyLocalAvailabilityFromStock(productId: item.id)
                                             }
                                         } else {
                                             // אפס
                                             for item in items {
                                                 stockAdjustments[item.id] = 0
+                                                stockText[item.id] = nil
                                                 dirtyStockIds.insert(item.id)
+                                                applyLocalAvailabilityFromStock(productId: item.id)
                                             }
                                         }
 
@@ -5214,13 +5284,15 @@ struct CashPointView: View {
                                 }
                                 // Stock mode toggle
                                 Button {
-                                    withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
-                                        isStockEditMode.toggle()
-                                        if isStockEditMode {
-                                            stockEditWorkItem?.cancel()
-                                            stockEditWorkItem = nil
-                                            editingStockProductId = nil
-                                        }
+                                    if isStockEditMode {
+                                        Task { await flushDirtyStockAndExit() }
+                                    } else {
+                                        var t = Transaction()
+                                        t.disablesAnimations = true
+                                        withTransaction(t) { isStockEditMode = true }
+                                        stockEditWorkItem?.cancel()
+                                        stockEditWorkItem = nil
+                                        editingStockProductId = nil
                                     }
                                 } label: {
                                     Text(isRtl
@@ -5334,13 +5406,16 @@ struct CashPointView: View {
                                             let isOut: Bool = {
                                                 guard selectedCategory != "✏️ הערות" else { return false }
 
+                                                // ✅ Status disables the product even when stock > 0
+                                                if !stockToggles.isOn(item.id) { return true }
+
                                                 // ✅ If we have a stock number locally, it wins immediately
                                                 if let q = stockAdjustments[item.id] {
                                                     return q <= 0
                                                 }
 
-                                                // ✅ Otherwise fall back to the legacy on/off toggle + remaining
-                                                return (!stockToggles.isOn(item.id)) || ((remainingForItem ?? 1) <= 0)
+                                                // ✅ Otherwise fall back to remaining
+                                                return (remainingForItem ?? 1) <= 0
                                             }()
 
                                             let stockAmount = stockAdjustments[item.id]
@@ -5365,97 +5440,69 @@ struct CashPointView: View {
                                                 .overlay(
                                                     Color.clear
                                                         .contentShape(Rectangle())
-                                                        .onTapGesture {
+                                                        .gesture(
+                                                            ExclusiveGesture(
+                                                                LongPressGesture(minimumDuration: 0.45)
+                                                                    .onEnded { _ in
+                                                                        guard !isStockEditMode else { return }
+                                                                        Haptics.light()
+                                                                        withAnimation(.spring(response: 0.42, dampingFraction: 0.9)) {
+                                                                            quickStockPickerItem = item
+                                                                        }
+                                                                    },
+                                                                TapGesture()
+                                                                    .onEnded {
+                                                                        if let editing = editingStockProductId {
+                                                                            if editing != item.id {
+                                                                                Task { await commitSingleStockAndClose(editing) }
+                                                                            }
+                                                                            return
+                                                                        }
 
-                                                            // ✅ If any single-item stock editor is open:
-                                                            // tap another row -> commit+close, and do NOT add-to-basket
-                                                            if let editing = editingStockProductId {
-                                                                if editing != item.id {
-                                                                    Task { await commitSingleStockAndClose(editing) }
-                                                                }
-                                                                return
-                                                            }
+                                                                        guard !isStockEditMode else { return }
+                                                                        guard swipingProductId == nil else { return }
 
-                                                            // existing guards
-                                                            guard !isStockEditMode else { return }
-                                                            guard swipingProductId == nil else { return }
+                                                                        let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+                                                                        let wasSearching = !q.isEmpty
 
-                                                            let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-                                                            let wasSearching = !q.isEmpty
+                                                                        if wasSearching, item.category != "✏️ הערות" {
+                                                                            selectedCategory = item.category
+                                                                        }
 
-                                                            if wasSearching, item.category != "✏️ הערות" {
-                                                                selectedCategory = item.category
-                                                            }
+                                                                        searchText = ""
+                                                                        isSearchFocused = false
 
-                                                            // now clear search UI
-                                                            searchText = ""
-                                                            isSearchFocused = false
-                                                            
-                                                            searchText = ""
-                                                            isSearchFocused = false
+                                                                        if selectedCategory == "✏️ הערות" {
+                                                                            messageTargetIsKitchen = (item.id == -1002)
+                                                                            messageTargetIsBakery  = (item.id == -1003)
+                                                                            messageText = ""
+                                                                            messagePrice = ""
+                                                                            dismissKeyboard()
+                                                                            showMessageSheet = true
+                                                                            Haptics.light()
+                                                                            return
+                                                                        }
 
-                                                            if selectedCategory == "✏️ הערות" {
-                                                                // Map the hard-coded note items to targets
-                                                                messageTargetIsKitchen = (item.id == -1002)
-                                                                messageTargetIsBakery  = (item.id == -1003)
+                                                                        guard !isOut else { Haptics.error(); return }
+                                                                        if let maxAdd = maxAdditionalQuantity(for: item), maxAdd <= 0 { Haptics.error(); return }
 
-                                                                // Reset fields
-                                                                messageText = ""
-                                                                messagePrice = ""
+                                                                        withAnimation(.spring(response: 0.18, dampingFraction: 0.6, blendDuration: 0.1)) {
+                                                                            tappedProductId = item.id
+                                                                        }
+                                                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                                                                            withAnimation(.spring(response: 0.25, dampingFraction: 0.7, blendDuration: 0.1)) {
+                                                                                tappedProductId = nil
+                                                                            }
+                                                                        }
 
-                                                                // ✅ kill any focus/keyboard BEFORE presenting the sheet
-                                                                dismissKeyboard()
-
-                                                                // Show sheet
-                                                                showMessageSheet = true
-                                                                Haptics.light()
-                                                                return
-                                                            }
-
-                                                            guard !isOut else { Haptics.error(); return }
-                                                            if let maxAdd = maxAdditionalQuantity(for: item), maxAdd <= 0 { Haptics.error(); return }
-
-                                                            withAnimation(.spring(response: 0.18, dampingFraction: 0.6, blendDuration: 0.1)) {
-                                                                tappedProductId = item.id
-                                                            }
-                                                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                                                                withAnimation(.spring(response: 0.25, dampingFraction: 0.7, blendDuration: 0.1)) {
-                                                                    tappedProductId = nil
-                                                                }
-                                                            }
-
-                                                            Haptics.light()
-                                                            addToBasket(item: item, quantity: 1, subtitle: nil, unitPrice: item.price)
-                                                        }
+                                                                        Haptics.light()
+                                                                        addToBasket(item: item, quantity: 1, subtitle: nil, unitPrice: item.price)
+                                                                    }
+                                                            )
+                                                        )
                                                         // ✅ KEY LINE: when stock UI is visible, this overlay stops receiving taps
                                                         .allowsHitTesting(!showFullStockUI)
                                                 )
-                                                .contextMenu {
-                                                    Group {
-                                                        // ✅ Edit product (existing)
-                                                        Button("ערוך מוצר") {
-                                                            adminDraft = makeAdminDraft(from: item)
-                                                        }
-                                                        Button("שכפל מוצר") {
-                                                                   let dup = makeDuplicateDraft(from: item)
-
-                                                                   // Option A (recommended): open editor so you can tweak before saving
-                                                                   adminDraft = dup
-
-                                                                   // Option B (instant duplicate, no editor):
-                                                                   // applyAdminSave(dup)
-                                                               }
-                                                        // ✅ NEW: Edit stock for this specific product
-                                                        Button("ערוך מלאי") {
-                                                            var t = Transaction()
-                                                            t.disablesAnimations = true
-                                                            withTransaction(t) {
-                                                                startSingleStockEdit(productId: item.id)
-                                                            }
-                                                        }
-                                                    }
-                                                    .environment(\.layoutDirection, .rightToLeft)
-                                                }
                                                 // 🔹 STOCK UI (unchanged)
                                                 let isEditingThisStock = isStockEditMode || editingStockProductId == item.id
 
@@ -5558,9 +5605,7 @@ struct CashPointView: View {
                                             let swipeableTile = baseTile
                                                 .simultaneousGesture(productSwipeGesture(for: item))
 
-                                            if 1==2 {
-                                                swipeableTile
-                                            } else {
+                                            if isStockEditMode {
                                                 swipeableTile
                                                     .onDrag {
                                                         draggingProduct = item
@@ -5578,6 +5623,8 @@ struct CashPointView: View {
                                                             }
                                                         )
                                                     )
+                                            } else {
+                                                swipeableTile
                                             }
                                         }
                                     }
@@ -5598,13 +5645,16 @@ struct CashPointView: View {
                                             let isOut: Bool = {
                                                 guard selectedCategory != "✏️ הערות" else { return false }
 
+                                                // ✅ Status disables the product even when stock > 0
+                                                if !stockToggles.isOn(item.id) { return true }
+
                                                 // ✅ If we have a stock number locally, it wins immediately
                                                 if let q = stockAdjustments[item.id] {
                                                     return q <= 0
                                                 }
 
-                                                // ✅ Otherwise fall back to the legacy on/off toggle + remaining
-                                                return (!stockToggles.isOn(item.id)) || ((remainingForItem ?? 1) <= 0)
+                                                // ✅ Otherwise fall back to remaining
+                                                return (remainingForItem ?? 1) <= 0
                                             }()
 
                                             let stockAmount = stockAdjustments[item.id]
@@ -5772,6 +5822,12 @@ struct CashPointView: View {
                     )
                 }
                 sideMenuContainer()
+
+                if let pickerItem = quickStockPickerItem {
+                    quickStockPickerOverlay(for: pickerItem)
+                        .zIndex(10002)
+                }
+
                 if showPrintSuccess {
                     ZStack {
                         Color.black.opacity(0.35)
@@ -5845,10 +5901,8 @@ struct CashPointView: View {
                         // ✅ legacy mirror (if your payment handler still reads "pinpadId")
                         UserDefaults.standard.set(only, forKey: "pinpadId")
 
-                        print("💳 PINPAD AUTOSET mid=\(mid) -> \(only)")
                     }
                 }
-                print("💳 PINPAD FINAL mid=\(mid) pinpadId=\(pinpadId) stored=\(PinpadStore.load(miniAppId: mid)) legacy=\(UserDefaults.standard.string(forKey: "pinpadId") ?? "nil")")
                 if isMiniApp13 {
                        migratePickupLocationOnce()
                    }
@@ -5858,7 +5912,6 @@ struct CashPointView: View {
                 clearSavedContactAndService()
                 let sid = UserDefaults.standard.string(forKey: "shopId") ?? "12"
                    if let cfg = loadSavedPrinters(shopId: sid) {
-                       print("🎯 TEST prefix =", cfg.netPrefix ?? "nil")
                    }
                 updatePendingBacklog()
                 OrderOutbox.shared.drainNow()
@@ -5881,7 +5934,6 @@ struct CashPointView: View {
             }
             .onChange(of: isStockEditMode) { nowOn in
                 Task { @MainActor in
-                    print("🟡 isStockEditMode changed -> \(nowOn) dirty=\(dirtyStockIds.sorted())")
 
                     if nowOn {
                         // ✅ freeze current visual order using the SAME rule as normal mode (ACTIVE FIRST)
@@ -5913,11 +5965,7 @@ struct CashPointView: View {
                             .map(\.id)
                          */
                         frozenOrderIds = base
-                            .sorted { lhs, rhs in
-                                let li = api.items.firstIndex(where: { $0.id == lhs.id }) ?? Int.max
-                                let ri = api.items.firstIndex(where: { $0.id == rhs.id }) ?? Int.max
-                                return li < ri
-                            }
+                            .sorted { productSortKey($0) < productSortKey($1) }
                             .map(\.id)
 
                     } else {
@@ -6002,7 +6050,6 @@ struct CashPointView: View {
                         if amountInt < 0 {
                             let cashAmount = Double(abs(amountInt))
                             Haptics.success()
-                            print("🧾 cash refund:", cashAmount)
                             return
                         }
 
@@ -6021,7 +6068,6 @@ struct CashPointView: View {
                                 case .declined: Haptics.error()
                                 case .unknown:  Haptics.error()
                                 }
-                                print("🧾 refund result:", result.status, result.message)
                             }
                         }
                     }
@@ -6140,7 +6186,6 @@ struct CashPointView: View {
                 if printInFlight { return }            // ✅ add this flag
                 safeReloadMenu(reason: "toggle isOpen")
             }
-            .onChange(of: isPayLaterMode) { print("isPayLaterMode =", $0) }
             .fullScreenCover(isPresented: $showOrderFlow) {
                 let safeNameForPrint: String = resolvedCustomerNameForPrint()
                 OrderFlowView(
@@ -6175,8 +6220,9 @@ struct CashPointView: View {
                         }()
 
                         // 🖨️ PRINT – once
-                        Task {
-                            await MainActor.run { printInFlight = true }
+                        Task { @MainActor in
+                            printInFlight = true
+                            defer { printInFlight = false }
 
                             let ok = await PrinterManager.shared.printCashPointSplit(
                                 orderNumber: ticketNumber,
@@ -6186,14 +6232,12 @@ struct CashPointView: View {
                                 customerName: safeNameForPrint,
                                 customerPhone: posSavedPhone
                             )
-                            await MainActor.run { printInFlight = false }
 
 
                             await MainActor.run {
                                 if ok {
                                     playPrintSuccess()
                                 } else {
-                                    print("❌ printCashPointSplit failed for order \(ticketNumber)")
                                     Haptics.error()
                                     showOutboxLog = true
                                     // or showPrinterStatusSheet = true
@@ -6236,10 +6280,8 @@ struct CashPointView: View {
                                 switch submitResult {
                                 case .success(let serverOrderId):
                                     unpaidOrderId = serverOrderId
-                                    print("🟢 slider unpaid submit → orderId=\(serverOrderId) ticket=\(ticketNumber)")
 
                                 case .failure(let error):
-                                    print("❌ slider unpaid submit failed:", error)
                                     Haptics.error()
                                 }
                             }
@@ -6262,14 +6304,15 @@ struct CashPointView: View {
                     },
 
                     // ✅ NOW: this only submits — must NOT close the sheet inside completeOrder
-                    onCompleted: { phone, name, summary, discountOff, tip in
+                    onCompleted: { phone, name, summary, discountOff, tip, existingOrderId in
                         pendingFinishAfterSubmit = true
                         completeOrder(
                             customerPhone: phone,
                             customerName: name,
                             paymentSummary: summary,
                             checkoutDiscountOff: discountOff,
-                            tipAmount: tip
+                            tipAmount: tip,
+                            existingOrderIdFromPayment: existingOrderId
                         )
                     },
                     // ✅ NEW: waiter clicks "סיים" inside OrderFlowView → only then we close & reset
@@ -6341,7 +6384,6 @@ struct CashPointView: View {
                             : (Int(UserDefaults.standard.string(forKey: "shopId") ?? "0") ?? 0)
 
                         guard miniId > 0 else {
-                            print("❌ onArchive: missing miniAppId/shopId")
                             return
                         }
 
@@ -6353,7 +6395,6 @@ struct CashPointView: View {
                           -H "Content-Type: application/json" \\
                           -d '{ "miniAppId": \(miniId), "mode": "archive" }'
                         """
-                        print("🔎 ARCHIVE DEBUG CURL:\n\(debugCurl)")
 
                         struct ArchiveBody: Encodable {
                             let miniAppId: Int
@@ -6373,8 +6414,6 @@ struct CashPointView: View {
                                 let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
                                 let text = String(data: data, encoding: .utf8) ?? ""
 
-                                print("📦 Product \(pid) mode=archive (miniAppId \(miniId)) → HTTP \(code)")
-                                print("📦 Response:", text)
 
                                 if (200...299).contains(code) {
                                     await MainActor.run {
@@ -6385,7 +6424,6 @@ struct CashPointView: View {
                                     }
                                 }
                             } catch {
-                                print("❌ Archive error:", error.localizedDescription)
                             }
                         }
                     },
@@ -6398,7 +6436,6 @@ struct CashPointView: View {
                             : (Int(UserDefaults.standard.string(forKey: "shopId") ?? "0") ?? 0)
 
                         guard miniId > 0 else {
-                            print("❌ onRemoveFromMini: missing miniAppId/shopId")
                             return
                         }
 
@@ -6410,7 +6447,6 @@ struct CashPointView: View {
                           -H "Content-Type: application/json" \\
                           -d '{ "miniAppId": \(miniId), "mode": "remove" }'
                         """
-                        print("🔎 REMOVE DEBUG CURL:\n\(debugCurl)")
 
                         struct ArchiveBody: Encodable {
                             let miniAppId: Int
@@ -6430,8 +6466,6 @@ struct CashPointView: View {
                                 let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
                                 let text = String(data: data, encoding: .utf8) ?? ""
 
-                                print("🗑️ Product \(pid) mode=remove (miniAppId \(miniId)) → HTTP \(code)")
-                                print("🗑️ Response:", text)
 
                                 if (200...299).contains(code) {
                                     await MainActor.run {
@@ -6442,7 +6476,6 @@ struct CashPointView: View {
                                     }
                                 }
                             } catch {
-                                print("❌ Remove error:", error.localizedDescription)
                             }
                         }
                     },
@@ -6455,7 +6488,6 @@ struct CashPointView: View {
                             : (Int(UserDefaults.standard.string(forKey: "shopId") ?? "0") ?? 0)
 
                         guard miniId > 0 else {
-                            print("❌ onRestore: missing miniAppId/shopId")
                             return
                         }
 
@@ -6467,7 +6499,6 @@ struct CashPointView: View {
                           -H "Content-Type: application/json" \\
                           -d '{ "miniAppId": \(miniId), "mode": "restore" }'
                         """
-                        print("🔎 RESTORE DEBUG CURL:\n\(debugCurl)")
 
                         struct ArchiveBody: Encodable {
                             let miniAppId: Int
@@ -6487,8 +6518,6 @@ struct CashPointView: View {
                                 let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
                                 let text = String(data: data, encoding: .utf8) ?? ""
 
-                                print("↩️ Product \(pid) mode=restore (miniAppId \(miniId)) → HTTP \(code)")
-                                print("↩️ Response:", text)
 
                                 if (200...299).contains(code) {
                                     await MainActor.run {
@@ -6496,7 +6525,6 @@ struct CashPointView: View {
                                     }
                                 }
                             } catch {
-                                print("❌ Restore error:", error.localizedDescription)
                             }
                         }
                     },
@@ -6534,8 +6562,9 @@ struct CashPointView: View {
                         // ✅ stockQuantity is the truth (including 0)
                         initialAdjustments[item.id] = max(q, 0)
 
-                        // ✅ derive status from qty when qty exists
-                        initialStatus[item.id] = (q > 0) ? 1 : 0
+                        // ✅ respect both qty AND server status — disable if either says off
+                        let serverStatus = item.status ?? 1
+                        initialStatus[item.id] = (q > 0 && serverStatus != 0) ? 1 : 0
 
                     } else if let s = item.status {
                         // fallback only if qty missing
@@ -6546,6 +6575,18 @@ struct CashPointView: View {
                     }
                 }
                 localFrozenOverrides = frozen
+
+                // preserve local values for recently committed products
+                for pid in recentlyCommittedStockIds {
+                    if let local = stockAdjustments[pid] {
+                        initialAdjustments[pid] = local
+                        initialStatus[pid] = local > 0 ? 1 : 0
+                    } else {
+                        initialAdjustments.removeValue(forKey: pid)
+                        initialStatus[pid] = 1
+                    }
+                }
+
                 // ✅ sync ON/OFF immediately
                 stockToggles.forceServerStatus(initialStatus)
 
@@ -6722,7 +6763,8 @@ struct CashPointView: View {
         customerName: String?,
         paymentSummary: OrderAPI.PaymentSummary?,
         checkoutDiscountOff: Double = 0,
-        tipAmount: Double = 0
+        tipAmount: Double = 0,
+        existingOrderIdFromPayment: Int? = nil
     ) {
         guard !basket.isEmpty else {
             showOrderFlow = false
@@ -6755,6 +6797,7 @@ struct CashPointView: View {
         let nameSnapshot  = customerName
         let phoneSnapshot = customerPhone
 
+        let existingIdForSubmit: Int? = existingOrderIdFromPayment ?? unpaidOrderId
         let existingIdForPayLater: Int? = unpaidOrderId
 
         let ticketNumber: Int = {
@@ -6797,18 +6840,10 @@ struct CashPointView: View {
         // ✅ PRINT *IMMEDIATELY* with local ticketNumber
         if !hasPrintedFromSwipe, !printerEntries.isEmpty {
 
-            print("""
-            🖨️ PRINT DEBUG (completeOrder)
-              ticket=\(ticketNumber)
-              nameSnapshot=\(nameSnapshot ?? "nil")
-              phoneSnapshot=\(phoneSnapshot ?? "nil")
-              entries=\(printerEntries.count)
-              printerTotal=\(printerTotal)
-              hasPrintedFromSwipe=\(hasPrintedFromSwipe)
-            """)
 
-            Task {
-                await MainActor.run { printInFlight = true }
+            Task { @MainActor in
+                printInFlight = true
+                defer { printInFlight = false }
 
                 let ok = await PrinterManager.shared.printCashPointSplit(
                     orderNumber: ticketNumber,
@@ -6818,14 +6853,12 @@ struct CashPointView: View {
                     customerName: nameSnapshot,
                     customerPhone: phoneSnapshot
                 )
-                await MainActor.run { printInFlight = false }
 
 
                 await MainActor.run {
                     if ok {
                         playPrintSuccess()
                     } else {
-                        print("❌ printCashPointSplit failed for order \(ticketNumber)")
                         Haptics.error()
 
                         // pick one:
@@ -6856,7 +6889,6 @@ struct CashPointView: View {
             totals["tabKey"] = activeTeamTab?.rawValue ?? ""
         }
 
-        print("🧾 discount=\(discountSnapshot) tip=\(tipSnapshot) total=\(totalSnapshot) grand=\(grandTotalSnapshot) othLines=\(othSnapshot.sorted())")
 
         // Payment meta
         var meta: [String: Any] = [:]
@@ -6911,7 +6943,7 @@ struct CashPointView: View {
 
         // ✅ Submit — OTH is separate from team tab type
         OrderAPI.submitOrder(
-            orderId: existingIdForPayLater,
+            orderId: existingIdForSubmit,
             entries: entriesArray,
             total: totalSnapshot,
             diningMode: mode,
@@ -6954,7 +6986,6 @@ struct CashPointView: View {
                         }
                     }
 
-                    print("🟢 submitOrder OK → serverOrderId=\(serverOrderId), ticket=\(ticketNumber)")
 
                     // ✅ For non-pay-later flows, we still want the old “clear after success”
                     if !isPayLaterChoice {
@@ -7002,18 +7033,6 @@ struct CashPointView: View {
             }
             .joined(separator: " | ")
 
-        print("""
-        🧾 DISCOUNT[\(tag)]
-          mode=\(discountMode)
-          all=\(discountAllSelected)
-          selected=\(discountedLineIds.sorted())
-          base=\(discountBaseTotal)
-          discount=\(discountAmount)
-          basketTotal=\(basketTotalPrice)
-          excluded=\(excludedAmount)
-          final=\(finalTotal)
-          lines=\(lines)
-        """)
     }
     private func stableIndex(_ item: ShellMenuItem) -> Int {
         api.items.firstIndex(where: { $0.id == item.id }) ?? Int.max
@@ -7186,7 +7205,6 @@ struct CashPointView: View {
                     }
 
                 case .failure(let err):
-                    print("❌ openTeamTab failed:", err.localizedDescription)
                     Haptics.error()
                 }
             }
@@ -7274,7 +7292,6 @@ struct CashPointView: View {
                     unitPrice: item.price   // use current menu price
                 )
             } else {
-                print("⚠️ refundOrderFromBone: failed to match menu item for '\(name)'")
             }
 
             i = j
@@ -8963,7 +8980,7 @@ struct CashPointView: View {
                                         let withoutItems = Array(groupSelections[.without] ?? []).sorted()
                                         let sideItems = Array(groupSelections[.side] ?? []).sorted()
 
-                                        let withPills = withItems.map { "עם \($0)" }
+                                       let withPills = withItems.map { "עם \($0)" }
                                         let withoutPills = withoutItems.map { "בלי \($0)" }
                                         let sidePills = sideItems.map { "\($0) בצד" }
 
@@ -9258,17 +9275,8 @@ struct CashPointView: View {
             }
         }
         .onAppear {
-            print("🧪 basketRow product =", entry.item.name)
 
             for g in groups {
-                print("""
-                🧪 group title = \(g.title)
-                   type = \(g.type)
-                   required = \(g.selection?.required ?? -1)
-                   defaultFirst = \(g.selection?.defaultFirst ?? -1)
-                   selected now = \(optionSelections[entry.id]?[g.title] ?? "nil")
-                   items = \(g.items.map(\.name))
-                """)
             }
 
             if optionSelections[entry.id] == nil {
@@ -9279,20 +9287,16 @@ struct CashPointView: View {
 
                     let isRequired = (g.selection?.required ?? 0) > 0
 
-                    print("🧪 deciding group \(g.title) isRequired=\(isRequired)")
 
                     if isRequired {
-                        print("🧪 required group -> leave empty")
                         continue
                     }
 
                     if let first = g.items.first?.name {
-                        print("🧪 optional group -> default first =", first)
                         map[g.title] = first
                     }
                 }
 
-                print("🧪 final initial map =", map)
 
                 optionSelections[entry.id] = map
                 updateEntryPricingAndSubtitle(lineId: entry.id)
@@ -10243,8 +10247,6 @@ final class StockToggleStore: ObservableObject {
         struct Payload: Encodable { let miniAppId: Int; let enabled: Bool }
         req.httpBody = try? JSONEncoder().encode(Payload(miniAppId: shopId, enabled: enabled))
 
-        print("📤 setStatus reqId=\(requestId) product=\(productId) enabled=\(enabled) shopId=\(shopId)")
-        print(req.curlDebug)
 
         let delays: [UInt64] = [0, 400_000_000, 900_000_000]
 
@@ -10254,12 +10256,10 @@ final class StockToggleStore: ObservableObject {
                 let (data, resp) = try await URLSession.shared.data(for: req)
                 let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
                 let text = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
-                print("📥 setStatus resp reqId=\(requestId) attempt=\(attempt+1) HTTP \(code) body=\(String(text.prefix(300)))")
                 if (200..<300).contains(code) { return true }
                 if [502, 503, 504].contains(code), attempt < delays.count - 1 { continue }
                 return false
             } catch {
-                print("❌ setStatus network reqId=\(requestId) attempt=\(attempt+1) err=\(error.localizedDescription)")
                 if attempt < delays.count - 1 { continue }
                 return false
             }

@@ -65,7 +65,6 @@ enum RongtaPlaceholderPrinterDBG {
         Task {
             let job = buildPlaceholderTicket()
             let (ok, reason) = await send2(host: host, port: port, data: job, connectTimeout: 5.0, sendTimeout: 6.0)
-            Swift.print("🧾 RongtaPlaceholderPrinterDBG =", ok ? "OK" : "FAIL", reason, "bytes=", job.count)
             completion?(ok, job.count, reason)
         }
     }
@@ -215,7 +214,6 @@ enum RongtaPlaceholderPrinterDBG {
             func finish(_ ok: Bool, _ reason: String) {
                 guard !finished else { return }
                 finished = true
-                Swift.print("🖨️ RongtaPlaceholderDBG:", ok ? "OK" : "FAIL", reason, "bytes=", data.count)
                 c.stateUpdateHandler = nil
                 c.cancel()
                 cont.resume(returning: ok)

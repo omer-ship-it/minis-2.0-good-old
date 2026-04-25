@@ -171,7 +171,6 @@ struct AdminOrdersView: View {
         do {
             let parsed = try decoder.decode(AdminOrdersApiResponse.self, from: data)
             guard parsed.ok else {
-                print("❌ admin/orders cache: ok=false")
                 return nil
             }
 
@@ -352,7 +351,6 @@ struct AdminOrdersView: View {
             return mapped
         } catch {
             let body = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
-            print("❌ admin/orders decode failed: \(error)\nBody:\n\(body)")
             return nil
         }
     }
@@ -446,7 +444,6 @@ struct AdminOrdersView: View {
                                                     Task { await loadOrders(showSpinner: false) }
                                                     Haptics.success()
                                                 case .failure(let err):
-                                                    print("❌ close team tab failed:", err)
                                                     Haptics.error()
                                                 }
                                             }
@@ -627,7 +624,6 @@ struct AdminOrdersView: View {
 
                 case .failure(let err):
                     // ❌ revert
-                    print("❌ closeTeamTable failed:", err)
                     Haptics.error()
 
                     optimisticallyClosedIds.remove(orderId)
@@ -672,10 +668,10 @@ struct AdminOrdersView: View {
                 isCancelled: true
             ) { result in
                 switch result {
-                case .success(let allCancelled):
-                    print("✅ cancelAllLines done allCancelled=\(allCancelled)")
-                case .failure(let err):
-                    print("❌ cancelAllLines failed:", err)
+                case .success:
+                    break
+                case .failure:
+                    break
                 }
             }
         }
@@ -700,12 +696,10 @@ struct AdminOrdersView: View {
                 return v ? "true" : "false"
             }
 
-            print("🧾 META basket dump for orderId=\(order.id) (uiIdx=\(idx))")
             for b in basket {
                 // ✅ IMPORTANT: pick the correct overload for your actual DTO fields:
                 // If X is Bool? use show(b.X) in the Bool line; if Int? use show(b.X) in the Int line.
 
-                print("   lineId=\(b.lineId) pid=\(b.productId ?? -1) qty=\(b.quantity ?? -1) name='\(norm(b.name))'")
 
                 // Try BOTH prints (comment out the one that doesn't compile):
                 // print("   cancelled=\(show(b.isCancelled)) oth=\(show(b.isOth))")   // <-- if both are Int?
@@ -715,7 +709,6 @@ struct AdminOrdersView: View {
                 // print("   cancelled=\(show(b.isCancelled)) oth=\(show(b.isOth))")
             }
 
-            print("🧩 UI line: pid=\(uiLine.productId ?? -1) basketLineId=\(uiLine.basketLineId ?? -1) qty=\(uiLine.quantity) name='\(norm(uiLine.name))'")
         }
         // Local-only cancellation state (by row index to avoid duplicate ids breaking List)
         @State private var cancelledRowIndexes: Set<Int> = []
@@ -738,7 +731,6 @@ struct AdminOrdersView: View {
                     case .success(let meta):
                         metaLines = meta.basket ?? []
                     case .failure(let err):
-                        print("❌ fetchOrderMetadata failed:", err.localizedDescription)
                         Haptics.error()
                     }
                 }
@@ -974,10 +966,10 @@ struct AdminOrdersView: View {
                     isCancelled: true
                 ) { result in
                     switch result {
-                    case .success(let allCancelled):
-                        print("✅ bulk cancelAllLines allCancelled=\(allCancelled)")
-                    case .failure(let err):
-                        print("❌ bulk cancelAllLines failed:", err)
+                    case .success:
+                        break
+                    case .failure:
+                        break
                     }
                 }
 
@@ -1002,7 +994,6 @@ struct AdminOrdersView: View {
 
                     guard let match else {
                         // ✅ comments / non-product rows -> no lineId -> keep local cancel only
-                        print("⚠️ no meta lineId match for '\(norm(uiLine.name))' (keeping local cancel)")
                         return
                     }
 
@@ -1018,15 +1009,15 @@ struct AdminOrdersView: View {
                             if allCancelled {
                                 DispatchQueue.main.async { onResolved() }
                             }
-                        case .failure(let err):
+                        case .failure:
+                            break
                             // ✅ ignore failure (local cancel stays)
-                            print("❌ server cancel failed lineId=\(match.lineId) (keeping local):", err)
                         }
                     }
 
-                case .failure(let err):
+                case .failure:
+                    break
                     // ✅ ignore failure (local cancel stays)
-                    print("❌ fetchOrderMetadata failed (keeping local):", err.localizedDescription)
                 }
             }
         }
@@ -1042,9 +1033,9 @@ struct AdminOrdersView: View {
                     if allCancelled {
                         DispatchQueue.main.async { onResolved() }
                     }
-                case .failure(let err):
+                case .failure:
+                    break
                     // ✅ DO NOT revert local UI
-                    print("❌ cancel line failed (keeping local):", err)
                 }
             }
         }
@@ -1059,7 +1050,6 @@ struct AdminOrdersView: View {
                 if isEOD {
                     Button {
                         Haptics.light()
-                        print("➡️ Continue tapped. onContinue is nil? \(onContinue == nil)")
                         onContinue?()
                     } label: {
                         Text("המשך הזמנה")
@@ -1275,7 +1265,6 @@ struct AdminOrdersView: View {
         // ✅ If unpaid, don’t print "Tax Invoice/Receipt"
         let pmRaw = (order.paymentMethod ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if order.isUnpaid || pmRaw == "unpaid" {
-            Swift.print("⚠️ Order \(order.id) is unpaid — skipping Tax Invoice / Receipt")
             return
         }
 
@@ -1343,7 +1332,7 @@ struct AdminOrdersView: View {
         let mode = order.diningMode                 // ✅ USE PARSED MODE
         let ticketNumber = Int(order.orderId) ?? order.id
 
-        print("🧾 PRINT order=\(ticketNumber) service=\(mode) delivery=\(order.isDelivery)") // optional debug
+// optional debug
 
         Task {
             let ok = await PrinterManager.shared.printCashPointSplit(
@@ -1356,7 +1345,6 @@ struct AdminOrdersView: View {
             )
 
             if !ok {
-                print("❌ printCashPointSplit failed for order \(ticketNumber)")
             }
         }
     
@@ -1377,7 +1365,6 @@ struct AdminOrdersView: View {
         Task {
             let ok = await setStatus(orderId: order.id, to: statusCode, miniAppId: miniAppId)
             if !ok {
-                print("❌ Failed to update status on server for order \(order.id) → \(statusCode)")
             }
         }
     }
@@ -1412,11 +1399,9 @@ struct AdminOrdersView: View {
         defer { if showSpinner { isLoading = false } }
 
         guard let url = makeOrdersURL() else {
-            print("❌ admin/orders: bad URL")
             return
         }
 
-        print("📡 admin/orders url:", url.absoluteString)
 
         var req = URLRequest(url: url, timeoutInterval: 15)
         req.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -1427,7 +1412,6 @@ struct AdminOrdersView: View {
 
             guard http.statusCode == 200 else {
                 let body = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
-                print("❌ admin/orders HTTP \(http.statusCode)\n\(body)")
                 return
             }
 
@@ -1441,7 +1425,6 @@ struct AdminOrdersView: View {
             if remaining == 0 { onAllResolved?() }
 
         } catch {
-            print("❌ admin/orders network error:", error.localizedDescription)
         }
     }
 }
@@ -1691,14 +1674,10 @@ func setStatus(orderId: Int, to newStatus: Int, miniAppId: Int) async -> Bool {
     do {
         let (data, resp) = try await URLSession.shared.data(for: req)
         guard let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-            print("❌ setStatus HTTP fail:",
-                  (resp as? HTTPURLResponse)?.statusCode ?? -1,
-                  String(data: data, encoding: .utf8) ?? "")
             return false
         }
         return true
     } catch {
-        print("❌ setStatus network error:", error.localizedDescription)
         return false
     }
 }
@@ -1844,21 +1823,14 @@ enum OrdersResolveAPI {
 
         // ✅ DEBUG: request
         let start = Date()
-        print("📡 cancel line REQUEST")
-        print("   url:", url.absoluteString)
-        print("   orderId:", orderId, "lineId:", lineId, "miniAppId:", miniAppId, "isCancelled:", isCancelled)
-        print("   body:\n\(bodyString)")
-        print("   curl:\n  curl -sS -i -X POST '\(url.absoluteString)' -H 'Content-Type: application/json' -d '\(bodyString.replacingOccurrences(of: "\n", with: " "))'")
 
         URLSession.shared.dataTask(with: req) { data, resp, err in
             if let err = err {
-                print("❌ cancel line NETWORK error:", err.localizedDescription)
                 completion(.failure(err))
                 return
             }
 
             guard let http = resp as? HTTPURLResponse else {
-                print("❌ cancel line: no HTTPURLResponse")
                 completion(.failure(NSError(domain: "OrdersResolveAPI", code: -2)))
                 return
             }
@@ -1868,12 +1840,6 @@ enum OrdersResolveAPI {
             let text = String(data: raw, encoding: .utf8) ?? "<non-utf8 \(raw.count) bytes>"
 
             // ✅ DEBUG: response
-            print("📥 cancel line RESPONSE (\(ms)ms)")
-            print("   status:", http.statusCode)
-            if let ct = http.value(forHTTPHeaderField: "Content-Type") { print("   content-type:", ct) }
-            if let rid = http.value(forHTTPHeaderField: "x-request-id") { print("   x-request-id:", rid) }
-            if let cf = http.value(forHTTPHeaderField: "cf-ray") { print("   cf-ray:", cf) }
-            print("   body:\n\(text)")
 
             guard (200...299).contains(http.statusCode) else {
                 completion(.failure(NSError(domain: "OrdersResolveAPI", code: http.statusCode, userInfo: ["body": text])))
@@ -1883,10 +1849,8 @@ enum OrdersResolveAPI {
             do {
                 let decoded = try JSONDecoder().decode(CancelResp.self, from: raw)
                 let ok = decoded.allCancelled ?? false
-                print("✅ cancel line decoded allCancelled:", ok)
                 completion(.success(ok))
             } catch {
-                print("❌ cancel line decode failed:", error)
                 completion(.failure(error))
             }
         }.resume()
@@ -2466,14 +2430,11 @@ private struct EODStepTipsView: View {
             tipsError = "שגיאה בטעינת X: \(msg)"
             cashSystemInclTip = nil
 
-            print("❌ X load failed:", msg)
         }
     }
 
     private func submitEodAdjustmentOrderIfNeeded() async {
-        print("🧾 EOD submit CALLED didSubmit=\(didSubmitAdjustment)")
         guard !didSubmitAdjustment else {
-            print("🧾 EOD submit skipped (already submitted)")
             return
         }
 
@@ -2481,7 +2442,6 @@ private struct EODStepTipsView: View {
         let shouldSubmit = (!gapIsZero) || abs(totalUpdate) > 0.01
         guard shouldSubmit else {
             didSubmitAdjustment = true
-            print("🧾 EOD submit skipped (nothing to submit) -> didSubmit=true")
             return
         }
 
@@ -2530,14 +2490,6 @@ private struct EODStepTipsView: View {
             "eodTinyCashHack": needsTinyCashHack
         ]
 
-        print("""
-        🧾 EOD SUBMIT begin
-          cashUpdateRaw=\(cashUpdateRaw)
-          tipsUpdateRaw=\(tipsUpdateRaw)
-          cashUpdateForDb=\(cashUpdateForDb)
-          totalUpdateForDb=\(totalUpdateForDb)
-          gap=\(gap) gapIsZero=\(gapIsZero) matches=\(updateMatchesGap)
-        """)
 
         // Optional: print a cURL for submitOrder (if you keep that helper around)
         // printSubmitOrderCurl(miniAppId: miniAppId, customerName: "עדכון סוף יום",
@@ -2566,10 +2518,8 @@ private struct EODStepTipsView: View {
                 DispatchQueue.main.async {
                     switch result {
                     case .success(let oid):
-                        print("✅ EOD update saved. orderId=\(oid) tinyHack=\(needsTinyCashHack)")
                         Haptics.success()
                     case .failure(let err):
-                        print("❌ EOD update submit failed:", err)
                         Haptics.error()
                         didSubmitAdjustment = false // allow retry
                     }
@@ -2886,8 +2836,6 @@ enum ZReportGenerateAPI {
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         req.httpBody = Data()
 
-        print("🧾 Z REPORT cURL:")
-        print(#"curl -sS -i -X POST "\#(url.absoluteString)" -H "Accept: application/json" -d "" "#)
 
         let start = Date()
         let (data, resp) = try await URLSession.shared.data(for: req)
@@ -2895,13 +2843,10 @@ enum ZReportGenerateAPI {
 
         guard let http = resp as? HTTPURLResponse else {
             let text = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
-            print("❌ Z REPORT no HTTPResponse (\(ms)ms)\n\(text)")
             throw NSError(domain: "ZReportGenerateAPI", code: -2, userInfo: ["body": text])
         }
 
         let text = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
-        print("📥 Z REPORT HTTP \(http.statusCode) (\(ms)ms)")
-        print("📦 Z REPORT body:\n\(text)")
 
         guard (200...299).contains(http.statusCode) else {
             throw NSError(domain: "ZReportGenerateAPI", code: http.statusCode, userInfo: ["body": text])
@@ -2928,9 +2873,6 @@ enum XReportAPI {
         let url = URL(string: "https://minis.studio/api/xreport?miniAppId=\(miniAppId)")!
 
         // ✅ print curl
-        print(#"🧾 XREPORT cURL:"#)
-        print(#"curl -sS -i -X GET "\#(url.absoluteString)" -H "Accept: application/json""#)
-        print("📡 XREPORT url:", url.absoluteString)
         var req = URLRequest(url: url, timeoutInterval: 15)
         req.httpMethod = "GET"
         req.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -2941,21 +2883,17 @@ enum XReportAPI {
 
         guard let http = resp as? HTTPURLResponse else {
             let body = String(data: raw, encoding: .utf8) ?? "<non-utf8 \(raw.count) bytes>"
-            print("❌ XREPORT no HTTPResponse (\(ms)ms)\n\(body)")
             throw NSError(domain: "XReportAPI", code: -2, userInfo: ["body": body])
         }
 
         let body = String(data: raw, encoding: .utf8) ?? "<non-utf8 \(raw.count) bytes>"
-        print("📥 XREPORT HTTP \(http.statusCode) (\(ms)ms)")
         if !(200...299).contains(http.statusCode) {
-            print("📦 XREPORT body:\n\(body)")
             throw NSError(domain: "XReportAPI", code: http.statusCode, userInfo: ["body": body])
         }
 
         do {
             return try JSONDecoder().decode(XReportApiResponse.self, from: raw)
         } catch {
-            print("❌ XREPORT network error:", error.localizedDescription)
             throw error
         }
     }

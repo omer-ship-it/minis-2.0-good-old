@@ -289,12 +289,9 @@ final class OrdersAutoPrinter {
         }
 
         guard let url = makeClaimURL() else {
-            print("❌ OrdersAutoPrinter: bad claim URL")
             return
         }
-        print("📡 [OrdersAutoPrinter] claim url:", url.absoluteString)
         if miniAppId == 13 {
-            print("📍 [OrdersAutoPrinter] location filter:", adminPickupLocation)
         }
         
 
@@ -308,12 +305,10 @@ final class OrdersAutoPrinter {
         do {
             let (data, response) = try await URLSession.shared.data(for: req)
             guard let http = response as? HTTPURLResponse else {
-                print("❌ OrdersAutoPrinter: no HTTPURLResponse")
                 return
             }
             guard http.statusCode == 200 else {
                 let body = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
-                print("❌ OrdersAutoPrinter claim HTTP \(http.statusCode)\n\(body)")
                 return
             }
 
@@ -344,14 +339,12 @@ final class OrdersAutoPrinter {
 
             let parsed = try decoder.decode(AutoOrdersApiResponse.self, from: data)
             guard parsed.ok else {
-                print("❌ OrdersAutoPrinter: ok=false")
                 return
             }
 
             await processFetchedOrders(parsed.orders, trigger: trigger)
 
         } catch {
-            print("❌ OrdersAutoPrinter network error:", error.localizedDescription)
         }
     }
 
@@ -359,7 +352,6 @@ final class OrdersAutoPrinter {
 
     private func processFetchedOrders(_ dtos: [AutoOrderDTO], trigger: String) async {
         guard !dtos.isEmpty else {
-            print("ℹ️ [OrdersAutoPrinter] no claimed orders to print (trigger=\(trigger))")
             return
         }
 
@@ -384,7 +376,6 @@ final class OrdersAutoPrinter {
         }
 
         guard !filteredDTOs.isEmpty else {
-            print("ℹ️ [OrdersAutoPrinter] all claimed orders filtered out (trigger=\(trigger))")
             return
         }
 
@@ -435,7 +426,6 @@ final class OrdersAutoPrinter {
         }
 
         guard !newOrders.isEmpty else {
-            print("ℹ️ [OrdersAutoPrinter] no new orders after local filtering (trigger=\(trigger))")
             return
         }
 
@@ -522,12 +512,9 @@ final class OrdersAutoPrinter {
     // MARK: - Print + markPrinted
 
     private func printAndMark(order: SimpleOrder, trigger: String) async {
-        print("🖨 [OrdersAutoPrinter] AUTO PRINT #\(order.id) trigger=\(trigger)")
 
         let entries = toBasketEntries(from: order)
         let mode    = diningMode(for: order)
-        print("🧾 order \(order.id) service=\(order.service as Any) subtitle=\(order.subtitle)")
-        print("🧾 computed diningMode =", diningMode(for: order).rawValue)
         let ok = await PrinterManager.shared.printCashPointSplit(
             orderNumber: order.id,
             entries: entries,
@@ -538,7 +525,6 @@ final class OrdersAutoPrinter {
         )
 
         guard ok else {
-            print("❌ [OrdersAutoPrinter] printCashPointSplit FAILED order #\(order.id) — not marking printed")
             return
         }
 
@@ -559,7 +545,6 @@ final class OrdersAutoPrinter {
         }
 
         guard let url = comps.url else {
-            print("❌ markPrinted: bad URL for order \(orderId)")
             return false
         }
 
@@ -572,14 +557,11 @@ final class OrdersAutoPrinter {
             let (_, response) = try await URLSession.shared.data(for: req)
             if let http = response as? HTTPURLResponse {
                 if http.statusCode == 200 {
-                    print("✅ [OrdersAutoPrinter] markPrinted(\(orderId)) OK")
                     return true
                 } else {
-                    print("⚠️ [OrdersAutoPrinter] markPrinted(\(orderId)) HTTP \(http.statusCode)")
                 }
             }
         } catch {
-            print("❌ [OrdersAutoPrinter] markPrinted(\(orderId)) network error:", error.localizedDescription)
         }
 
         return false

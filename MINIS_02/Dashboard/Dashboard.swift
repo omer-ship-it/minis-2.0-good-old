@@ -520,7 +520,6 @@ struct DashboardView: View {
             .background(Color(UIColor.systemGroupedBackground))
             .navigationBarTitleDisplayMode(.inline)
             .onAppear {
-                print("📦 miniAppId =", miniAppId)
 
                 // ✅ 1) instant render from cache
                 store.loadCached()
@@ -976,7 +975,6 @@ struct ExportRangeSheet: View {
                             shareURL = try writeTempCSV(filename: filename, csv: csv)
                             showShare = true
                         } catch {
-                            print("❌ Share export failed:", error)
                         }
                     } label: {
                         Text("שיתוף קובץ CSV")

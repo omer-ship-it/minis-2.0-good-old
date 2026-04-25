@@ -68,7 +68,6 @@ func writeReferralImageToAppGroup(_ image: UIImage) -> String? {
         try data.write(to: url, options: .atomic)
         return url.path
     } catch {
-        print("❌ writeReferralImageToAppGroup:", error)
         return nil
     }
 }

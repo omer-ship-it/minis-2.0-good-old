@@ -615,6 +615,26 @@ struct ShopView: View {
             return raw
         }
     }
+
+    private func contextLabel(from pickupLocation: String) -> String {
+        switch pickupLocation {
+        case "humanities":
+            return "Humanities"
+        case "social":
+            return "Science Building"
+        default:
+            return pickupLocation
+        }
+    }
+
+    private func persistSelectedContext(_ value: String) {
+        guard miniAppId == 13 else { return }
+        guard let pickup = canonicalPickupLocation(value) else { return }
+
+        let defaults = UserDefaults.standard
+        defaults.set(pickup, forKey: "pickup.location.v2")
+        defaults.set(pickup, forKey: "pickup.location")
+    }
     
     @State private var showNavTitle = false
     @State private var manualScroll = false
@@ -1050,7 +1070,7 @@ struct ShopView: View {
                 onCancel: {
                     showOrderFlowFullScreen = false
                 },
-                onCompleted: { orderId, receiptUrl, paymentSummary, paidTotal, tipTotal in
+                onCompleted: { orderId, receiptUrl, paymentSummary, paidTotal, tipTotal, existingOrderId in
                     // placeholder
                     showOrderFlowFullScreen = false
                 },
@@ -1391,7 +1411,7 @@ struct ShopView: View {
             .background(Color(.systemBackground).ignoresSafeArea())
             .onAppear {
                 lastInteractionAt = Date()
-                showWelcome = true
+                showWelcome = isPad
                 if !categories.contains(vm.selectedCategory) {
                     vm.selectedCategory = categories.first ?? ""
                 }
@@ -1469,7 +1489,6 @@ struct ShopView: View {
                 if let sv = findScrollViewUpwards(from: self) {
                     didAttach = true
                     scrollView = sv
-                    print("✅ ScrollYProbe attached to UIScrollView:", sv)
 
                     onChange?(sv.contentOffset.y)
 
@@ -1477,7 +1496,6 @@ struct ShopView: View {
                         self?.onChange?(scrollView.contentOffset.y)
                     }
                 } else {
-                    print("❌ ScrollYProbe: no UIScrollView found (yet)")
                     // try again (sometimes hierarchy is late)
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
                         self?.attachNow()
@@ -1976,11 +1994,26 @@ struct ShopView: View {
                 miniAppId = UserDefaults.standard.integer(forKey: "miniAppId")
             }
 
+            if miniAppId == 13 {
+                let defaults = UserDefaults.standard
+                let storedPickup = (defaults.string(forKey: "pickup.location.v2") ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+
+                if !storedPickup.isEmpty {
+                    vm.selectedContext = contextLabel(from: storedPickup)
+                } else {
+                    persistSelectedContext(vm.selectedContext)
+                }
+            }
+
             shopModel.load(shopId: miniAppId)
 
             if !isPad {
                 showInitialContextPicker = true
             }
+        }
+        .onChange(of: vm.selectedContext) { newValue in
+            persistSelectedContext(newValue)
         }
         .onChange(of: shopModel.categories) { newCategories in
             guard !newCategories.isEmpty else { return }
@@ -3364,7 +3397,6 @@ final class ShopDataModel: ObservableObject {
         products = []
         categories = []
 
-        print("🟡 ShopDataModel.load shopId =", shopId)
         api.load(shopId: String(shopId))
     }
 
@@ -3423,10 +3455,6 @@ final class ShopDataModel: ObservableObject {
         categories = mergedCategories
         isLoading = api.isLoading
 
-        print("🟢 ShopDataModel applyFromAPI")
-        print("api.items.count =", api.items.count)
-        print("mappedProducts.count =", mappedProducts.count)
-        print("categories =", mergedCategories)
     }
 
     func products(in category: String) -> [ShopProduct] {

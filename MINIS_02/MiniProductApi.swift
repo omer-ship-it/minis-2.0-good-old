@@ -33,12 +33,6 @@ struct MinisCustomizationAPI {
         // Print cURL for debugging (single-line JSON for easy paste)
         if let bodyString = String(data: data, encoding: .utf8) {
             let compact = bodyString.replacingOccurrences(of: "\n", with: "").replacingOccurrences(of: "  ", with: " ")
-            print("""
-            🧩 PATCH DEBUG:
-            curl -i -X PATCH "\(finalURL.absoluteString)" \\
-              -H 'Content-Type: application/json' \\
-              -d '\(compact)'
-            """)
         }
 
         // Perform request
@@ -98,7 +92,6 @@ final class CustomizationUpdater: ObservableObject {
             } catch let e as URLError where e.code == .cancelled {
                 // cancelled task, ignore
             } catch {
-                print("❌ patch failed:", error)
             }
         }
     }
@@ -118,7 +111,6 @@ final class CustomizationUpdater: ObservableObject {
         } catch let e as URLError where e.code == .cancelled {
             // unlikely here, but ignore if happens
         } catch {
-            print("❌ commit&publish failed:", error)
         }
     }
 }
@@ -164,12 +156,6 @@ struct MinisProductAPI {
            let data = try encoder.encode(forced)
 
            if let body = String(data: data, encoding: .utf8) {
-               print("""
-               🧩 UPSERT DEBUG:
-               curl -i -X POST "\(url.absoluteString)" \\
-                 -H 'Content-Type: application/json' \\
-                 -d '\(body.replacingOccurrences(of: "\n", with: ""))'
-               """)
            }
 
            var req = URLRequest(url: url)
@@ -204,10 +190,6 @@ struct MinisProductAPI {
         req.httpBody = Data() // Content-Length: 0
         req.setValue("text/plain", forHTTPHeaderField: "Content-Type")
 
-        print("""
-        🟢 PUBLISH DEBUG:
-        curl -i -X POST "\(url.absoluteString)" -d ''
-        """)
 
         let (data, resp) = try await URLSession.shared.data(for: req)
         guard let http = resp as? HTTPURLResponse else { throw APIError.badResponse(-1, "No HTTPURLResponse") }
@@ -316,8 +298,6 @@ func buildJsonData(
 
     if let rawGroupsData = try? JSONSerialization.data(withJSONObject: groups, options: [.prettyPrinted]),
        let rawGroupsString = String(data: rawGroupsData, encoding: .utf8) {
-        print("🧩 RAW GROUPS INPUT:")
-        print(rawGroupsString)
     }
 
     // ✅ keep raw groups exactly as received, but convert recursively to AnyEncodable
@@ -414,7 +394,6 @@ private func encodeAny(_ value: Any) -> MinisProductAPI.AnyEncodable? {
         return nil
 
     default:
-        print("⚠️ encodeAny unsupported type:", type(of: value))
         return nil
     }
 }
@@ -438,10 +417,6 @@ extension MinisProductAPI {
         req.setValue("text/plain", forHTTPHeaderField: "Content-Type")
 
         // debug
-        print(#"""
-        🗑️ SOFT DELETE:
-        curl -i -X POST "\#(url.absoluteString)" -d ''
-        """#)
 
         let (data, resp) = try await URLSession.shared.data(for: req)
         guard let http = resp as? HTTPURLResponse else { throw APIError.badResponse(-1, "No HTTPURLResponse") }
@@ -460,12 +435,6 @@ struct CategoryAPI {
 
         // debug cURL
         if let s = String(data: data, encoding: .utf8) {
-            print("""
-            🧭 CATS REORDER:
-            curl -i -X POST "\(url.absoluteString)" \\
-              -H 'Content-Type: application/json' \\
-              -d '\(s.replacingOccurrences(of: "\n", with: ""))'
-            """)
         }
 
         var req = URLRequest(url: url)

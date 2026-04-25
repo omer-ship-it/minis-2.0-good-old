@@ -1270,7 +1270,6 @@ struct HealthBarChart: View {
                .onEnded { _ in
                    guard selectedIndexBinding != nil else { return }
                    guard let idx = selectedIndex else {
-                       print("🟦 LONG PRESS ignored (no selected bar yet)")
                        return
                    }
 
@@ -1283,10 +1282,8 @@ struct HealthBarChart: View {
                        let norm = (CGFloat(idx) + 0.5) / CGFloat(max(n, 1))
                        cursorXNorm = norm
 
-                       print("🟦 LONG PRESS → GLOBAL cursor ON (norm=\(String(format: "%.3f", norm)))")
                    } else {
                        isCursorMode = true
-                       print("🟦 LONG PRESS → cursor mode ON")
                    }
                }
 
@@ -1297,7 +1294,6 @@ struct HealthBarChart: View {
                    guard isCursorMode else { return }
 
                    let i = indexForX(g.location.x, leftPad: leftPad, cellW: cellW, n: n)
-                   print("🟩 cursor drag x=\(Int(g.location.x)) -> i=\(i)")
 
                    selectedIndex = i
                    selectedX = centerX(i)
@@ -1305,7 +1301,6 @@ struct HealthBarChart: View {
                .onEnded { _ in
                    guard isCursorMode else { return }
                    isCursorMode = false
-                   print("🟥 cursor drag END → cursor mode OFF")
                }
 
            ZStack(alignment: .topLeading) {
@@ -1358,7 +1353,6 @@ struct HealthBarChart: View {
                                selectedX = nil
                                isCursorMode = false
                                if usesGlobalCursor { cursorActive = false }
-                               print("🟪 TAP deselect i=\(i)")
                            } else {
                                selectedIndex = i
                                selectedX = centerX(i)
@@ -1371,7 +1365,6 @@ struct HealthBarChart: View {
                                    registerPlot?(leftPad, plotW)
                                }
 
-                               print("🟪 TAP select i=\(i)")
                            }
                        }
                    }

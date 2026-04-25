@@ -73,9 +73,7 @@ final class MenuApiModel: ObservableObject {
                   self.lastIsOpenDebug = newValue
 
                   if let oldValue, oldValue != newValue {
-                      print("🟣 MenuApiModel.isOpen changed:", oldValue, "→", newValue)
                   } else if oldValue == nil {
-                      print("🟣 MenuApiModel.isOpen initial:", newValue)
                   }
               }
       }
@@ -195,7 +193,6 @@ final class MenuApiModel: ObservableObject {
                         self.isLoading = false
                         if self.items.isEmpty { self.errorMessage = "HTTP \(http.statusCode)" }
                     }
-                    print("❌ MenuApiModel.load HTTP \(http.statusCode) body:", String(text.prefix(300)))
                     return
                 }
 
@@ -211,7 +208,6 @@ final class MenuApiModel: ObservableObject {
                         self.isLoading = false
                         if self.items.isEmpty { self.errorMessage = "Bad JSON" }
                     }
-                    print("❌ MenuApiModel.load: invalid JSON, NOT caching. First 300:", String(text.prefix(300)))
                     return
                 }
 
@@ -267,11 +263,9 @@ final class MenuApiModel: ObservableObject {
                     let old = self.isOpen
                     if old != open {
                         self.isOpen = open
-                        print("🟡 PROBE mini.isOpen changed:", old, "→", open)
                     }
                 }
             } else {
-                print("⚠️ PROBE mini.isOpen missing / failed decode")
             }
 
             let serverTs = decodeProductsLastUpdate(data) ?? ""
@@ -344,14 +338,6 @@ final class MenuApiModel: ObservableObject {
             UserDefaults.standard.set(data, forKey: key)
         }
 
-        print("""
-        🖨️ printers SAVED
-          raw shopId = \(rawShopId ?? "nil")
-          miniAppId  = \(miniAppId)
-          key        = \(key)
-          prefix     = \(printers.netPrefix ?? "nil")
-          stations   = \(printers.stations?.count ?? 0)
-        """)
     }
 
     private struct MiniOpenProbe: Decodable {
@@ -404,13 +390,10 @@ final class MenuApiModel: ObservableObject {
                 await MainActor.run {
                     let old = self.isOpen
                     self.isOpen = open
-                    print("✅ MINI OPEN probe:", old, "→", open)
                 }
             } else {
-                print("⚠️ MINI OPEN probe: missing in JSON")
             }
         } catch {
-            print("❌ MINI OPEN probe decode failed:", error.localizedDescription)
         }
 
         do {
@@ -423,10 +406,8 @@ final class MenuApiModel: ObservableObject {
                 if let open = wrapper.mini?.isOpen {
                     await MainActor.run {
                         self.isOpen = open
-                        print("✅ decoded mini.isOpen =", open)
                     }
                 } else {
-                    print("⚠️ mini.isOpen missing / failed decode")
                 }
 
                 // ✅ category order
@@ -442,17 +423,12 @@ final class MenuApiModel: ObservableObject {
                 // - top-level: printers
                 // - new: admin.printers  (your mini 13 JSON)
                 let printersPayload = wrapper.printers ?? wrapper.admin?.printers
-                print("🧪 JSON printers decoded:")
-                print("   wrapper.printers?.netPrefix =", wrapper.printers?.netPrefix ?? "nil")
-                print("   wrapper.admin?.printers?.netPrefix =", wrapper.admin?.printers?.netPrefix ?? "nil")
 
                 if let raw = String(data: data, encoding: .utf8) {
                     if let r = raw.range(of: "\"netPrefix\"") {
                         let start = raw.index(r.lowerBound, offsetBy: -50, limitedBy: raw.startIndex) ?? raw.startIndex
                         let end   = raw.index(r.lowerBound, offsetBy: 80, limitedBy: raw.endIndex) ?? raw.endIndex
-                        print("🧾 RAW around netPrefix:", raw[start..<end])
                     } else {
-                        print("🧾 RAW has no netPrefix text")
                     }
                 }
                 if let printers = printersPayload {
@@ -462,7 +438,6 @@ final class MenuApiModel: ObservableObject {
                 } else {
                     // Helpful debug so you KNOW why it fell back to LAN prefix
                     #if DEBUG
-                    print("⚠️ printers missing in JSON at both wrapper.printers and wrapper.admin?.printers")
                     #endif
                 }
 
@@ -476,17 +451,14 @@ final class MenuApiModel: ObservableObject {
                 }
 
             } else {
-                print("📦 parseAndApply → ShopPayload decode FAILED, trying plain array")
             }
 
             // 2️⃣ Fallback: plain [ProductPayload]
             let products = try decoder.decode([ProductPayload].self, from: data)
-            print("📦 parseAndApply → decoded plain [ProductPayload] with \(products.count) products")
 
             #if DEBUG
             if let ceasar = products.first(where: { $0.name.contains("קיסר") }) {
                 ceasar.modifiers?.forEach { g in
-                    print("  • title=\(g.title ?? "?"), type=\(g.type ?? "nil"), mode=\(g.selection?.mode ?? "nil")")
                 }
             }
             #endif
@@ -495,7 +467,6 @@ final class MenuApiModel: ObservableObject {
             saveReferralForCurrentShop(kind: .fastlane)
 
         } catch {
-            print("❌ parseAndApply JSON error:", error.localizedDescription)
             await MainActor.run {
                 errorMessage = "JSON parse error: \(error.localizedDescription)"
                 isLoading = false
@@ -509,16 +480,10 @@ final class MenuApiModel: ObservableObject {
 
             // ✅ DEBUG BUNDLE CHECK
             if let it = newItems.first(where: { $0.id == 837 }) {
-                print("✅ 837 exists. name=\(it.name) hasBundle=\(it.bundle != nil)")
             } else {
-                print("❌ 837 product not in newItems. count=\(newItems.count)")
             }
             if let b = newItems.first(where: { $0.id == 837 })?.bundle {
-                print("🍳 bundle for 837 ids=", b.cleanedIds,
-                      "max=", b.maxFree,
-                      "strategy=", b.normalizedStrategy)
             } else {
-                print("⚠️ bundle for 837 NOT FOUND")
             }
 
             MenuCatalog.shared.update(items: newItems)
@@ -689,26 +654,19 @@ func loadSavedPrinters(shopId: String) -> ShopPrintersPayload? {
     let key = "printers.config.shop\(shopId)"
 
     guard let data = UserDefaults.standard.data(forKey: key) else {
-        print("❌ printers LOAD: no data for key:", key)
         return nil
     }
 
-    print("🧾 printers LOAD: found data bytes =", data.count, "key:", key)
 
     // Optional: print raw JSON once (great for debugging)
     if let raw = String(data: data, encoding: .utf8) {
-        print("🧾 printers LOAD RAW (first 400):", String(raw.prefix(400)))
     } else {
-        print("⚠️ printers LOAD: data not utf8")
     }
 
     do {
         let decoded = try JSONDecoder().decode(ShopPrintersPayload.self, from: data)
-        print("✅ printers LOAD decoded. prefix =", decoded.netPrefix ?? "nil",
-              "stations =", decoded.stations?.count ?? 0)
         return decoded
     } catch {
-        print("❌ printers LOAD decode error:", error)
         return nil
     }
 }
@@ -1518,6 +1476,7 @@ enum OrderAPI {
         let cashAmount: Double
         let cardAmount: Double
     }
+
     
    
    
@@ -1725,7 +1684,6 @@ enum OrderAPI {
                     .trimmingCharacters(in: .whitespacesAndNewlines)
 
                 let raw = !rawV2.isEmpty ? rawV2 : rawV1
-                print("📍 pickup debug v2=\(rawV2) v1=\(rawV1) -> raw=\(raw)")
                 
                 if let pickup = canonicalPickupLocation(raw) {
                     payload["pickupLocation"] = pickup   // "humanities" | "social"
@@ -1782,7 +1740,12 @@ enum OrderAPI {
                 // or: payload["paymentMeta"] = zcreditMeta // alternative
             }
             
-            if let orderId { payload["orderId"] = orderId }
+            if let orderId {
+                payload["orderId"] = orderId
+                print("[submitOrder] sending orderId=\(orderId)")
+            } else {
+                print("[submitOrder] no orderId (fallback path)")
+            }
             if let ticketNumber { payload["ticketNumber"] = ticketNumber }
 
             if let orderType, !orderType.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -1802,7 +1765,7 @@ enum OrderAPI {
                 var card = r2(max(payment.cardAmount, 0))
                 let sum  = r2(cash + card)
 
-                if sum > 0.01, !closeEnough(sum, dueVar) {
+                if orderId == nil, sum > 0.01, !closeEnough(sum, dueVar) {
                     dueVar = sum
                     finalTotals["total"] = dueVar
                 }
@@ -1860,7 +1823,14 @@ enum OrderAPI {
             }
 
             // ✅ Idempotency key (persisted by outbox)
-            let idempotencyKey = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+            // When orderId exists (from start-safe), derive key deterministically
+            // so backend can match the existing row and UPDATE instead of INSERT.
+            let idempotencyKey: String
+            if let orderId {
+                idempotencyKey = "submit-\(orderId)"
+            } else {
+                idempotencyKey = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+            }
             payload["idempotencyKey"] = idempotencyKey
 
             Task { @MainActor in
@@ -1902,6 +1872,17 @@ enum OrderAPI {
                 #endif
             }
 
+#if DEBUG
+            if let bodyData = req.httpBody,
+               let bodyString = String(data: bodyData, encoding: .utf8) {
+                let orderIdValue = payload["orderId"].map { "\($0)" } ?? "nil"
+                let miniAppIdValue = payload["miniAppId"].map { "\($0)" } ?? "nil"
+                let idempotencyValue = payload["idempotencyKey"].map { "\($0)" } ?? "nil"
+                print("[submitOrder/json] orderId=\(orderIdValue) miniAppId=\(miniAppIdValue) idempotencyKey=\(idempotencyValue) body=\(bodyString)")
+            }
+            print("[submitOrder/curl] \(req.curlDebug)")
+#endif
+
             // ✅ Enqueue BEFORE sending (durability)
             let env = OutboxEnvelope(
                 id: idempotencyKey,
@@ -1919,7 +1900,6 @@ enum OrderAPI {
                 OrderOutbox.shared.drainNow()   // try immediately
             }
 
-            print("curl:", req.curlDebug)
 
             Task { @MainActor in
                 NotificationCenter.default.post(name: .resetModifiers, object: nil)
@@ -2005,12 +1985,51 @@ struct ZCreditResult {
     let message: String
     let referenceNumber: String?
     let transactionId: String?
+    let orderId: Int?
     let rawPath: String?        // e.g. "commit_final", "status_exhausted"
     let rawReturnCode: String?  // e.g. "0", "-80", etc.
 
     /// Convenience flag so old code `if result.approved` keeps working
     var approved: Bool { status == .approved }
 }
+
+#if DEBUG
+struct ZCreditAlreadyPaidDebugScenario {
+    let shopId: Int
+    let idempotencyKey: String
+    let ticketId: String?
+    let orderId: Int?
+    let amount: Double
+    let currency: String
+    let paymentProvider: String
+    let paymentMethod: String
+    let customerName: String
+
+    static let referenceOrder = ZCreditAlreadyPaidDebugScenario(
+        shopId: 12,
+        idempotencyKey: "ab62be2c-8751-4e81-a47d-965ac5993e86",
+        ticketId: nil,
+        orderId: 48668,
+        amount: 68,
+        currency: "GBP",
+        paymentProvider: "minis",
+        paymentMethod: "card",
+        customerName: "נטלי"
+    )
+}
+
+enum ZCreditDebugControls {
+    static let alreadyPaidReferenceOrderKey = "zcredit.debug.alreadyPaid.referenceOrder"
+
+    static var isReferenceOrderEnabled: Bool {
+        UserDefaults.standard.bool(forKey: alreadyPaidReferenceOrderKey)
+    }
+
+    static func setReferenceOrderEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: alreadyPaidReferenceOrderKey)
+    }
+}
+#endif
 
 final class ZCreditPaymentHandler {
     static let shared = ZCreditPaymentHandler()
@@ -2022,12 +2041,115 @@ final class ZCreditPaymentHandler {
     private var statusTimer: Timer?
     private var timeoutTimer: Timer?
 
+    private var currentDataTask: URLSessionDataTask?
+    private var paymentTimeoutSeconds: TimeInterval = 30
+
     private var currentCorrelationId: String?
     private var currentReferenceOrSession: String?
     private var currentSessionId: String?
     private var currentPinpadId: String?
+    private(set) var lastStartSafeCurl: String?
+    private(set) var lastStartSafeResponseDebug: String?
+    private(set) var lastStartSafeParsedStatus: String?
+    private(set) var lastReturnedOrderId: Int?
+
+#if DEBUG
+    private(set) var debugTerminalChargeStartCount: Int = 0
+    private(set) var debugAlreadyPaidShortCircuitCount: Int = 0
+    private(set) var debugEventLog: [String] = []
+#endif
 
     // MARK: - Helper: map backend JSON → tri-state ZCreditResult
+
+    private func log(_ message: String) {
+        print("[ZCredit] \(message)")
+        if message.contains("start-safe http status=") || message.contains("start-safe parse_error") {
+            lastStartSafeResponseDebug = message
+        }
+#if DEBUG
+        debugEventLog.append(message)
+        if debugEventLog.count > 40 {
+            debugEventLog.removeFirst(debugEventLog.count - 40)
+        }
+#endif
+    }
+
+    private func normalizedString(from json: [String: Any], keys: [String]) -> String? {
+        for key in keys {
+            if let value = json[key] as? String {
+                let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !normalized.isEmpty {
+                    return normalized.lowercased()
+                }
+            }
+            if let value = json[key] as? NSNumber {
+                return value.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            }
+        }
+        return nil
+    }
+
+    private func boolValue(from json: [String: Any], keys: [String]) -> Bool? {
+        for key in keys {
+            if let value = json[key] as? Bool {
+                return value
+            }
+            if let value = json[key] as? NSNumber {
+                return value.boolValue
+            }
+            if let value = json[key] as? String {
+                switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+                case "true", "1", "yes", "approved", "success", "succeeded", "paid", "completed", "complete", "ok":
+                    return true
+                case "false", "0", "no", "declined", "failed", "cancelled", "canceled":
+                    return false
+                default:
+                    break
+                }
+            }
+        }
+        return nil
+    }
+
+    var lastStartSafeDisplayStatus: String? {
+        if let response = lastStartSafeResponseDebug?.lowercased(), !response.isEmpty {
+            if response.contains("path=already_succeeded_short_circuit") ||
+                response.contains("path=already_paid") ||
+                response.contains("path=commit_success") ||
+                response.contains("result=approved") ||
+                response.contains("result=success") ||
+                response.contains("result=succeeded") ||
+                response.contains("result=paid") ||
+                response.contains("result=completed") ||
+                response.contains("checkoutstate=approved") ||
+                response.contains("checkoutstate=paid") ||
+                response.contains("submitstate=already_completed") ||
+                response.contains("submitstate=completed") ||
+                response.contains("submitstate=succeeded") ||
+                response.contains("paymentstatus=approved") ||
+                response.contains("paymentstatus=paid") ||
+                response.contains("status=approved") ||
+                response.contains("status=success") ||
+                response.contains("status=succeeded") ||
+                response.contains("status=paid") ||
+                response.contains("status=completed") {
+                return "approved"
+            }
+            if response.contains("result=declined") ||
+                response.contains("result=failed") ||
+                response.contains("checkoutstate=declined") ||
+                response.contains("status=declined") ||
+                response.contains("status=failed") {
+                return "declined"
+            }
+            if response.contains("http status=202") ||
+                response.contains("body=<empty>") ||
+                response.contains("parse_error") {
+                return "pending"
+            }
+        }
+        return lastStartSafeParsedStatus
+    }
     
     private func resolveMiniAppIdWithSource() -> (value: Int, source: String) {
         let d = UserDefaults.standard
@@ -2099,24 +2221,83 @@ final class ZCreditPaymentHandler {
             message: "שגיאה בכתובת השרת",
             referenceNumber: nil,
             transactionId: nil,
+            orderId: nil,
             rawPath: "client_bad_url",
             rawReturnCode: nil
         )
     }
 
+#if DEBUG
+    @MainActor
+    func resetDebugInstrumentation() {
+        debugTerminalChargeStartCount = 0
+        debugAlreadyPaidShortCircuitCount = 0
+        debugEventLog.removeAll()
+    }
+#endif
+
     private func finishFromResponse(
         json: [String: Any],
         completion: @escaping (ZCreditResult) -> Void
     ) {
-        let pathRaw   = json["path"] as? String
-        let resultRaw = json["resultStatus"] as? String
+        func extractOrderId(from json: [String: Any]) -> Int? {
+            let candidates: [Any?] = [
+                json["orderId"],
+                json["OrderId"],
+                json["existingOrderId"],
+                json["ExistingOrderId"]
+            ]
 
-        let path      = pathRaw?.lowercased()
-        let resultStr = resultRaw?.lowercased()
+            for candidate in candidates {
+                if let intValue = candidate as? Int, intValue > 0 {
+                    return intValue
+                }
+                if let numberValue = candidate as? NSNumber, numberValue.intValue > 0 {
+                    return numberValue.intValue
+                }
+                if let stringValue = candidate as? String,
+                   let intValue = Int(stringValue.trimmingCharacters(in: .whitespacesAndNewlines)),
+                   intValue > 0 {
+                    return intValue
+                }
+            }
+            return nil
+        }
+
+        func statusLabel(_ status: ZCreditResult.Status) -> String {
+            switch status {
+            case .approved: return "approved"
+            case .declined: return "declined"
+            case .unknown: return "pending"
+            }
+        }
+
+        let pathRaw = normalizedString(from: json, keys: [
+            "path", "Path", "rawPath", "RawPath", "statusPath", "StatusPath"
+        ])
+        let resultStr = normalizedString(from: json, keys: [
+            "resultStatus", "ResultStatus", "result", "Result",
+            "status", "Status", "paymentStatus", "PaymentStatus",
+            "payment_status", "paymentState", "PaymentState"
+        ])
+        let checkoutState = normalizedString(from: json, keys: [
+            "checkoutState", "CheckoutState", "checkout_state"
+        ])
+        let submitState = normalizedString(from: json, keys: [
+            "submitState", "SubmitState", "submit_state"
+        ])
+        let replayRaw = boolValue(from: json, keys: ["replay", "Replay"])
+        let path = pathRaw
 
         let reference = json["referenceNumber"] as? String
         let txId      = json["transactionId"] as? String
-        let rc        = (json["invoiceReturnCode"] as? String) ?? (json["returnCode"] as? String)
+        let orderId   = extractOrderId(from: json)
+        let rc = normalizedString(from: json, keys: [
+            "invoiceReturnCode", "InvoiceReturnCode",
+            "returnCode", "ReturnCode",
+            "code", "Code",
+            "statusCode", "StatusCode", "status_code"
+        ])
 
         let msg = (json["invoiceReturnMessage"] as? String) ??
                   (json["ZCreditMessage"] as? String) ??
@@ -2128,6 +2309,7 @@ final class ZCreditPaymentHandler {
         // Explicit “device busy” code → decline with a clear message
         if rc == "-50101" {
             let status: ZCreditResult.Status = .declined
+            lastStartSafeParsedStatus = statusLabel(status)
 
             invalidateTimers()
             currentCorrelationId      = nil
@@ -2141,9 +2323,11 @@ final class ZCreditPaymentHandler {
                          : msg,
                 referenceNumber: reference,
                 transactionId: txId,
+                orderId: orderId,
                 rawPath: pathRaw,
                 rawReturnCode: rc
             )
+            log("start-safe returning orderId=\(orderId.map(String.init) ?? "nil") status=\(statusLabel(status))")
             DispatchQueue.main.async { completion(result) }
             return
         }
@@ -2151,6 +2335,7 @@ final class ZCreditPaymentHandler {
         // Old -80 = "keep waiting" → here we treat as UNKNOWN (caller can show 'payment not completed')
         if rc == "-80" {
             let status: ZCreditResult.Status = .unknown
+            lastStartSafeParsedStatus = statusLabel(status)
 
             invalidateTimers()
             currentCorrelationId      = nil
@@ -2162,9 +2347,11 @@ final class ZCreditPaymentHandler {
                 message: msg.isEmpty ? "התשלום לא הושלם במסוף" : msg,
                 referenceNumber: reference,
                 transactionId: txId,
+                orderId: orderId,
                 rawPath: pathRaw,
                 rawReturnCode: rc
             )
+            log("start-safe returning orderId=\(orderId.map(String.init) ?? "nil") status=\(statusLabel(status))")
             DispatchQueue.main.async { completion(result) }
             return
         }
@@ -2181,26 +2368,51 @@ final class ZCreditPaymentHandler {
         let isApprovedPath = (
             path == "commit_final" ||
             path == "status_final" ||
-            path == "commit_approved"
+            path == "commit_approved" ||
+            path == "already_succeeded_short_circuit" ||
+            path == "already_paid" ||
+            path == "commit_success" ||
+            path == "status_success"
         )
 
-        let isApprovedStatus = (resultStr == "approved")
-        let isDeclinedStatus = (resultStr == "declined")
+        let approvedStatusValues: Set<String> = [
+            "approved", "success", "succeeded", "paid", "completed", "complete", "ok"
+        ]
+        let declinedStatusValues: Set<String> = [
+            "declined", "failed", "error", "cancelled", "canceled"
+        ]
+        let approvedSubmitValues: Set<String> = [
+            "already_completed", "completed", "succeeded", "approved"
+        ]
+
+        let isApprovedStatus = resultStr.map { approvedStatusValues.contains($0) } ?? false
+        let isDeclinedStatus = resultStr.map { declinedStatusValues.contains($0) } ?? false
+        let isApprovedCheckoutState = checkoutState.map { approvedStatusValues.contains($0) } ?? false
+        let isDeclinedCheckoutState = checkoutState.map { declinedStatusValues.contains($0) } ?? false
+        let isAlreadyCompletedSubmit = submitState.map { approvedSubmitValues.contains($0) } ?? false
+        let isReplayApproved = (replayRaw == true) && (isApprovedStatus || isApprovedCheckoutState || isAlreadyCompletedSubmit)
+        let isApprovedBool = boolValue(from: json, keys: [
+            "approved", "Approved",
+            "success", "Success",
+            "alreadyPaid", "AlreadyPaid",
+            "already_paid", "alreadySucceeded", "AlreadySucceeded"
+        ]) == true
 
         let isApprovedCode = (rc == "0" || rc == "000" || rc == "00")   // typical “OK” codes
         let hasAnyCode     = (rc?.isEmpty == false)
 
         let finalStatus: ZCreditResult.Status
 
-        if isApprovedStatus || isApprovedPath || isApprovedCode {
+        if isApprovedStatus || isApprovedCheckoutState || isApprovedPath || isAlreadyCompletedSubmit || isReplayApproved || isApprovedBool || isApprovedCode {
             finalStatus = .approved
-        } else if isDeclinedStatus || isDeclinedPath || (hasAnyCode && !isApprovedCode) {
+        } else if isDeclinedStatus || isDeclinedCheckoutState || isDeclinedPath || (hasAnyCode && !isApprovedCode) {
             // any non-0 code (except the special cases handled above) → decline
             finalStatus = .declined
         } else {
             // no clear signal → unknown
             finalStatus = .unknown
         }
+        lastStartSafeParsedStatus = statusLabel(finalStatus)
 
         // -------------------------------------------------------------------
 
@@ -2214,10 +2426,12 @@ final class ZCreditPaymentHandler {
             message: msg,
             referenceNumber: reference,
             transactionId: txId,
+            orderId: orderId,
             rawPath: pathRaw,
             rawReturnCode: rc
         )
 
+        log("start-safe returning orderId=\(orderId.map(String.init) ?? "nil") status=\(statusLabel(finalStatus))")
         DispatchQueue.main.async {
             completion(result)
         }
@@ -2226,8 +2440,10 @@ final class ZCreditPaymentHandler {
     private func payLegacyStart(
         amount: Double,
         orderId: Int?,
+        ticketId: String?,
         transactionType: String,
         idempotencyKey: String?,
+        useLegacyEndpoint: Bool = false,
         completion: @escaping (ZCreditResult) -> Void
     ) {
         let _ = CashpointID(rawValue: UserDefaults.standard.integer(forKey: "cashpointID")) ?? .one
@@ -2237,7 +2453,6 @@ final class ZCreditPaymentHandler {
         let mid = miniAppResolution.value
         let pinpadId = resolvePinpadId(miniAppId: mid)
 
-        print("💳 ZCREDIT PAY mid=\(mid) source=\(miniAppResolution.source) pinpadId=\(pinpadId) perMini=\(UserDefaults.standard.string(forKey: "pinpadId.\(mid)") ?? "nil") legacy=\(UserDefaults.standard.string(forKey: "pinpadId") ?? "nil")")
 
         guard mid > 0 else {
             let result = ZCreditResult(
@@ -2245,6 +2460,7 @@ final class ZCreditPaymentHandler {
                 message: "Missing miniAppId/shopId for /payments/zcredit/start-safe",
                 referenceNumber: nil,
                 transactionId: nil,
+                orderId: nil,
                 rawPath: "client_missing_miniapp_id",
                 rawReturnCode: nil
             )
@@ -2256,13 +2472,18 @@ final class ZCreditPaymentHandler {
 
         currentCorrelationId = correlationId
         currentPinpadId = pinpadId
+        lastStartSafeResponseDebug = nil
+        lastStartSafeParsedStatus = nil
+        lastStartSafeCurl = nil
+        lastReturnedOrderId = nil
 
         let stableKeyPrefix = idempotencyKey.map { String($0.prefix(8)) } ?? "-"
-        print("🟡 ZCredit payLegacyStart using key=\(stableKeyPrefix)")
 
         let startBody: [String: Any] = [
             "MiniAppId": mid,
             "miniAppId": mid,
+            "TicketId": ticketId ?? "",
+            "ticketId": ticketId ?? "",
             "amount": safeAmount,
             "currency": "ILS",
             "authOnly": false,
@@ -2272,7 +2493,9 @@ final class ZCreditPaymentHandler {
             "idempotencyKey": idempotencyKey ?? ""
         ]
 
-        guard let startURL = URL(string: "/payments/zcredit/start-safe", relativeTo: baseURL) else {
+        let endpoint = useLegacyEndpoint ? "/payments/zcredit/start" : "/payments/zcredit/start-safe"
+        print("[ZCredit] using endpoint: \(endpoint) amount=\(safeAmount) pinpadId=\(pinpadId) miniAppId=\(mid) idempotency=\(idempotencyKey?.prefix(8) ?? "-")")
+        guard let startURL = URL(string: endpoint, relativeTo: baseURL) else {
             DispatchQueue.main.async { completion(self.legacyBadURLResult()) }
             return
         }
@@ -2282,9 +2505,7 @@ final class ZCreditPaymentHandler {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue(correlationId, forHTTPHeaderField: "x-correlation-id")
         req.setValue(pinpadId, forHTTPHeaderField: "x-pinpad-id")
-        if mid != 12 {
-            req.setValue(String(mid), forHTTPHeaderField: "x-miniapp-id")
-        }
+        req.setValue(String(mid), forHTTPHeaderField: "x-miniapp-id")
         if let idempotencyKey, !idempotencyKey.isEmpty {
             req.setValue(idempotencyKey, forHTTPHeaderField: "Idempotency-Key")
             req.setValue(idempotencyKey, forHTTPHeaderField: "X-Request-Id")
@@ -2292,20 +2513,84 @@ final class ZCreditPaymentHandler {
 
         req.httpBody = try? JSONSerialization.data(withJSONObject: startBody)
 
-        print("🟡 ZCredit start-safe miniAppId handling mid=\(mid) omitHeaderMiniAppId=\(mid == 12) bodyMiniAppId=\(mid)")
-        print("🔵 ZCredit /payments/zcredit/start-safe cURL:")
-        print(req.curlDebug)
+#if DEBUG
+        if let bodyData = req.httpBody,
+           let bodyString = String(data: bodyData, encoding: .utf8) {
+            var curlHeaders = [
+                "Content-Type: application/json",
+                "x-correlation-id: \(correlationId)",
+                "x-pinpad-id: \(pinpadId)",
+                "x-miniapp-id: \(mid)"
+            ]
+            if let idempotencyKey, !idempotencyKey.isEmpty {
+                curlHeaders.append("Idempotency-Key: \(idempotencyKey)")
+                curlHeaders.append("X-Request-Id: \(idempotencyKey)")
+            }
 
-        URLSession.shared.dataTask(with: req) { [weak self] data, resp, error in
+            let escapedURL = startURL.absoluteString.replacingOccurrences(of: "'", with: "'\\''")
+            let escapedBody = bodyString.replacingOccurrences(of: "'", with: "'\\''")
+            let headerFlags = curlHeaders
+                .map { "-H '\($0.replacingOccurrences(of: "'", with: "'\\''"))'" }
+                .joined(separator: " \\\n  ")
+            let curlString = """
+            curl -X POST '\(escapedURL)' \\
+              \(headerFlags) \\
+              --data '\(escapedBody)'
+            """
+            lastStartSafeCurl = curlString
+        }
+#endif
+
+
+        #if DEBUG
+        debugTerminalChargeStartCount += 1
+        #endif
+
+        // Track whether this request already completed (guard against timeout + response race)
+        var didComplete = false
+        let completionOnce: (ZCreditResult) -> Void = { result in
+            guard !didComplete else { return }
+            didComplete = true
+            completion(result)
+        }
+
+        // 30-second timeout: cancel ZCredit if no response
+        invalidateTimers()
+        let capturedCorrelationId = correlationId
+        timeoutTimer = Timer.scheduledTimer(withTimeInterval: paymentTimeoutSeconds, repeats: false) { [weak self] _ in
             guard let self = self else { return }
+            guard self.currentCorrelationId == capturedCorrelationId else { return }
+            self.log("payment timeout after \(Int(self.paymentTimeoutSeconds))s — cancelling")
+            self.currentDataTask?.cancel()
+            self.currentDataTask = nil
+            self.cancelCurrent()
+            let result = ZCreditResult(
+                status: .unknown,
+                message: "המסוף לא הגיב תוך \(Int(self.paymentTimeoutSeconds)) שניות",
+                referenceNumber: nil,
+                transactionId: nil,
+                orderId: nil,
+                rawPath: "client_timeout",
+                rawReturnCode: nil
+            )
+            DispatchQueue.main.async { completionOnce(result) }
+        }
+
+        let task = URLSession.shared.dataTask(with: req) { [weak self] data, resp, error in
+            guard let self = self else { return }
+            DispatchQueue.main.async { self.timeoutTimer?.invalidate(); self.timeoutTimer = nil }
 
             if let error = error {
+                // Ignore cancellation errors from our own timeout
+                if (error as NSError).code == NSURLErrorCancelled {
+                    return
+                }
                 let json: [String: Any] = [
                     "ok": false,
                     "path": "commit_http_error",
                     "message": "שגיאה בתחילת עסקה במסוף: \(error.localizedDescription)"
                 ]
-                self.finishFromResponse(json: json, completion: completion)
+                self.finishFromResponse(json: json, completion: completionOnce)
                 return
             }
 
@@ -2314,24 +2599,56 @@ final class ZCreditPaymentHandler {
                   http.statusCode == 200,
                   !data.isEmpty
             else {
+                if let http = resp as? HTTPURLResponse {
+                    self.log("start-safe http status=\(http.statusCode) body=<empty>")
+                } else {
+                    self.log("start-safe http status=nil body=<empty>")
+                }
                 let json: [String: Any] = [
                     "ok": false,
                     "path": "commit_http_non_200",
                     "message": "שגיאה בתחילת עסקה במסוף"
                 ]
-                self.finishFromResponse(json: json, completion: completion)
+                self.finishFromResponse(json: json, completion: completionOnce)
                 return
             }
 
             guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                let rawBody = String(data: data, encoding: .utf8) ?? "<non-utf8>"
+                self.log("start-safe parse_error rawBody=\(rawBody)")
                 let json: [String: Any] = [
                     "ok": false,
                     "path": "client_parse_error",
                     "message": "תגובה לא תקינה מהמסוף"
                 ]
-                self.finishFromResponse(json: json, completion: completion)
+                self.finishFromResponse(json: json, completion: completionOnce)
                 return
             }
+
+            let rawBody = String(data: data, encoding: .utf8) ?? "<non-utf8>"
+            let pathValue = (obj["path"] as? String)
+                ?? (obj["Path"] as? String)
+                ?? (obj["rawPath"] as? String)
+                ?? "nil"
+            let resultValue = (obj["resultStatus"] as? String)
+                ?? (obj["ResultStatus"] as? String)
+                ?? (obj["result"] as? String)
+                ?? (obj["Result"] as? String)
+                ?? (obj["status"] as? String)
+                ?? (obj["Status"] as? String)
+                ?? "nil"
+            let checkoutStateValue = (obj["checkoutState"] as? String)
+                ?? (obj["CheckoutState"] as? String)
+                ?? "nil"
+            let submitStateValue = (obj["submitState"] as? String)
+                ?? (obj["SubmitState"] as? String)
+                ?? "nil"
+            let returnCodeValue = (obj["returnCode"] as? String)
+                ?? (obj["ReturnCode"] as? String)
+                ?? (obj["code"] as? String)
+                ?? (obj["Code"] as? String)
+                ?? "nil"
+            self.log("start-safe http status=\(http.statusCode) path=\(pathValue) result=\(resultValue) checkoutState=\(checkoutStateValue) submitState=\(submitStateValue) returnCode=\(returnCodeValue) rawBody=\(rawBody)")
 
             if let sid = (obj["sessionId"] as? String) ?? (obj["SessionId"] as? String) {
                 self.currentSessionId = sid
@@ -2339,9 +2656,19 @@ final class ZCreditPaymentHandler {
             if let ref = (obj["referenceNumber"] as? String) ?? (obj["ReferenceNumber"] as? String) {
                 self.currentReferenceOrSession = ref
             }
+            if let orderId = (obj["orderId"] as? Int)
+                ?? (obj["OrderId"] as? Int)
+                ?? Int((obj["orderId"] as? String) ?? "")
+                ?? Int((obj["OrderId"] as? String) ?? ""),
+               orderId > 0 {
+                self.lastReturnedOrderId = orderId
+                self.log("start-safe returned orderId=\(orderId)")
+            }
 
-            self.finishFromResponse(json: obj, completion: completion)
-        }.resume()
+            self.finishFromResponse(json: obj, completion: completionOnce)
+        }
+        currentDataTask = task
+        task.resume()
     }
 
     // MARK: - Main entry point
@@ -2350,35 +2677,38 @@ final class ZCreditPaymentHandler {
     func pay(
         amount: Double,
         orderId: Int?,
+        ticketId: String? = nil,
         transactionType: String = "01",   // ✅ NEW: "01" = regular, "53" = refund
         idempotencyKey: String? = nil,
+        useLegacyEndpoint: Bool = false,
         completion: @escaping (ZCreditResult) -> Void
     ) {
-        let stableIdempotencyKey: String = {
-            if let idempotencyKey,
-               !idempotencyKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                let trimmed = idempotencyKey.trimmingCharacters(in: .whitespacesAndNewlines)
-                print("🟡 ZCredit pay() idempotency reused source=caller key=\(String(trimmed.prefix(8)))")
-                return trimmed
-            }
+        let effectiveAmount = amount
+        let effectiveOrderId = orderId
+        let effectiveTicketId = ticketId
 
-            if let existingAttempt = PaymentAttemptStore.shared.unresolvedAttempt(reusingAmount: amount) {
+        let stableIdempotencyKey: String = {
+            if let existingAttempt = PaymentAttemptStore.shared.unresolvedAttempt(
+                reusingAmount: effectiveAmount,
+                orderReference: effectiveTicketId
+            ) {
                 let reused = existingAttempt.idempotencyKey
-                print("🟡 ZCredit pay() idempotency reused source=unresolvedAttempt key=\(String(reused.prefix(8)))")
                 return reused
             }
 
             let generated = UUID().uuidString.replacingOccurrences(of: "-", with: "")
-            print("🟡 ZCredit pay() idempotency created source=freshAttempt key=\(String(generated.prefix(8)))")
             return generated
         }()
 
-        print("🟡 ZCredit start path = LEGACY /payments/zcredit/start-safe")
+        log("starting real payment flow idempotency=\(stableIdempotencyKey)")
+
         payLegacyStart(
-            amount: amount,
-            orderId: orderId,
+            amount: effectiveAmount,
+            orderId: effectiveOrderId,
+            ticketId: effectiveTicketId,
             transactionType: transactionType,
             idempotencyKey: stableIdempotencyKey,
+            useLegacyEndpoint: useLegacyEndpoint,
             completion: completion
         )
     }
@@ -2390,6 +2720,8 @@ final class ZCreditPaymentHandler {
         timeoutTimer?.invalidate()
         statusTimer = nil
         timeoutTimer = nil
+        currentDataTask?.cancel()
+        currentDataTask = nil
     }
 
     func cancelCurrent() {
@@ -2414,8 +2746,12 @@ final class ZCreditPaymentHandler {
         }
 
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        print("[ZCredit] cancelCurrent → pinpadId=\(body["pinpadId"] ?? "nil") streamId=\(body["streamId"] ?? "nil")")
 
-        URLSession.shared.dataTask(with: req).resume()
+        URLSession.shared.dataTask(with: req) { data, response, error in
+            let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+            print("[ZCredit] cancel response status=\(status) error=\(error?.localizedDescription ?? "none")")
+        }.resume()
     }
 }
 
@@ -2583,11 +2919,9 @@ final class ZCreditApplePayHandler: NSObject, PKPaymentAuthorizationControllerDe
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: body, options: [])
 
-        print("🔵 ZCredit ApplePay commit cURL:\n\(req.curlDebug)")
 
         URLSession.shared.dataTask(with: req) { data, resp, err in
             if let err = err {
-                print("❌ ZCredit network error:", err.localizedDescription)
                 self.pendingResult = .failure(err)
                 completion(.init(status: .failure, errors: [err]))
                 return
@@ -2599,15 +2933,12 @@ final class ZCreditApplePayHandler: NSObject, PKPaymentAuthorizationControllerDe
                     code: -2,
                     userInfo: [NSLocalizedDescriptionKey: "No HTTP response"]
                 )
-                print("❌ ZCredit backend: no HTTP response")
                 self.pendingResult = .failure(e)
                 completion(.init(status: .failure, errors: [e]))
                 return
             }
 
             let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
-            print("🟢 ZCredit backend status:", http.statusCode)
-            print("📦 ZCredit backend body:", obj)
 
             let ok = (obj["ok"] as? Int ?? 0) == 1 || (obj["ok"] as? Bool ?? false)
             let hasError = (obj["zcreditHasError"] as? Int ?? 0) == 1
@@ -2625,7 +2956,6 @@ final class ZCreditApplePayHandler: NSObject, PKPaymentAuthorizationControllerDe
                     code: http.statusCode,
                     userInfo: [NSLocalizedDescriptionKey: msg, "body": obj]
                 )
-                print("❌ ZCredit ApplePay refused:", msg)
                 self.pendingResult = .failure(e)
                 completion(.init(status: .failure, errors: [e]))
             }
@@ -3066,10 +3396,6 @@ enum TeamTabsAPI {
         req.httpBody = bodyData
 
         // ✅ DEBUG REQUEST
-        print("🧾 TeamTabsAPI.close REQUEST")
-        print("   url:", url.absoluteString)
-        print("   method:", req.httpMethod ?? "")
-        print("   body:\n\(bodyString)")
 
         let curl = """
         curl -sS -i -X POST "\(url.absoluteString)" \
@@ -3077,20 +3403,17 @@ enum TeamTabsAPI {
           -H "Accept: application/json" \
           -d '\(bodyString.replacingOccurrences(of: "\n", with: " "))'
         """
-        print("   curl:\n\(curl)")
 
         let start = Date()
 
         URLSession.shared.dataTask(with: req) { data, resp, err in
             if let err = err {
-                print("❌ TeamTabsAPI.close NETWORK error:", err.localizedDescription)
                 completion(.failure(err))
                 return
             }
 
             guard let http = resp as? HTTPURLResponse else {
                 let text = data.flatMap { String(data: $0, encoding: .utf8) } ?? "<no body>"
-                print("❌ TeamTabsAPI.close NO HTTP RESPONSE body:", text)
                 completion(.failure(NSError(domain: "TeamTabsAPI", code: -2, userInfo: ["body": text])))
                 return
             }
@@ -3100,12 +3423,6 @@ enum TeamTabsAPI {
             let text = String(data: raw, encoding: .utf8) ?? "<non-utf8 \(raw.count) bytes>"
 
             // ✅ DEBUG RESPONSE
-            print("📥 TeamTabsAPI.close RESPONSE (\(ms)ms)")
-            print("   status:", http.statusCode)
-            if let ct = http.value(forHTTPHeaderField: "Content-Type") { print("   content-type:", ct) }
-            if let rid = http.value(forHTTPHeaderField: "x-request-id") { print("   x-request-id:", rid) }
-            if let cf = http.value(forHTTPHeaderField: "cf-ray") { print("   cf-ray:", cf) }
-            print("   body:\n\(text)")
 
             guard (200...299).contains(http.statusCode) else {
                 completion(.failure(NSError(
@@ -3153,7 +3470,6 @@ enum TeamTabsAPI {
         req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
 
         if let body = req.httpBody, let s = String(data: body, encoding: .utf8) {
-            print("🧩 TeamTabsAPI.openOrCreate payload:", s)
         }
 
         URLSession.shared.dataTask(with: req) { data, resp, err in
@@ -3164,14 +3480,12 @@ enum TeamTabsAPI {
 
             guard let http = resp as? HTTPURLResponse else {
                 let text = data.flatMap { String(data: $0, encoding: .utf8) } ?? "<no body>"
-                print("❌ TeamTabsAPI.openOrCreate NO HTTP RESPONSE body:", text)
                 completion(.failure(NSError(domain: "TeamTabsAPI", code: -3, userInfo: ["body": text])))
                 return
             }
 
             guard (200...299).contains(http.statusCode), let data else {
                 let text = data.flatMap { String(data: $0, encoding: .utf8) } ?? "<no body>"
-                print("❌ TeamTabsAPI.openOrCreate HTTP \(http.statusCode) body:", text)
                 completion(.failure(NSError(domain: "TeamTabsAPI", code: http.statusCode, userInfo: ["body": text])))
                 return
             }
@@ -3181,7 +3495,6 @@ enum TeamTabsAPI {
                 completion(.success(decoded.orderId))
             } catch {
                 let text = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
-                print("❌ TeamTabsAPI.openOrCreate decode failed body:", text)
                 completion(.failure(error))
             }
         }.resume()
@@ -3206,14 +3519,12 @@ enum TeamTabsAPI {
 
             guard let http = resp as? HTTPURLResponse else {
                 let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? "<no body>"
-                print("❌ fetchOrderMetadata NO HTTP RESPONSE body:", body)
                 completion(.failure(NSError(domain: "TeamTabsAPI", code: -11, userInfo: ["body": body])))
                 return
             }
 
             guard (200...299).contains(http.statusCode), let data = data else {
                 let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? "<no body>"
-                print("❌ fetchOrderMetadata HTTP \(http.statusCode) body:", body)
                 completion(.failure(NSError(domain: "TeamTabsAPI", code: http.statusCode, userInfo: ["body": body])))
                 return
             }
@@ -3225,7 +3536,6 @@ enum TeamTabsAPI {
                 completion(.success(decoded))
             } catch {
                 let body = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
-                print("❌ fetchOrderMetadata decode failed body:", body)
                 completion(.failure(error))
             }
         }.resume()
@@ -3448,14 +3758,11 @@ final class ReportPreviewModel: ObservableObject {
         let url = comps.url!
 
         // ✅ Debug cURL
-        print("🧾 ZREPORT BY-DAY cURL:\ncurl \"\(url.absoluteString)\"")
 
         let (raw, resp) = try await URLSession.shared.data(from: url)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
 
         let rawText = String(data: raw, encoding: .utf8) ?? "<non-utf8 \(raw.count) bytes>"
-        print("🌍 zreports/by-day HTTP \(code)")
-        print("📦 zreports/by-day RAW (first 600 chars):\n\(String(rawText.prefix(600)))")
 
         guard (200..<300).contains(code) else {
             throw NSError(domain: "http", code: code, userInfo: [NSLocalizedDescriptionKey: rawText])
@@ -3878,7 +4185,7 @@ final class PaymentAttemptStore: ObservableObject {
 
 #if DEBUG
     let forcedIdempotencyKeyDefaultsKey = "payment.debug.forceFixedIdempotencyKey"
-    let forcedIdempotencyKeyValue = "3299101e-6a26-4d74-a699-0947dd659fb1"
+    let forcedIdempotencyKeyValue = "2B5B79A8411740E2A6BD4A0C2D7A0A12"
 #endif
 
     private init() {
@@ -3892,7 +4199,6 @@ final class PaymentAttemptStore: ObservableObject {
         let state = active?.state.rawValue ?? "-"
         let orderId = active?.orderId.map(String.init) ?? "-"
         let orderRef = active?.orderReference ?? "-"
-        print("🧾[PaymentAttempt] \(message) attemptId=\(attemptId) key=\(keyPrefix) state=\(state) orderId=\(orderId) orderRef=\(orderRef)")
     }
 
 #if DEBUG
@@ -3946,15 +4252,12 @@ final class PaymentAttemptStore: ObservableObject {
         case .pending, .reconciling:
             break
         case .succeeded:
-            print("🟡 replay denied reason=succeeded key=\(String(attempt.idempotencyKey.prefix(8)))")
             return nil
         case .failedFinal:
-            print("🟡 replay denied reason=failedFinal key=\(String(attempt.idempotencyKey.prefix(8)))")
             return nil
         }
         let age = Date().timeIntervalSince(attempt.updatedAt)
         if age > staleOpenAttemptThreshold {
-            print("🟡 replay denied reason=stale age=\(Int(age)) key=\(String(attempt.idempotencyKey.prefix(8)))")
             return nil
         }
         if let amount, abs(attempt.amount - amount) > 0.01 {
@@ -3970,7 +4273,27 @@ final class PaymentAttemptStore: ObservableObject {
     }
 
     func currentAttempt(reusingAmount amount: Double? = nil, orderReference: String? = nil) -> PaymentAttempt? {
-        unresolvedAttempt(reusingAmount: amount, orderReference: orderReference)
+        guard let attempt = activeAttempt else { return nil }
+        switch attempt.state {
+        case .succeeded:
+            return nil
+        case .pending, .reconciling, .failedFinal:
+            break
+        }
+        let age = Date().timeIntervalSince(attempt.updatedAt)
+        if age > staleOpenAttemptThreshold {
+            return nil
+        }
+        if let amount, abs(attempt.amount - amount) > 0.01 {
+            return nil
+        }
+        if let orderReference,
+           let existingReference = attempt.orderReference,
+           existingReference != orderReference {
+            return nil
+        }
+        log("reuseCurrent amount=\(amount ?? attempt.amount) orderRef=\(orderReference ?? attempt.orderReference ?? "-")", attempt: attempt)
+        return attempt
     }
 
     func blocksParallelAttempt() -> Bool {
@@ -3998,6 +4321,26 @@ final class PaymentAttemptStore: ObservableObject {
 
     func markFailedFinal() {
         updateState(.failedFinal)
+    }
+
+    func updateOrderId(_ orderId: Int?) {
+        guard let orderId else { return }
+        guard var attempt = activeAttempt else { return }
+        if attempt.orderId == orderId { return }
+
+        attempt = PaymentAttempt(
+            attemptId: attempt.attemptId,
+            idempotencyKey: attempt.idempotencyKey,
+            orderId: orderId,
+            orderReference: attempt.orderReference,
+            amount: attempt.amount,
+            state: attempt.state,
+            createdAt: attempt.createdAt,
+            updatedAt: Date()
+        )
+        activeAttempt = attempt
+        save()
+        log("captured orderId=\(orderId)", attempt: attempt)
     }
 
     func clearIfTerminal() {

@@ -126,7 +126,6 @@ enum OneShotPrinter {
     }
 
     private static func log(_ s: String) {
-        Swift.print("🖨️ \(s)")
     }
 
     private static func totalPendingAllPrinters() -> Int {
@@ -1204,7 +1203,6 @@ final class PrinterManager {
         }
         set {
             UserDefaults.standard.set(newValue.rawValue, forKey: printerSetKey)
-            Swift.print("🖨 Active printer set changed to:", newValue.rawValue)
         }
     }
 
@@ -1308,7 +1306,6 @@ final class PrinterManager {
         job += EscPos.feed(4)
         job += EscPos.cut
 
-        Swift.print("📄 Probing Hebrew codepages on \(host):\(port)")
         OneShotPrinter.send(host: host, port: port, data: job)
     }
 
@@ -1335,7 +1332,6 @@ final class PrinterManager {
             + EscPos.feed(2)
 
         let host = activeBakeryIP
-        Swift.print("🔔 [PrinterManager] openCashDrawer (one-shot) → BAKERY \(host):\(port)")
         OneShotPrinter.send(host: host, port: port, data: job)
     }
 
@@ -1469,19 +1465,8 @@ final class PrinterManager {
         }
 
         // ---- DEBUG PREVIEW ----
-        Swift.print("══════════ TAX INVOICE/RECEIPT PREVIEW #\(invoiceNumber) ══════════")
-        Swift.print("Date: \(dateText)")
-        Swift.print("Customer: \(safeCustomer.isEmpty ? "No customer name" : safeCustomer)")
-        Swift.print("────────────────────────────────────────────")
         for item in items {
-            Swift.print("• \(item.quantity)x \(item.name) → \(money(item.lineTotal))")
         }
-        Swift.print("────────────────────────────────────────────")
-        Swift.print("Net (before VAT): \(money(net))")
-        Swift.print("VAT \(Int(vatRate * 100))%: \(money(vatAmount))")
-        Swift.print("Total: \(money(gross))")
-        Swift.print("Paid: \(money(paidAmount)) via \(paymentMethod)")
-        Swift.print("════════════════════════════════════════════\n")
 
         // ---- LAYOUT CONSTANTS ----
         let lineWidth = 42
@@ -1600,20 +1585,17 @@ final class PrinterManager {
         job += EscPos.cut
 
         let host = activeBakeryIP
-        Swift.print("🧾 [PrinterManager] printTaxInvoice → bakery (one-shot) \(host):\(port)")
         OneShotPrinter.send(host: host, port: port, data: job)
     }
 
     // MARK: - Main order printing
     func print(order o: KDSAdminOrder, for station: StationFilter,  branchKey: String? = nil) {
         guard o.source == .kiosk else {
-            Swift.print("🛑 [PrinterManager] skipping print for non-kiosk source: \(o.source)")
             return
         }
 
         let allLines = o.lines
         guard !allLines.isEmpty else {
-            Swift.print("🖨 no lines to print for order #\(o.id)")
             return
         }
 
@@ -1662,7 +1644,6 @@ final class PrinterManager {
                 lineWidth: kitchenBackLineWidth
             )
 
-            Swift.print("🧑‍🍳 KITCHENBACK (RONGTA): sending \(backJob.count) bytes to \(host):\(port)")
             send(backJob, host: host, dedupeKey: "bone|\(o.id)|kitchenback|toast")
         }
 
@@ -1711,7 +1692,6 @@ final class PrinterManager {
             }
 
             guard let target = resolveTarget(from: bucketKey, branchKey: branchKey) else {
-                Swift.print("⚠️ [PrinterManager] no printer target for bucket=\(bucketKey) branch=\(branchKey ?? "default")")
                 continue
             }
 
@@ -1726,7 +1706,6 @@ final class PrinterManager {
             )
 
             let dk = "bone|\(o.id)|\(bucketKey)"
-            Swift.print("🖨 PRINT \(bucketKey): sending \(job.count) bytes to \(target.host):\(port)")
             send(job, host: target.host, dedupeKey: dk)
         }
 
@@ -1748,13 +1727,11 @@ final class PrinterManager {
 
     func printSplitAllStations(order o: KDSAdminOrder, branchKey: String? = nil) {
         guard o.source == .kiosk else {
-            Swift.print("🛑 [PrinterManager] skipping split-all print for non-kiosk source: \(o.source)")
             return
         }
 
         let allLines = o.lines
         guard !allLines.isEmpty else {
-            Swift.print("🖨 SPLIT-ALL: no lines to print for order #\(o.id)")
             return
         }
 
@@ -1809,7 +1786,6 @@ final class PrinterManager {
             }
 
             if toastAlreadyCoversHotline {
-                Swift.print("🧯 SPLIT-ALL KitchenBack skipped: toast already routes to hotline via Printers[]")
             } else {
                 debugTicketPreview(order: o, lines: toastLines, stationLabel: "KitchenBack (split all) טוסט")
 
@@ -1827,7 +1803,6 @@ final class PrinterManager {
                 )
 
                 let dk = "bone|\(o.id)|kitchenback|toast"
-                Swift.print("🧑‍🍳 SPLIT-ALL KITCHENBACK: sending \(job.count) bytes to \(hostToUse):\(port)")
                 send(job, host: hostToUse, dedupeKey: dk)
             }
         }
@@ -1838,7 +1813,6 @@ final class PrinterManager {
 
             // ✅ Branch-aware target resolution
             guard let target = resolveTarget(from: bucketKey, branchKey: branchKey) else {
-                Swift.print("⚠️ SPLIT-ALL: no printer target for bucket=\(bucketKey) branch=\(branchKey ?? "default")")
                 continue
             }
 
@@ -1859,7 +1833,6 @@ final class PrinterManager {
             )
 
             let dk = "bone|\(o.id)|\(bucketKey)"
-            Swift.print("🖨 SPLIT-ALL \(bucketKey): sending \(job.count) bytes to \(host):\(port)")
             send(job, host: host, dedupeKey: dk)
         }
     }
@@ -1889,7 +1862,6 @@ final class PrinterManager {
 
         if let s = stationFromString(line.station) { return s }
 
-        Swift.print("⚠️ [PrinterManager] missing station for productId=\(line.productId ?? -1) name='\(line.name)' → default Kitchen")
         return .kitchen
     }
  
@@ -1904,28 +1876,19 @@ final class PrinterManager {
                                     stationLabel: String) {
         guard debugTickets else { return }
 
-        Swift.print("──────── \(stationLabel.uppercased()) TICKET #\(order.id) ────────")
-        Swift.print("Customer: \(order.customerName.isEmpty ? "-" : order.customerName)")
-        Swift.print("Service:  \(serviceLabel(from: order.service))")
-        Swift.print("Printed:  \(Date())")
-        Swift.print("Items:")
 
         if lines.isEmpty {
-            Swift.print("  (no lines)")
         } else {
             for ln in lines {
                 let cat = ln.category ?? "-"
-                Swift.print("  - \(ln.qty)x \(ln.name) [\(cat)]")
 
                 if let mods = ln.modifiers?
                     .trimmingCharacters(in: .whitespacesAndNewlines),
                    !mods.isEmpty {
-                    Swift.print("      · \(mods)")
                 }
             }
         }
 
-        Swift.print("────────────────────────────────────────────\n")
     }
 
     private func removeKeyword(_ keyword: String, from mods: String?) -> String {
@@ -2388,7 +2351,6 @@ extension PrinterManager {
         let line = parts.joined(separator: " | ")
         
         // 🔍 LOG PREVIEW
-        Swift.print("ROW:", line)
         
         if containsHebrew(line) {
             let enc = CFStringConvertEncodingToNSStringEncoding(
@@ -2476,7 +2438,6 @@ extension PrinterManager {
     }
     
     func printSalesDebugReport(_ data: SalesReportData, vatRate: Double = 0.18) {
-        Swift.print("=== DEBUG PRINT (מכירות + תקבולים + דוח מזומן + תשר + חריגים) ===")
         
         func exVat(_ incVat: Double) -> Double {
             guard vatRate > 0 else { return incVat }
@@ -2612,7 +2573,6 @@ extension PrinterManager {
         job += EscPos.feed(3)
         job += EscPos.cut
         
-        Swift.print("SENDING", job.count, "bytes to printer")
         OneShotPrinter.send(host: activeBakeryIP, port: port, data: job)
     }
     
@@ -2727,7 +2687,6 @@ extension PrinterManager {
         isRestore: Bool = false,            // ✅ true when restoring
         generatedAt: Date = Date()          // ✅ print time (now)
     ) {
-        Swift.print("=== PRINT REPORT \(type == .x ? "X" : "Z") ===")
         // ⚠️ Printing adjustment: reduce 1 NIS from tips
         let printTipAdjustment: Double = 0.0
         
@@ -2936,7 +2895,6 @@ extension PrinterManager {
         job += EscPos.feed(3)
         job += EscPos.cut
         
-        Swift.print("SENDING", job.count, "bytes to printer")
         OneShotPrinter.send(host: activeBakeryIP, port: port, data: job)
     }
     private func fmt1(_ v: Double) -> String { String(format: "%.1f", v) }
@@ -3010,7 +2968,6 @@ extension PrinterManager {
 
         for ln in allLines {
             let ids = resolvedStationIds(for: ln)
-            Swift.print("🧾 ROUTE productId=\(ln.productId ?? -1) name='\(ln.name)' ids=\(ids)")
             if ids.isEmpty {
                 // fallback bucket by old classifier (keeps old behavior)
                 let legacy = classifyStation(for: ln).rawValue
@@ -3063,7 +3020,6 @@ extension PrinterManager {
             }
 
             if toastAlreadyCoversHotline {
-                Swift.print("🧯 KitchenBack skipped: toast already routes to hotline via Printers[]")
             } else {
                 let dk = "bone|\(order.id)|kitchenback|toast"
 
@@ -3094,7 +3050,6 @@ extension PrinterManager {
 
         for (bucketKey, linesForBucket) in buckets {
             guard let target = resolveTarget(from: bucketKey, branchKey: branchKey) else {
-                Swift.print("⚠️ printCashPointSplit: no target for bucket=\(bucketKey) branch=\(branchKey ?? "default")")
                 continue
             }
 
@@ -3535,7 +3490,6 @@ extension PrinterManager {
         job += EscPos.cut
 
         let dk = "loyalty.he.v2|\(earnedStamps)|\(qrPayload.hashValue)"
-        Swift.print("🎟️ [PrinterManager] printHebrewLoyaltySlipV2 → \(station) \(host):\(port)")
         OneShotPrinter.send(host: host, port: port, data: job, tag: dk, dedupeKey: dk)
     }
 }

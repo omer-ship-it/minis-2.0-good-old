@@ -33,7 +33,6 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey : Any]? = nil
     ) -> Bool {
 
-        print("🚀 AppDelegate didFinishLaunching")
 
         let center = UNUserNotificationCenter.current()
         center.delegate = self
@@ -43,20 +42,16 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 
         // ✅ Keep your launchOptions push handling as-is
         if let remote = launchOptions?[.remoteNotification] as? [AnyHashable: Any] {
-            print("🚀 Launched from remote notification:", remote)
             storeOrderIdIfPresent(remote)
             UserDefaults.standard.set(true, forKey: isLastOrderReadyKey)
             NotificationCenter.default.post(name: .orderReady, object: nil, userInfo: remote)
         } else {
-            print("ℹ️ No remote notification in launchOptions")
         }
 
         // ✅ Print token from canonical store (may be empty on first launch)
         let saved = loadApnsToken()
         if saved.isEmpty {
-            print("⚠️ No saved APNs token yet")
         } else {
-            print("🔎 Saved APNs token (from last launch):", saved)
         }
 
         // ✅ Universal link cold launch support (unchanged)
@@ -78,7 +73,6 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         if userActivity.activityType == NSUserActivityTypeBrowsingWeb,
            let url = userActivity.webpageURL {
 
-            print("🧩 continueUserActivity (Universal Link):", url.absoluteString)
 
             // Store for SwiftUI to consume (cold launch safe)
             UserDefaults.standard.set(url.absoluteString, forKey: pendingUniversalLinkKey)
@@ -97,7 +91,6 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
             return true
         }
 
-        print("ℹ️ continueUserActivity ignored:", userActivity.activityType)
         return false
     }
 
@@ -105,24 +98,14 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
     // MARK: - Universal link handler
     private func handleUniversalLink(_ url: URL) {
 
-        print("🔗 handleUniversalLink CALLED")
-        print("🔗 url =", url.absoluteString)
 
         // Log path + query
-        print("🔗 path =", url.path)
-        print("🔗 query =", url.query ?? "<nil>")
 
         if let claim = StudentClaim.from(url: url) {
 
-            print("🎓 STUDENT CLAIM PARSED ✅")
-            print("🎓 miniAppId =", claim.miniAppId)
-            print("🎓 campaignId =", claim.campaignId)
-            print("🎓 discountPercent =", claim.discountPercent)
-            print("🎓 durationMonths =", claim.durationMonths)
 
             persistStudentDiscount(claim)
 
-            print("📣 Posting Notification.studentClaimReceived")
 
             NotificationCenter.default.post(
                 name: .studentClaimReceived,
@@ -136,7 +119,6 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
             )
 
         } else {
-            print("❌ NOT a student claim URL")
         }
     }
 
@@ -158,7 +140,6 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         UserDefaults.standard.set(payload, forKey: pendingStudentDiscountKey)
         UserDefaults.standard.synchronize()
 
-        print("✅ Saved pendingStudentDiscount:", payload)
     }
 
    
@@ -176,7 +157,6 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
             isPrinterManager: false
         )
 
-        print("📬 APNs token (hex): \(tokenString)")
 
         UserDefaults.standard.set(tokenString, forKey: DeviceKeys.apnsToken)
 
@@ -192,7 +172,6 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         _ application: UIApplication,
         didFailToRegisterForRemoteNotificationsWithError error: Error
     ) {
-        print("❌ Failed to register for push notifications:", error.localizedDescription)
     }
 
     // MARK: - Foreground push
@@ -202,7 +181,6 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
         let userInfo = notification.request.content.userInfo
-        print("📬 Foreground push:", userInfo)
 
         storeOrderIdIfPresent(userInfo)
         UserDefaults.standard.set(true, forKey: isLastOrderReadyKey)
@@ -220,7 +198,6 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
     ) {
         let userInfo = response.notification.request.content.userInfo
 
-        print("📲 User tapped notification:", userInfo)
 
         storeOrderIdIfPresent(userInfo)
         UserDefaults.standard.set(true, forKey: isLastOrderReadyKey)
@@ -236,11 +213,9 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         didReceiveRemoteNotification userInfo: [AnyHashable : Any],
         fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void
     ) {
-        print("📡 [fetch] Silent/background push:", userInfo)
 
         storeOrderIdIfPresent(userInfo)
         UserDefaults.standard.set(true, forKey: isLastOrderReadyKey)
-        print("✅ isLastOrderReady = true (from silent/background push)")
 
         NotificationCenter.default.post(name: .orderReady, object: nil, userInfo: userInfo)
 
@@ -260,11 +235,9 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         let idFromString = (userInfo["orderId"] as? String).flatMap(Int.init)
 
         guard let orderId = idFromInt ?? idFromString else {
-            print("⚠️ No valid orderId in push payload:", userInfo)
             return
         }
 
-        print("📦 Saving received orderId:", orderId)
         UserDefaults.standard.set(orderId, forKey: lastReadyOrderKey)
     }
 }
@@ -310,9 +283,7 @@ func registerAdminDevice(token: String, displayName: String, isPrinterManager: B
     Task {
         do {
             let (data, _) = try await URLSession.shared.data(for: req)
-            print("📡 registerAdminDevice:", String(data: data, encoding: .utf8) ?? "")
         } catch {
-            print("❌ registerAdminDevice error:", error.localizedDescription)
         }
     }
 }

@@ -179,7 +179,6 @@ struct HomeView: View {
         UserDefaults.standard.set(r.miniAppId, forKey: "miniAppId")
         UserDefaults.standard.set(String(r.miniAppId), forKey: "shopId")
 
-        print("🏠 HomeView.onOpen → tapped miniAppId=\(r.miniAppId), kind=\(r.kind)")
 
         withAnimation(.spring(response: 0.25, dampingFraction: 0.9)) {
             let isMiniMe = (r.kind == .miniMe)
@@ -235,7 +234,6 @@ struct HomeView: View {
     private func handleMiniAppChange(_ newValue: Int) {
         guard newValue != 0 else { return }
 
-        print("🎯 HomeView saw miniAppId change → \(newValue)")
 
         shopId = String(newValue)
         resetShopUserDefaultsToDefaults()
@@ -307,7 +305,6 @@ struct HomeView: View {
         }
 
         suite.synchronize()
-        print("✅ HomeView saved referral → miniAppId=\(miniAppId), kind=\(kind.rawValue)")
     }
 
     private func reloadReferrals() {

@@ -142,7 +142,6 @@ enum OneShotPrinter {
     }
 
     private static func log(_ s: String) {
-        Swift.print("🖨️ \(s)")
     }
 
     private static func totalPendingAllPrinters() -> Int {
@@ -1173,7 +1172,6 @@ final class PrinterManager {
         }
         set {
             UserDefaults.standard.set(newValue.rawValue, forKey: printerSetKey)
-            Swift.print("🖨 Active printer set changed to:", newValue.rawValue)
         }
     }
 
@@ -1264,7 +1262,6 @@ final class PrinterManager {
         job += EscPos.feed(4)
         job += EscPos.cut
 
-        Swift.print("📄 Probing Hebrew codepages on \(host):\(port)")
         OneShotPrinter.send(host: host, port: port, data: job)
     }
 
@@ -1291,7 +1288,6 @@ final class PrinterManager {
             + EscPos.feed(2)
 
         let host = activeBakeryIP
-        Swift.print("🔔 [PrinterManager] openCashDrawer (one-shot) → BAKERY \(host):\(port)")
         OneShotPrinter.send(host: host, port: port, data: job)
     }
 
@@ -1425,19 +1421,8 @@ final class PrinterManager {
         }
 
         // ---- DEBUG PREVIEW ----
-        Swift.print("══════════ TAX INVOICE/RECEIPT PREVIEW #\(invoiceNumber) ══════════")
-        Swift.print("Date: \(dateText)")
-        Swift.print("Customer: \(safeCustomer.isEmpty ? "No customer name" : safeCustomer)")
-        Swift.print("────────────────────────────────────────────")
         for item in items {
-            Swift.print("• \(item.quantity)x \(item.name) → \(money(item.lineTotal))")
         }
-        Swift.print("────────────────────────────────────────────")
-        Swift.print("Net (before VAT): \(money(net))")
-        Swift.print("VAT \(Int(vatRate * 100))%: \(money(vatAmount))")
-        Swift.print("Total: \(money(gross))")
-        Swift.print("Paid: \(money(paidAmount)) via \(paymentMethod)")
-        Swift.print("════════════════════════════════════════════\n")
 
         // ---- LAYOUT CONSTANTS ----
         let lineWidth = 42
@@ -1556,7 +1541,6 @@ final class PrinterManager {
         job += EscPos.cut
 
         let host = activeBakeryIP
-        Swift.print("🧾 [PrinterManager] printTaxInvoice → bakery (one-shot) \(host):\(port)")
         OneShotPrinter.send(host: host, port: port, data: job)
     }
 
@@ -1564,7 +1548,6 @@ final class PrinterManager {
 
     func print(order o: KDSAdminOrder, for station: StationFilter) {
         guard o.source == .kiosk else {
-            Swift.print("🛑 [PrinterManager] skipping print for non-kiosk source: \(o.source)")
             return
         }
 
@@ -1576,7 +1559,6 @@ final class PrinterManager {
         switch station {
         case .kitchen:
             guard !kitchenLines.isEmpty else {
-                Swift.print("🧑‍🍳 KITCHEN: no lines to print for order #\(o.id)")
                 return
             }
 
@@ -1586,7 +1568,6 @@ final class PrinterManager {
                 let host = activeKitchenIP
                 let fam  = activeFamily
                 let job  = makeJob(order: o, lines: kitchenLines, rotated: false, family: fam)
-                Swift.print("🧑‍🍳 KITCHEN: sending \(job.count) bytes to \(host):\(port)")
                 send(job, host: host, dedupeKey: "bone|\(o.id)|kitchen")
             }
 
@@ -1609,7 +1590,6 @@ final class PrinterManager {
                     lineWidth: kitchenBackLineWidth
                 )
 
-                Swift.print("🧑‍🍳 KITCHENBACK (RONGTA): sending \(backJob.count) bytes to \(host):\(port)")
                 send(backJob, host: host, dedupeKey: "bone|\(o.id)|kitchenback|toast")
             }
 
@@ -1617,11 +1597,8 @@ final class PrinterManager {
             
 
         case .bakery:
-            Swift.print("🧁 BAKERY printing order #\(o.id), lines=",
-                        bakeryLines.map { "\($0.name) (\($0.category ?? "-"))" })
 
             guard !bakeryLines.isEmpty else {
-                Swift.print("🧁 BAKERY: no lines to print for order #\(o.id)")
                 return
             }
 
@@ -1630,33 +1607,24 @@ final class PrinterManager {
             let host = activeBakeryIP
             let fam  = activeFamily
             let job  = makeJob(order: o, lines: bakeryLines, rotated: false, family: fam)
-            Swift.print("🧁 BAKERY: sending \(job.count) bytes to \(host):\(port)")
             let dk = "bone|\(o.id)|bakery"
             send(job, host: host, dedupeKey: dk)
 
         case .all:
             guard !allLines.isEmpty else {
-                Swift.print("📦 ALL: no lines to print for order #\(o.id)")
                 return
             }
 
             let host = activeBarIP
             let fam  = activeFamily
             let job  = makeJob(order: o, lines: allLines, rotated: false, family: fam)
-            Swift.print("📦 ALL: sending \(job.count) bytes to bar \(host):\(port)")
             debugTicketPreview(order: o, lines: allLines, stationLabel: "All stations")
             let dk = "bone|\(o.id)|all"
             send(job, host: host, dedupeKey: dk)
 
         case .bar:
-            Swift.print("🖨 BAR station handling order #\(o.id)")
-            Swift.print("   • bakeryLines =",
-                        bakeryLines.map { "\($0.name) (\($0.category ?? "-"))" })
-            Swift.print("   • barLines    =",
-                        barLines.map { "\($0.name) (\($0.category ?? "-"))" })
 
             if bakeryLines.isEmpty && barLines.isEmpty {
-                Swift.print("🖨 BAR: no lines to print for order #\(o.id)")
                 return
             }
 
@@ -1669,7 +1637,6 @@ final class PrinterManager {
                 let fam  = activeFamily
                 let bakeryJob = makeJob(order: o, lines: bakeryLines, rotated: false, family: fam)
 
-                Swift.print("🧁 BAKERY (from BAR): sending \(bakeryJob.count) bytes to \(host):\(port)")
 
                 // ✅ IMPORTANT: unique per-order+station so jobs don't overwrite each other
                 let dedupeKey = "bone|\(o.id)|bakery"
@@ -1685,7 +1652,6 @@ final class PrinterManager {
                 let fam  = activeFamily
                 let barJob = makeJob(order: o, lines: barLines, rotated: false, family: fam)
 
-                Swift.print("🖨 BAR: sending \(barJob.count) bytes to \(host):\(port)")
 
                 // ✅ Stable per-order + station dedupe key
                 let dedupeKey = "bone|\(o.id)|bar"
@@ -1698,7 +1664,6 @@ final class PrinterManager {
 
     func printSplitAllStations(order o: KDSAdminOrder) {
         guard o.source == .kiosk else {
-            Swift.print("🛑 [PrinterManager] skipping split-all print for non-kiosk source: \(o.source)")
             return
         }
 
@@ -1714,7 +1679,6 @@ final class PrinterManager {
         let barLines:     [KDSOrderLine] = allLines.filter { classifyStation(for: $0) == .bar }
 
         if kitchenLines.isEmpty && bakeryLines.isEmpty && barLines.isEmpty {
-            Swift.print("🖨 SPLIT-ALL: no lines to print for order #\(o.id)")
             return
         }
 
@@ -1738,7 +1702,6 @@ final class PrinterManager {
                 lineWidth: 42                        // or your default variable
             )
 
-            Swift.print("🧑‍🍳 SPLIT-ALL KITCHEN: sending \(job.count) bytes to \(host):\(port)")
             send(job, host: host, dedupeKey: "bone|\(o.id)|kitchen")
         }
 
@@ -1756,7 +1719,6 @@ final class PrinterManager {
                 lineWidth: kitchenBackLineWidth      // ✅ 42 (or 32 if 58mm)
             )
 
-            Swift.print("🧑‍🍳 SPLIT-ALL KITCHENBACK: sending \(job.count) bytes to \(host):\(port)")
             send(job, host: host, dedupeKey: "bone|\(o.id)|kitchenback|toast")
         }
 
@@ -1775,7 +1737,6 @@ final class PrinterManager {
                 lineWidth: 42
             )
 
-            Swift.print("🧁 SPLIT-ALL BAKERY: sending \(job.count) bytes to \(host):\(port)")
             send(job, host: host, dedupeKey: "bone|\(o.id)|bakery")
         }
 
@@ -1794,7 +1755,6 @@ final class PrinterManager {
                 lineWidth: 42
             )
 
-            Swift.print("🍹 SPLIT-ALL BAR: sending \(job.count) bytes to \(host):\(port)")
             send(job, host: host, dedupeKey: "bone|\(o.id)|bar")
         }
         markOrderPrintedFireAndForget(orderId: o.id)
@@ -1816,7 +1776,6 @@ final class PrinterManager {
     }
     fileprivate func classifyStation(for line: KDSOrderLine) -> Station {
         if let s = stationFromString(line.station) { return s }
-        Swift.print("⚠️ [PrinterManager] missing station for productId=\(line.productId ?? -1) name='\(line.name)' → default Kitchen")
         return .kitchen
     }
  
@@ -1831,28 +1790,19 @@ final class PrinterManager {
                                     stationLabel: String) {
         guard debugTickets else { return }
 
-        Swift.print("──────── \(stationLabel.uppercased()) TICKET #\(order.id) ────────")
-        Swift.print("Customer: \(order.customerName.isEmpty ? "-" : order.customerName)")
-        Swift.print("Service:  \(serviceLabel(from: order.service))")
-        Swift.print("Printed:  \(Date())")
-        Swift.print("Items:")
 
         if lines.isEmpty {
-            Swift.print("  (no lines)")
         } else {
             for ln in lines {
                 let cat = ln.category ?? "-"
-                Swift.print("  - \(ln.qty)x \(ln.name) [\(cat)]")
 
                 if let mods = ln.modifiers?
                     .trimmingCharacters(in: .whitespacesAndNewlines),
                    !mods.isEmpty {
-                    Swift.print("      · \(mods)")
                 }
             }
         }
 
-        Swift.print("────────────────────────────────────────────\n")
     }
 
     private func removeKeyword(_ keyword: String, from mods: String?) -> String {
@@ -2315,7 +2265,6 @@ extension PrinterManager {
         let line = parts.joined(separator: " | ")
         
         // 🔍 LOG PREVIEW
-        Swift.print("ROW:", line)
         
         if containsHebrew(line) {
             let enc = CFStringConvertEncodingToNSStringEncoding(
@@ -2403,7 +2352,6 @@ extension PrinterManager {
     }
     
     func printSalesDebugReport(_ data: SalesReportData, vatRate: Double = 0.18) {
-        Swift.print("=== DEBUG PRINT (מכירות + תקבולים + דוח מזומן + תשר + חריגים) ===")
         
         func exVat(_ incVat: Double) -> Double {
             guard vatRate > 0 else { return incVat }
@@ -2539,7 +2487,6 @@ extension PrinterManager {
         job += EscPos.feed(3)
         job += EscPos.cut
         
-        Swift.print("SENDING", job.count, "bytes to printer")
         OneShotPrinter.send(host: activeBakeryIP, port: port, data: job)
     }
     
@@ -2654,7 +2601,6 @@ extension PrinterManager {
         isRestore: Bool = false,            // ✅ true when restoring
         generatedAt: Date = Date()          // ✅ print time (now)
     ) {
-        Swift.print("=== PRINT REPORT \(type == .x ? "X" : "Z") ===")
         // ⚠️ Printing adjustment: reduce 1 NIS from tips
         let printTipAdjustment: Double = 0.0
         
@@ -2863,7 +2809,6 @@ extension PrinterManager {
         job += EscPos.feed(3)
         job += EscPos.cut
         
-        Swift.print("SENDING", job.count, "bytes to printer")
         OneShotPrinter.send(host: activeBakeryIP, port: port, data: job)
     }
     private func fmt1(_ v: Double) -> String { String(format: "%.1f", v) }
@@ -2995,8 +2940,6 @@ extension PrinterManager {
 
         // ---- Optional debug (safe) ----
         if kitchenJob != nil || bakeryJob != nil || barJob != nil || backJob != nil {
-            Swift.print("🖨 printCashPointSplit START order=\(order.id) stations=",
-                        "k=\(!kitchenLines.isEmpty) b=\(!bakeryLines.isEmpty) bar=\(!barLines.isEmpty) kb=\(!toastLines.isEmpty)")
         }
 
         // ---- Send in parallel (each printer still serializes internally) ----
@@ -3056,11 +2999,9 @@ extension PrinterManager {
         if !barOk { failed.append("Bar") }
 
         if !failed.isEmpty {
-            Swift.print("🛑 printCashPointSplit FAILED order=\(order.id) stations=\(failed)")
             return false
         }
 
-        Swift.print("✅ printCashPointSplit OK order=\(order.id)")
         return true
     }
     
@@ -3464,7 +3405,6 @@ extension PrinterManager {
         job += EscPos.cut
 
         let dk = "loyalty.he.v2|\(earnedStamps)|\(qrPayload.hashValue)"
-        Swift.print("🎟️ [PrinterManager] printHebrewLoyaltySlipV2 → \(station) \(host):\(port)")
         OneShotPrinter.send(host: host, port: port, data: job, tag: dk, dedupeKey: dk)
     }
 }

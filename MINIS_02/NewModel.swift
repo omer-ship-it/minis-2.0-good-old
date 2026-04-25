@@ -447,7 +447,6 @@ final class MockShopStore: ObservableObject {
             self.shop = try JSONDecoder().decode(ShopPayloadV2.self, from: data)
             normalizeLangAfterLoad()
         } catch {
-            print("❌ Mock decode failed:", error)
             self.shop = nil
         }
     }

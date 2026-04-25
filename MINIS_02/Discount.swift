@@ -531,7 +531,6 @@ struct MembersClubView: View {
                     identifyMemberByEmail { ok, msg in
                         DispatchQueue.main.async {
                             if !ok {
-                                print("❌ members/join failed:", msg ?? "unknown")
                             }
                         }
                     }
@@ -884,9 +883,7 @@ struct AppStoreSheet: UIViewControllerRepresentable {
 
         vc.loadProduct(withParameters: params) { loaded, error in
             if let error = error {
-                print("❌ Store product load error:", error)
             } else {
-                print("✅ Store product loaded:", loaded)
             }
         }
 
@@ -922,7 +919,6 @@ final class StoreProductPresenter: NSObject, SKStoreProductViewControllerDelegat
     func present(appId: Int) {
         guard !isPresenting else { return }
         guard let top = Self.topMostViewController() else {
-            print("❌ StoreProductPresenter: No top VC to present from")
             return
         }
 
@@ -938,9 +934,7 @@ final class StoreProductPresenter: NSObject, SKStoreProductViewControllerDelegat
 
         storeVC.loadProduct(withParameters: params) { loaded, error in
             if let error = error {
-                print("❌ Store product load error:", error)
             } else {
-                print("✅ Store product loaded:", loaded)
             }
         }
 

@@ -134,7 +134,6 @@ struct SwipeUpCardCarousel: View {
 
         for (name, ext) in candidates {
             if let url = Bundle.main.url(forResource: name, withExtension: ext) {
-                print("🔊 DEBUG: found sound file:", name + "." + ext, "→", url.lastPathComponent)
 
                 let item = AVPlayerItem(url: url)
                 let player = AVPlayer(playerItem: item)
@@ -147,23 +146,18 @@ struct SwipeUpCardCarousel: View {
                 do {
                     try AVAudioSession.sharedInstance().setCategory(.playback, options: [.mixWithOthers])
                     try AVAudioSession.sharedInstance().setActive(true)
-                    print("🔊 DEBUG: AVAudioSession active")
                 } catch {
-                    print("🔊 DEBUG: AVAudioSession error:", error.localizedDescription)
                 }
 
                 // Observe end
                 NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { _ in
-                    print("🔊 DEBUG: playback ended")
                 }
 
                 player.play()
-                print("🔊 DEBUG: player.play() called")
                 return
             }
         }
 
-        print("🔊 DEBUG: beep file NOT found in bundle. Checked:", candidates.map { "\($0.0).\($0.1)" }.joined(separator: ", "))
     }
     private func isWaitingForPastry(_ card: Card) -> Bool {
         guard card.status == .active else { return false }
@@ -754,7 +748,6 @@ struct SwipeUpCardCarousel: View {
             req.setValue("application/json", forHTTPHeaderField: "Accept")
             req.timeoutInterval = 12
 
-            print("📡 KDS fetch:", url.absoluteString)
 
             let (data, resp) = try await URLSession.shared.data(for: req)
             guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
@@ -794,7 +787,6 @@ struct SwipeUpCardCarousel: View {
         let orderId = dto.id ?? dto.ticketNumber ?? 0
         let number = dto.ticketNumber ?? dto.number ?? dto.orderNumber ?? 0
         if dto.id == 27452 || dto.id == 27440 || dto.ticketNumber == 1040 || dto.ticketNumber == 1032 {
-            print("🟦 KDS DEBUG HIT: id=\(dto.id ?? -1) ticket=\(dto.ticketNumber ?? -1) status=\(dto.status ?? -1) name=\(bestName(dto)) lines=\((dto.lines ?? dto.items ?? []).count)")
         }
         let itemsDTO: [KDSAdminLineItemDTO] = dto.lines ?? dto.items ?? []
         let items = mapLineItems(itemsDTO, orderId: orderId)
@@ -858,7 +850,6 @@ struct SwipeUpCardCarousel: View {
         }
         let dups = Dictionary(grouping: out, by: \.id).filter { $1.count > 1 }
         if !dups.isEmpty {
-            print("🟥 DUP ITEM IDS:", dups.map { "\($0.key): \($0.value.map{$0.name})" })
         }
         return out
     }
@@ -1986,14 +1977,12 @@ private struct BonesCardHistory: View {
 
     private func callCustomer(_ card: SwipeUpCardCarousel.Card) {
         guard let toRaw = normalizeILPhoneToE164(card.customerPhone) else {
-            print("📞 CALL DEBUG: missing phone, raw=", card.customerPhone ?? "nil")
             return
         }
 
         let encodedTo = toRaw.replacingOccurrences(of: "+", with: "%2B")
 
         guard let url = URL(string: "https://minis.studio/api/admin/voice/call?to=\(encodedTo)") else {
-            print("📞 CALL DEBUG: bad URL from toRaw=", toRaw, "encodedTo=", encodedTo)
             return
         }
 
@@ -2006,10 +1995,7 @@ private struct BonesCardHistory: View {
             do {
                 let (data, resp) = try await URLSession.shared.data(for: req)
                 let http = resp as? HTTPURLResponse
-                print("📞 CALL DEBUG ← status:", http?.statusCode ?? -1)
-                print("📞 CALL DEBUG ← body:", String(data: data, encoding: .utf8) ?? "<\(data.count) bytes>")
             } catch {
-                print("📞 CALL DEBUG ❌ network error:", error.localizedDescription)
             }
         }
     }
@@ -2239,7 +2225,6 @@ final class BellPlayer {
     func play() {
         
         guard let url = Bundle.main.url(forResource: "bell", withExtension: "m4") else {
-            print("🔔 bell.m4a not found in bundle")
             return
         }
 
@@ -2255,9 +2240,7 @@ final class BellPlayer {
             audio?.prepareToPlay()
 
             let ok = audio?.play() ?? false
-            print("🔔 bell play ok=\(ok) duration=\(audio?.duration ?? 0)")
         } catch {
-            print("🔔 BellPlayer error:", error.localizedDescription)
         }
     }
 }

@@ -452,7 +452,6 @@ struct AdminProductEditorView: View {
                     let encoded = savedName.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? savedName
                     self.draft.imageURL = "https://minitel.co.uk/images/uploads/\(encoded).png"
                 case .failure(let error):
-                    print("❌ image upload failed:", error.localizedDescription)
                 }
             }
         }

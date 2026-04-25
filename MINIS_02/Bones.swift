@@ -51,7 +51,6 @@ struct DigitalBonesView: View {
     private func callCustomer(_ bone: Bone) {
         guard let toRaw = normalizeILPhoneToE164(bone.customerPhone) else {
             showToast("אין טלפון")
-            print("📞 CALL DEBUG: missing phone, raw=", bone.customerPhone ?? "nil")
             return
         }
 
@@ -60,7 +59,6 @@ struct DigitalBonesView: View {
 
         guard let url = URL(string: "https://minis.studio/api/admin/voice/call?to=\(encodedTo)") else {
             showToast("Bad URL")
-            print("📞 CALL DEBUG: bad URL from toRaw=", toRaw, "encodedTo=", encodedTo)
             return
         }
 
@@ -69,7 +67,6 @@ struct DigitalBonesView: View {
         req.httpBody = Data() // avoids IIS 411
         req.setValue("application/json", forHTTPHeaderField: "Accept")
 
-        print("📞 CALL DEBUG → POST", url.absoluteString)
 
         Task {
             do {
@@ -79,8 +76,6 @@ struct DigitalBonesView: View {
                 let code = http?.statusCode ?? -1
                 let body = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
 
-                print("📞 CALL DEBUG ← status:", code)
-                print("📞 CALL DEBUG ← body:", body)
 
                 if code == 200 {
                     showToast("Called")
@@ -88,7 +83,6 @@ struct DigitalBonesView: View {
                     showToast("Call failed (\(code))")
                 }
             } catch {
-                print("📞 CALL DEBUG ❌ network error:", error.localizedDescription)
                 showToast("Call failed")
             }
         }
@@ -181,7 +175,6 @@ struct DigitalBonesView: View {
         var entries: [BasketEntry] = []
         var nextLineId = 1
 
-        print("🖨️ [BONES PRINT] orderId=\(order.id) lines=\(order.lines.count)")
 
         for ln in order.lines {
             let stationRaw = (ln.station ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -198,21 +191,9 @@ struct DigitalBonesView: View {
             let isKitchen = (resolved == "kitchen")
 
             if !isKitchen {
-                print("""
-                ⏭️ [SKIP] productId=\(productIdText) name="\(ln.name)"
-                   station="\((stationRaw))"
-                   catalogPrinter="\((catalogPrinterRaw))"
-                   resolvedPrinter="\((resolved))"
-                """)
                 continue
             }
 
-            print("""
-            ✅ [KEEP] productId=\(productIdText) name="\(ln.name)"
-               station="\((stationRaw))"
-               catalogPrinter="\((catalogPrinterRaw))"
-               resolvedPrinter="\((resolved))"
-            """)
 
             let qty = max(ln.qty, 1)
             let cleanName = ln.name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -257,7 +238,6 @@ struct DigitalBonesView: View {
             nextLineId += 1
         }
 
-        print("🖨️ [BONES PRINT] keptLines=\(entries.count)")
         return entries
     }
     // MARK: - State
@@ -326,7 +306,6 @@ struct DigitalBonesView: View {
               //  print("⏭️ [BONES UI SKIP - STRICT] pid=\(pid) name=\(line.name) productPrinter=\(productKey)")
             } else {
                 let pid = line.productId.map(String.init) ?? "nil"
-                print("✅ [BONES UI KEEP - STRICT] pid=\(pid) name=\(line.name) productPrinter=\(productKey)")
             }
 
             return ok
@@ -337,9 +316,7 @@ struct DigitalBonesView: View {
         let ok = (resolvedKey == "kitchen")
 
         if !ok {
-            print("⏭️ [BONES UI SKIP - NO PID] name=\(line.name) resolved=\(resolvedKey)")
         } else {
-            print("✅ [BONES UI KEEP - NO PID] name=\(line.name) resolved=\(resolvedKey)")
         }
 
         return ok
@@ -830,7 +807,6 @@ struct DigitalBonesView: View {
                                     brandColor: brandColor,
                                     onPrint: {
                                         guard let fullOrder = allOrders.first(where: { $0.id == bone.orderId }) else {
-                                            print("❌ DigitalBonesView: no full order found for bone \(bone.orderId)")
                                             return
                                         }
 
@@ -859,7 +835,6 @@ struct DigitalBonesView: View {
                                             )
 
                                             if !ok {
-                                                print("❌ printCashPointSplit failed for order \(fullOrder.id)")
                                             }
                                         }
                                     },
@@ -868,9 +843,7 @@ struct DigitalBonesView: View {
                                         Task {
                                             let ok = await setStatus(orderId: bone.orderId, to: 4, miniAppId: miniAppId)
                                             if !ok {
-                                                print("❌ Failed to resend READY status for order \(bone.orderId)")
                                             } else {
-                                                print("🔁 Resent READY status for order \(bone.orderId)")
                                             }
                                         }
                                     },
@@ -936,13 +909,11 @@ struct DigitalBonesView: View {
         if let emptyIndex = readySlots.firstIndex(where: { $0 == nil }) {
             readySlots[emptyIndex] = bone
         } else {
-            print("⚠️ אין מקום פנוי עבור הזמנה \(bone.orderNumber)")
         }
 
         Task {
             let ok = await setStatus(orderId: bone.orderId, to: 4, miniAppId: miniAppId)
             if !ok {
-                print("❌ Failed to setStatus READY for order \(bone.orderId)")
             }
         }
     }
@@ -979,7 +950,6 @@ struct DigitalBonesView: View {
         Task {
             let ok = await setStatus(orderId: bone.orderId, to: 5, miniAppId: miniAppId)
             if !ok {
-                print("❌ Failed to setStatus COLLECTED for order \(bone.orderId)")
             }
         }
     }
@@ -1011,9 +981,7 @@ struct DigitalBonesView: View {
         Task {
             let ok4 = await setStatus(orderId: bone.orderId, to: 4, miniAppId: miniAppId)
             if !ok4 {
-                print("❌ BAR: Failed to setStatus READY(4) for order \(bone.orderId)")
             } else {
-                print("✅ BAR: setStatus READY(4) for order \(bone.orderId)")
             }
 
             // wait 1 second
@@ -1021,9 +989,7 @@ struct DigitalBonesView: View {
 
             let ok5 = await setStatus(orderId: bone.orderId, to: 5, miniAppId: miniAppId)
             if !ok5 {
-                print("❌ BAR: Failed to setStatus COLLECTED(5) for order \(bone.orderId)")
             } else {
-                print("✅ BAR: setStatus COLLECTED(5) for order \(bone.orderId)")
             }
         }
     }
@@ -1053,9 +1019,7 @@ struct DigitalBonesView: View {
         Task {
             let ok = await setStatus(orderId: bone.orderId, to: 4, miniAppId: miniAppId)
             if !ok {
-                print("❌ BAR: Failed to setStatus READY(4) for order \(bone.orderId)")
             } else {
-                print("✅ BAR: setStatus READY(4) for order \(bone.orderId)")
             }
         }
     }
@@ -1086,9 +1050,7 @@ struct DigitalBonesView: View {
         Task {
             let ok = await setStatus(orderId: bone.orderId, to: 5, miniAppId: miniAppId)
             if !ok {
-                print("❌ BAR: Failed to setStatus COLLECTED(5) for order \(bone.orderId)")
             } else {
-                print("✅ BAR: setStatus COLLECTED(5) for order \(bone.orderId)")
             }
         }
     }
@@ -1285,9 +1247,7 @@ struct DigitalBonesView: View {
         Task {
             let ok = await setStatus(orderId: bone.orderId, to: 5, miniAppId: miniAppId)
             if !ok {
-                print("❌ KITCHEN: Failed to setStatus COLLECTED(5) for order \(bone.orderId)")
             } else {
-                print("✅ KITCHEN: setStatus COLLECTED(5) for order \(bone.orderId)")
             }
         }
     }
@@ -1485,7 +1445,6 @@ struct DigitalBonesView: View {
         defer { if showSpinner { isLoading = false } }
 
         guard let url = URL(string: "\(baseURL)?miniAppId=\(miniAppId)") else {
-            print("❌ DigitalBonesView: bad URL")
             return
         }
 
@@ -1495,12 +1454,10 @@ struct DigitalBonesView: View {
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
             guard let http = resp as? HTTPURLResponse else {
-                print("❌ bones: no HTTPURLResponse")
                 return
             }
             guard http.statusCode == 200 else {
                 let body = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
-                print("❌ bones HTTP \(http.statusCode)\n\(body)")
                 return
             }
           
@@ -1536,7 +1493,6 @@ struct DigitalBonesView: View {
 
             let parsed = try decoder.decode(BonesAdminOrdersApiResponse.self, from: data)
             guard parsed.ok else {
-                print("❌ bones ok=false")
                 return
             }
 
@@ -1555,7 +1511,6 @@ struct DigitalBonesView: View {
             allOrders = mappedOrders
             rebuildBonesFromOrders()
         } catch {
-            print("❌ bones network error:", error.localizedDescription)
         }
     }
 }

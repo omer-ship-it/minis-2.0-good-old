@@ -7,6 +7,7 @@ struct OrderFlowView: View {
     let onSendToKitchen: () -> Void      // injected from CashPointView
     @State private var showManualCardEntry = false
     @State private var lastZCreditReference: String? = nil
+    @State private var forcedCompletionPaymentSummary: OrderAPI.PaymentSummary? = nil
     @State private var didConfirmNameThisSession: Bool = false
     @State private var didSubmitThisFlow: Bool = false
     @State private var isSubmittingNow: Bool = false
@@ -26,15 +27,25 @@ struct OrderFlowView: View {
     @State private var paySessionId: String? = nil
     @State private var payRef: String? = nil
     @State private var payTxId: String? = nil
+    @State private var currentStartSafeOrderId: Int? = nil
+    @State private var didAssignLaunchTicket = false
+    private let launchTicketSeed: Int = {
+        let nowMs = Int(Date().timeIntervalSince1970 * 1000)
+        let seed = nowMs % 1_000_000
+        return max(seed, 1)
+    }()
     
     @AppStorage("pos.ticketNumber") private var posTicketNumber: Int = 0
     @MainActor
     private func ensureTicketNow(reason: String) {
-        if posTicketNumber <= 0 {
-            // ✅ minimal, safe: derive a local "session ticket" so logs always attach
-            // (does NOT affect server order id / real ticketing)
-            posTicketNumber = Int(Date().timeIntervalSince1970) % 1_000_000  // 6-digit
-            print("🟧[PaymentLog] ticket generated locally: \(posTicketNumber) (\(reason))")
+        if !didAssignLaunchTicket {
+            // Assign a fresh local ticket seed once per app launch so a new launch
+            // never reuses the previous launch's payment/order reference.
+            posTicketNumber = launchTicketSeed
+            didAssignLaunchTicket = true
+            print("[OrderFlow] assigned launch ticket=\(launchTicketSeed) reason=\(reason)")
+        } else if posTicketNumber <= 0 {
+            posTicketNumber = launchTicketSeed
         }
     }
     private var ticketNow: Int {
@@ -88,7 +99,6 @@ struct OrderFlowView: View {
         round2(remainingToPay) < round2(initialPaymentTarget) - 0.01
     }
     private func dbg(_ msg: String) {
-        print("🟦[PartialPay] \(msg)")
     }
 
     private func dbgDumpStore(prefix: String = "") {
@@ -114,6 +124,7 @@ struct OrderFlowView: View {
         static let ts = "pos.partialPay.ts"         // TimeInterval since 1970
         static let token = "pos.partialPay.token"   // random per flow
         static let mini = "pos.partialPay.miniId"   // optional but cheap
+        static let completedToken = "pos.partialPay.completedToken"
     }
 
     private enum PendingCardReconcile: Equatable {
@@ -204,6 +215,14 @@ struct OrderFlowView: View {
             return
         }
 
+        // 4) completed-token guard — reject snapshots from an already-completed order
+        let completedToken = ud.string(forKey: PartialPayStore.completedToken) ?? ""
+        if !savedToken.isEmpty && savedToken == completedToken {
+            dbg("RESTORE CLEAR: token matches last completed order token=\(savedToken.prefix(8))…")
+            clearPartialPaySnapshot()
+            return
+        }
+
         if !savedToken.isEmpty {
             partialPayToken = savedToken
         }
@@ -228,6 +247,12 @@ struct OrderFlowView: View {
         dbg("CLEAR 🧹 (before)")
         dbgDumpStore(prefix: "")
         #endif
+
+        // Remember the token of the completed flow so restore won't re-apply it
+        let finishedToken = UserDefaults.standard.string(forKey: PartialPayStore.token) ?? ""
+        if !finishedToken.isEmpty {
+            UserDefaults.standard.set(finishedToken, forKey: PartialPayStore.completedToken)
+        }
 
         UserDefaults.standard.removeObject(forKey: PartialPayStore.card)
         UserDefaults.standard.removeObject(forKey: PartialPayStore.cash)
@@ -300,6 +325,7 @@ struct OrderFlowView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
     @State private var restartWork: DispatchWorkItem? = nil
+    @State private var tipRestartPending = false
     @State private var showLockedPricingAlert = false
     func kioskFont(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
         if cashPointMode {
@@ -340,8 +366,7 @@ struct OrderFlowView: View {
         cleanName.count >= 2
     }
     private var mustAskPhone: Bool {
-        // kiosk/customer always requires phone
-        !cashPointMode || requiresPhoneStep
+        true
     }
     private func saveDraftContact() {
         posSavedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -417,14 +442,18 @@ struct OrderFlowView: View {
         if !path.isEmpty { path.removeLast() }
     }
 
-    private func goToNextAfterService_push() {
+    private var nextRouteAfterService: Route {
         if !hasSavedName {
-            push(.name)
-        } else if mustAskPhone && !hasConfirmedPhoneForThisFlow{
-            push(.phone)
+            return .name
+        } else if mustAskPhone && !hasConfirmedPhoneForThisFlow {
+            return .phone
         } else {
-            push(.charge)
+            return .charge
         }
+    }
+
+    private func goToNextAfterService_push() {
+        push(nextRouteAfterService)
     }
 
     private func goToChargeFromName_push() {
@@ -441,6 +470,7 @@ struct OrderFlowView: View {
         let phoneParam = phoneDigits.trimmedIsEmpty ? nil : phoneDigits
         let nameParam  = cleanName.isEmpty ? nil : cleanName
         let summary    = buildPaymentSummary()
+        let existingOrderId = submitOrderIdForCurrentFlow
 
         let discountOff = studentDiscountActive ? max(0, total - effectiveTotal) : 0
         let tipOff      = max(0, tipAmount)
@@ -450,7 +480,7 @@ struct OrderFlowView: View {
         if let p = phoneParam { posSavedPhone = p.filter(\.isNumber) }
         
         persistPartialPaySnapshot()
-        onPartialUpdate(phoneParam, nameParam, summary, discountOff, tipOff)
+        onPartialUpdate(phoneParam, nameParam, summary, discountOff, tipOff, existingOrderId)
     }
     
     private var cashDueNow: Double {
@@ -467,6 +497,8 @@ struct OrderFlowView: View {
         }
 
         // 3) Normal cash (full order or remaining after previous payments) — INCLUDING TIP
+        // If we already have a payment and remaining is 0, nothing is due (don't fall through to initialPaymentTarget)
+        if hasAnyPayment && remainingToPay <= 0.01 { return 0 }
         let due = (remainingToPay > 0) ? remainingToPay : initialPaymentTarget
         return round2(max(due, 0))
     }
@@ -480,6 +512,7 @@ struct OrderFlowView: View {
         guard !didSubmitThisFlow && !isSubmittingNow else { return }
         isSubmittingNow = true
 
+        print("[Cancel] from playSuccessAndCompleteOrder")
         if !AppConfig.isDemoMode {
             ZCreditPaymentHandler.shared.cancelCurrent()
         }
@@ -502,8 +535,8 @@ struct OrderFlowView: View {
                  amount: round2(currentTargetAmount),
                  reason: "CANCEL_TERM")
         }
-        print("🟡 PAY LATER tapped → submitting unpaid order")
-        onCompleted(phoneParam, nameParam, summary, discountOff, tipOff)
+        let existingOrderId = submitOrderIdForCurrentFlow
+        onCompleted(phoneParam, nameParam, summary, discountOff, tipOff, existingOrderId)
 
         didSubmitThisFlow = true
 
@@ -630,11 +663,13 @@ struct OrderFlowView: View {
         if fullyPaid {
             clearPartialPaySnapshot() // ✅ add
 
-            onCompleted(phoneParam, nameParam, summary, discountOff, tipOff)
+            let existingOrderId = submitOrderIdForCurrentFlow
+            onCompleted(phoneParam, nameParam, summary, discountOff, tipOff, existingOrderId)
             return true
         } else {
             // ✅ PARTIAL submit (no close / no reset)
-            onPartialUpdate(phoneParam, nameParam, summary, discountOff, tipOff)
+            let existingOrderId = submitOrderIdForCurrentFlow
+            onPartialUpdate(phoneParam, nameParam, summary, discountOff, tipOff, existingOrderId)
 
             // ✅ Return to charge screen (so waiter can take remaining by card)
             DispatchQueue.main.async {
@@ -644,8 +679,9 @@ struct OrderFlowView: View {
                 justUsedBills = false
                 billSum = 0
 
-                isPaying = false
+                resetPaymentRequestTracking()
                 payError = nil
+                cardPaymentState = .idle
 
                 // allow manual re-try of card; DO NOT auto-start
                 paymentStarted = false
@@ -677,6 +713,21 @@ struct OrderFlowView: View {
    
     
   
+
+    private enum CardPaymentState {
+        case idle
+        case charging
+        case verifying
+        case approved
+        case declined
+        case failed
+    }
+
+    private enum PaymentSendKind {
+        case initial
+        case verifyReplay
+        case freshRetry
+    }
 
     @State private var lastResultWasUnknown: Bool = false
     struct AppConfig {
@@ -744,6 +795,7 @@ struct OrderFlowView: View {
 
                     Button {
                         diningMode = .dineIn
+                        print("[OrderFlowView] serviceStep tapped: dineIn")
                         onServiceChosen()
                         goToNextAfterService_push()
                     } label: {
@@ -764,6 +816,7 @@ struct OrderFlowView: View {
 
                     Button {
                         diningMode = .takeAway
+                        print("[OrderFlowView] serviceStep tapped: takeAway")
                         onServiceChosen()
                         goToNextAfterService_push()
                     } label: {
@@ -849,8 +902,8 @@ struct OrderFlowView: View {
     @Binding var diningMode: DiningMode
     let requiresPhoneStep: Bool
     let onCancel: () -> Void
-    let onCompleted: (String?, String?, OrderAPI.PaymentSummary, Double, Double) -> Void
-    let onPartialUpdate: (String?, String?, OrderAPI.PaymentSummary, Double, Double) -> Void
+    let onCompleted: (String?, String?, OrderAPI.PaymentSummary, Double, Double, Int?) -> Void
+    let onPartialUpdate: (String?, String?, OrderAPI.PaymentSummary, Double, Double, Int?) -> Void
     let onFinish: () -> Void
     let allowPayLater: Bool
     let skipServiceStep: Bool
@@ -890,7 +943,11 @@ struct OrderFlowView: View {
     }
 
     @MainActor
-    private func paymentAttemptForStart(amount: Double, allowDebugFixedKey: Bool = true) -> PaymentAttempt? {
+    private func paymentAttemptForStart(
+        amount: Double,
+        allowDebugFixedKey: Bool = true,
+        creationReason: String = "initial"
+    ) -> PaymentAttempt? {
         let roundedAmount = round2(amount)
         let orderReference = currentOrderReference()
 
@@ -921,12 +978,22 @@ struct OrderFlowView: View {
             orderReference: orderReference,
             forcedIdempotencyKey: forcedKey
         )
+        if creationReason == "fresh_retry" {
+            print("[ZCredit] creating fresh idempotency=\(attempt.idempotencyKey) reason=fresh_retry")
+        }
         paymentTrace("paymentAttemptForStart new amount=\(roundedAmount)", attempt: attempt)
         return attempt
     }
 
     private var hasOpenPaymentAttempt: Bool {
         PaymentAttemptStore.shared.hasOpenAttempt
+    }
+
+    @MainActor
+    private var submitOrderIdForCurrentFlow: Int? {
+        currentStartSafeOrderId
+            ?? PaymentAttemptStore.shared.activeAttempt?.orderId
+            ?? ZCreditPaymentHandler.shared.lastReturnedOrderId
     }
 
     @MainActor
@@ -937,13 +1004,25 @@ struct OrderFlowView: View {
         let state = activeAttempt?.state.rawValue ?? "-"
         let orderId = activeAttempt?.orderId.map(String.init) ?? "-"
         let orderRef = activeAttempt?.orderReference ?? "-"
-        print("🧾[OrderFlow] \(message) attemptId=\(attemptId) key=\(keyPrefix) state=\(state) orderId=\(orderId) orderRef=\(orderRef)")
+    }
+
+    @MainActor
+    private func persistReturnedOrderIdIfNeeded(_ result: ZCreditResult) {
+        guard let orderId = result.orderId, orderId > 0 else {
+            print("[OrderFlow] ⚠️ start-safe returned NO orderId (result.orderId=\(result.orderId.map(String.init) ?? "nil"), status=\(result.status), path=\(result.rawPath ?? "nil"))")
+            return
+        }
+        currentStartSafeOrderId = orderId
+        PaymentAttemptStore.shared.updateOrderId(orderId)
+        print("[OrderFlow] start-safe returned orderId=\(orderId)")
     }
 
     @MainActor
     private func markPaymentAttemptSucceeded() {
         reconcileTask?.cancel()
         reconcileTask = nil
+        verifyReplayTask?.cancel()
+        verifyReplayTask = nil
         isReconcilingPayment = false
         pendingCardReconcile = nil
         PaymentAttemptStore.shared.markSucceeded()
@@ -954,6 +1033,8 @@ struct OrderFlowView: View {
     private func markPaymentAttemptFailedFinal() {
         reconcileTask?.cancel()
         reconcileTask = nil
+        verifyReplayTask?.cancel()
+        verifyReplayTask = nil
         isReconcilingPayment = false
         pendingCardReconcile = nil
         PaymentAttemptStore.shared.markFailedFinal()
@@ -961,18 +1042,301 @@ struct OrderFlowView: View {
     }
 
     @MainActor
-    private func enterReconcilingState(_ pending: PendingCardReconcile, message: String) {
+    private func setFreshRetryArmed(_ armed: Bool, reason: String) {
+        shouldUseFreshRetryForNextCardAttempt = armed
+        paymentTrace("freshRetryArmed=\(armed) reason=\(reason)")
+    }
+
+    @MainActor
+    private func closedAttemptStatusMessage(for attemptId: String) -> String {
+        if approvedPaymentAttemptIds.contains(attemptId) {
+            return isRtl ? "התשלום אושר" : "Payment approved"
+        }
+        if shouldUseFreshRetryForNextCardAttempt {
+            return isRtl
+                ? "התשלום נדחה. אפשר לנסות שוב."
+                : "Payment declined. You can try again."
+        }
+        return isRtl
+            ? "החיוב לא הושלם. אפשר לנסות שוב."
+            : "Payment was not completed. You can try again."
+    }
+
+    @MainActor
+    private func verificationFallbackMessage() -> String {
+        if shouldUseFreshRetryForNextCardAttempt {
+            return isRtl
+                ? "התשלום נדחה. נסו שוב."
+                : "Payment declined. Try again."
+        }
+        return isRtl
+            ? "לא הצלחנו לאמת את מצב התשלום. נסו שוב."
+            : "We could not verify the payment status. Try again."
+    }
+
+    @MainActor
+    private func enterReconcilingState(
+        _ pending: PendingCardReconcile,
+        message: String,
+        scheduleReplay: Bool = true
+    ) {
         let wasReconciling = isReconcilingPayment
+        verifyReplayTask?.cancel()
+        verifyReplayTask = nil
         isReconcilingPayment = true
+        cardPaymentState = .verifying
         pendingCardReconcile = pending
         lastResultWasUnknown = true
         payError = message
         PaymentAttemptStore.shared.markReconciling()
         paymentTrace("enterReconciling message=\(message)")
-        if wasReconciling {
+        if wasReconciling || !scheduleReplay {
             paymentTrace("enterReconciling skippedAutoReplay alreadyReconciling")
         } else {
             scheduleAutomaticReconcile()
+        }
+    }
+
+    private func paymentSendTypeLabel(_ sendKind: PaymentSendKind) -> String {
+        switch sendKind {
+        case .initial:
+            return "initial-send"
+        case .verifyReplay:
+            return "safe-verify-replay"
+        case .freshRetry:
+            return "fresh-retry-new-key"
+        }
+    }
+
+    private func currentCardPaymentStateLabel() -> String {
+        switch cardPaymentState {
+        case .idle: return "idle"
+        case .charging: return "charging"
+        case .verifying: return "verifying"
+        case .approved: return "approved"
+        case .declined: return "declined"
+        case .failed: return "failed"
+        }
+    }
+
+    @MainActor
+    private func logTryAgainDecision(sendKind: PaymentSendKind, selectedAttempt: PaymentAttempt?, previousKey: String?) {
+        let stateLabel = currentCardPaymentStateLabel()
+
+        let currentKey = PaymentAttemptStore.shared.activeAttempt?.idempotencyKey
+        print("[OrderFlow] attemptResolved state=\(stateLabel) sendKind=\(paymentSendTypeLabel(sendKind))")
+        print("[OrderFlow] store idempotency=\(currentKey ?? "nil")")
+
+        switch sendKind {
+        case .verifyReplay:
+            if let key = selectedAttempt?.idempotencyKey ?? currentKey {
+                print("[OrderFlow] using SAME key for replay key=\(key)")
+            }
+            print("[OrderFlow] sendType = replay")
+        case .freshRetry:
+            let newKey = selectedAttempt?.idempotencyKey ?? "nil"
+            print("[OrderFlow] creating NEW key for retry old=\(previousKey ?? "nil") new=\(newKey)")
+            print("[OrderFlow] sendType = freshRetry")
+        case .initial:
+            break
+        }
+    }
+
+    private var verifyHoldMessage: String {
+        isRtl ? "אין להעביר כרטיס שוב בשלב זה" : "Do not present the card again at this stage."
+    }
+
+    private var verifyProgressMessage: String {
+        isRtl ? "בודקים אם העסקה כבר אושרה…" : "Checking if the payment was already approved…"
+    }
+
+    private var chargingProgressMessage: String {
+        isRtl ? "מעבדים תשלום…" : "Processing payment…"
+    }
+
+    private var paymentTimeoutMessage: String {
+        isRtl ? "החיוב לא הושלם. נסה שוב." : "Payment was not completed. Try again."
+    }
+
+    @MainActor
+    private func markPaymentRequestStarted(
+        attempt: PaymentAttempt,
+        pending: PendingCardReconcile,
+        sendKind: PaymentSendKind
+    ) {
+        activePaymentAttemptId = attempt.attemptId
+        completedPaymentAttemptIds.remove(attempt.attemptId)
+        pendingCardReconcile = pending
+        activePaymentRequestCount += 1
+        isPaying = activePaymentRequestCount > 0
+
+        switch sendKind {
+        case .initial, .freshRetry:
+            cardPaymentState = .charging
+            isReconcilingPayment = false
+            payError = nil
+            scheduleVerifyReplay(for: attempt, pending: pending)
+        case .verifyReplay:
+            cardPaymentState = .verifying
+            isReconcilingPayment = true
+            payError = verifyHoldMessage
+        }
+    }
+
+    @MainActor
+    private func markPaymentRequestFinished(for attempt: PaymentAttempt) {
+        activePaymentRequestCount = max(0, activePaymentRequestCount - 1)
+        isPaying = activePaymentRequestCount > 0
+        if activePaymentRequestCount == 0,
+           activePaymentAttemptId == attempt.attemptId,
+           cardPaymentState != .verifying {
+            activePaymentAttemptId = nil
+        }
+    }
+
+    @MainActor
+    private func resetPaymentRequestTracking() {
+        activePaymentRequestCount = 0
+        isPaying = false
+        verifyReplayTask?.cancel()
+        verifyReplayTask = nil
+        activePaymentAttemptId = nil
+    }
+
+    @MainActor
+    private func finishPaymentAttempt(
+        _ attempt: PaymentAttempt,
+        state: CardPaymentState,
+        message: String? = nil
+    ) {
+        completedPaymentAttemptIds.insert(attempt.attemptId)
+        activePaymentAttemptId = nil
+        cardPaymentState = state
+        payError = message
+        verifyReplayTask?.cancel()
+        verifyReplayTask = nil
+    }
+
+    @MainActor
+    private func currentPendingCardContext() -> PendingCardReconcile? {
+        pendingCardReconcile ?? inferredPendingCardReconcile()
+    }
+
+    @MainActor
+    private func dispatchPendingCardAttempt(_ pending: PendingCardReconcile, sendKind: PaymentSendKind) {
+        switch pending {
+        case .full:
+            startPayment(sendKind: sendKind)
+        case .payOnBill(let amount):
+            payOnBillWithCard(amount: amount, sendKind: sendKind)
+        case .split(let index, _):
+            startCardForSplitPart(index: index, sendKind: sendKind)
+        }
+    }
+
+    private let terminalResponseTimeoutNs: UInt64 = 45_000_000_000
+
+    @MainActor
+    private func scheduleVerifyReplay(for attempt: PaymentAttempt, pending: PendingCardReconcile) {
+        verifyReplayTask?.cancel()
+        verifyReplayTask = Task {
+            try? await Task.sleep(nanoseconds: terminalResponseTimeoutNs)
+            await MainActor.run {
+                guard activePaymentAttemptId == attempt.attemptId else { return }
+                guard !completedPaymentAttemptIds.contains(attempt.attemptId) else { return }
+                guard cardPaymentState == .charging else { return }
+                guard activePaymentRequestCount > 0 else { return }
+
+                resetPaymentRequestTracking()
+                activePaymentAttemptId = attempt.attemptId
+                isReconcilingPayment = false
+                pendingCardReconcile = pending
+                PaymentAttemptStore.shared.markReconciling()
+                setFreshRetryArmed(false, reason: "verify_timeout")
+                cardPaymentState = .failed
+                payError = paymentTimeoutMessage
+                paymentTrace("sendType=\(paymentSendTypeLabel(.verifyReplay)) auto-timeout toTryAgainSameKey", attempt: attempt)
+            }
+        }
+    }
+
+    @MainActor
+    private func retrySendKind() -> PaymentSendKind {
+        if cardPaymentState == .declined || shouldUseFreshRetryForNextCardAttempt {
+            return .freshRetry
+        }
+        return .verifyReplay
+    }
+
+    @MainActor
+    private func retryPayment() {
+        let sendKind = retrySendKind()
+        let currentKey = PaymentAttemptStore.shared.activeAttempt?.idempotencyKey
+        let pendingLabel: String = {
+            switch pendingCardReconcile {
+            case .full: return "full"
+            case .payOnBill(let a): return "payOnBill(\(a))"
+            case .split(let i, let a): return "split(\(i),\(a))"
+            case .none: return "nil"
+            }
+        }()
+        print("[OrderFlow] tryAgain tapped state=\(currentCardPaymentStateLabel()) sendKind=\(paymentSendTypeLabel(sendKind)) pending=\(pendingLabel) split=\(isSplitMode) activeIdx=\(activeSplitIndex.map(String.init) ?? "nil")")
+        print("[OrderFlow] current idempotency=\(currentKey ?? "nil")")
+
+        switch sendKind {
+        case .verifyReplay:
+            if let pending = currentPendingCardContext() {
+                paymentTrace("manualRetry sendType=\(paymentSendTypeLabel(sendKind))")
+                dispatchPendingCardAttempt(pending, sendKind: sendKind)
+            } else if isSplitMode, let idx = activeSplitIndex, splitParts.indices.contains(idx), !splitParts[idx].isPaid {
+                paymentTrace("manualRetry verifyReplay split fallback idx=\(idx)")
+                startCardForSplitPart(index: idx, sendKind: sendKind)
+            } else {
+                paymentTrace("manualRetry verifyReplay context lost — restarting")
+                startCardForRemainingNow()
+            }
+        case .freshRetry:
+            if let previousAttemptId = activePaymentAttemptId {
+                completedPaymentAttemptIds.insert(previousAttemptId)
+            }
+            // Save pending context before clearing store (it may depend on store)
+            let savedPending = currentPendingCardContext()
+            PaymentAttemptStore.shared.markFailedFinal()
+            PaymentAttemptStore.shared.clearIfTerminal()
+            resetPaymentRequestTracking()
+            isReconcilingPayment = false
+            payError = nil
+            setFreshRetryArmed(false, reason: "consumed_fresh_retry")
+            paymentTrace("manualRetry sendType=\(paymentSendTypeLabel(sendKind))")
+
+            if let pending = savedPending {
+                dispatchPendingCardAttempt(pending, sendKind: sendKind)
+            } else if isSplitMode, let idx = activeSplitIndex, splitParts.indices.contains(idx), !splitParts[idx].isPaid {
+                paymentTrace("manualRetry freshRetry split fallback idx=\(idx)")
+                startCardForSplitPart(index: idx, sendKind: sendKind)
+            } else {
+                startCardForRemainingNow()
+            }
+        case .initial:
+            return
+        }
+    }
+
+    @MainActor
+    private func checkPaymentAgain() {
+        if retrySendKind() == .verifyReplay {
+            retryPayment()
+        } else {
+            startCardForRemainingNow()
+        }
+    }
+
+    @MainActor
+    private func startFreshRetry() {
+        if retrySendKind() == .freshRetry {
+            retryPayment()
+        } else {
+            checkPaymentAgain()
         }
     }
 
@@ -1003,18 +1367,19 @@ struct OrderFlowView: View {
         ]
 
         let isHardFailure = !normalized.isEmpty && hardFailureFragments.contains { normalized.contains($0.lowercased()) }
-        if isHardFailure || result.rawPath == "commit_http_error" || result.rawPath == "commit_http_non_200" {
-            print("🟡 reconciling denied reason=hardFailure")
+        if isHardFailure
+            || result.rawPath == "commit_http_error"
+            || result.rawPath == "commit_http_non_200"
+            || result.rawPath == "client_timeout"
+            || !NetworkMonitor.shared.isOnline {
             return false
         }
 
-        print("🟡 reconciling allowed reason=ambiguousOutcome")
         return true
     }
 
     @MainActor
     private func replayPendingPaymentAttemptIfNeeded() {
-        guard !isPaying else { return }
         guard let activeAttempt = PaymentAttemptStore.shared.activeAttempt else { return }
         switch activeAttempt.state {
         case .pending, .reconciling:
@@ -1029,16 +1394,12 @@ struct OrderFlowView: View {
             return
         }
         pendingCardReconcile = pending
-        paymentTrace("replayPending start")
-
-        switch pending {
-        case .full(_):
-            startPayment()
-        case .payOnBill(let amount):
-            payOnBillWithCard(amount: amount)
-        case .split(let index, _):
-            startCardForSplitPart(index: index)
+        if activePaymentRequestCount > 0 {
+            paymentTrace("replayPending clearing stale active request count=\(activePaymentRequestCount)", attempt: activeAttempt)
+            resetPaymentRequestTracking()
         }
+        paymentTrace("replayPending sendType=\(paymentSendTypeLabel(.verifyReplay)) pendingState=\(activeAttempt.state.rawValue)", attempt: activeAttempt)
+        dispatchPendingCardAttempt(pending, sendKind: .verifyReplay)
     }
 
     @MainActor
@@ -1075,11 +1436,19 @@ struct OrderFlowView: View {
     @State private var phoneDigits: String = ""
     
     @State private var isPaying = false
+    @State private var activePaymentRequestCount: Int = 0
     @State private var payError: String?
     @State private var paymentStarted = false
     @State private var isReconcilingPayment = false
+    @State private var cardPaymentState: CardPaymentState = .idle
+    @ObservedObject private var networkMonitor = NetworkMonitor.shared
     @State private var pendingCardReconcile: PendingCardReconcile? = nil
     @State private var reconcileTask: Task<Void, Never>? = nil
+    @State private var verifyReplayTask: Task<Void, Never>? = nil
+    @State private var activePaymentAttemptId: String? = nil
+    @State private var completedPaymentAttemptIds: Set<String> = []
+    @State private var approvedPaymentAttemptIds: Set<String> = []
+    @State private var shouldUseFreshRetryForNextCardAttempt = false
     @Environment(\.currency) private var currency
 
     // Cash state
@@ -1135,13 +1504,13 @@ struct OrderFlowView: View {
         diningMode: Binding<DiningMode>,
         requiresPhoneStep: Bool,
         onCancel: @escaping () -> Void,
-        onCompleted: @escaping (String?, String?, OrderAPI.PaymentSummary, Double, Double) -> Void,
+        onCompleted: @escaping (String?, String?, OrderAPI.PaymentSummary, Double, Double, Int?) -> Void,
         onFinish: @escaping () -> Void,
         allowPayLater: Bool,
         skipServiceStep: Bool,
         onServiceChosen: @escaping () -> Void,
         startAtCharge: Bool,
-        onPartialUpdate: @escaping (String?, String?, OrderAPI.PaymentSummary, Double, Double) -> Void = { _,_,_,_,_ in }
+        onPartialUpdate: @escaping (String?, String?, OrderAPI.PaymentSummary, Double, Double, Int?) -> Void = { _,_,_,_,_,_ in }
     ) {
         self.onSendToKitchen = onSendToKitchen
         self.total = total
@@ -1373,7 +1742,6 @@ struct OrderFlowView: View {
             }
             .onDisappear {
                 let shouldPersist = cashPointMode && remainingToPay > 0.1 && (hasAnyPayment || hasProgress)
-                print("🟦[PartialPay] onDisappear: cashPointMode=\(cashPointMode) hasAnyPayment=\(hasAnyPayment) hasProgress=\(hasProgress) remaining=\(round2(remainingToPay)) shouldPersist=\(shouldPersist)")
                 if shouldPersist {
                     persistPartialPaySnapshot()
                 }
@@ -1419,22 +1787,16 @@ struct OrderFlowView: View {
             .fullScreenCover(isPresented: $payingWithCash) { cashFullScreen }
             .sheet(isPresented: $showSplitSheet) { splitSheetView }
             .onChange(of: showSplitSheet) { v in
-                print("🟣 showSplitSheet -> \(v)")
             }
             .onChange(of: showSplitAmountPad) { v in
-                print("🟣 showSplitAmountPad -> \(v), idx=\(String(describing: splitAmountPadIndex))")
             }
             .onChange(of: showOnBillPad) { v in
-                print("🟣 showOnBillPad -> \(v)")
             }
             .onChange(of: payingWithCash) { v in
-                print("🟣 payingWithCash -> \(v)")
             }
             .onChange(of: showTipSheet) { v in
-                print("🟣 showTipSheet -> \(v)")
             }
             .onChange(of: isSplitMode) { v in
-                print("🟣 isSplitMode -> \(v), parts=\(splitParts.count)")
             }
             .onChange(of: showTipSheet) { presented in
                 // When the tip sheet closes, tipPercent / tipFixedAmount has already been updated.
@@ -1530,7 +1892,7 @@ struct OrderFlowView: View {
 
                         cashInput = ""
                         payError = nil
-                        isPaying = false
+                        resetPaymentRequestTracking()
                         paymentStarted = false
 
                         showOnBillPad = false
@@ -1627,21 +1989,21 @@ struct OrderFlowView: View {
                             Spacer()
 
                             if part.isPaid {
-                                Text(isRtl ? "שולם" : "Paid")
-                                    .font(.system(size: 16, weight: .semibold))
-                                    .foregroundColor(.primary)
+                                HStack(spacing: 6) {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundColor(.green)
+                                    Text(isRtl ? "שולם" : "Paid")
+                                        .foregroundColor(.green)
+                                }
+                                .font(.system(size: 16, weight: .semibold))
                             } else {
                                 // Credit card for this split row
                                 Button {
-                                    // ✅ prevent double tap / overlapping start
                                     guard !isPaying, !splitCardTapLocked else { return }
                                     splitCardTapLocked = true
-
-                                    // ✅ do NOT cancel right before pay (causes instant failure)
                                     payError = nil
                                     activeSplitIndex = idx
 
-                                    // ✅ small settle delay helps terminal state transitions
                                     let settleDelay: TimeInterval = {
                                         guard let t = lastCashPaidAt else { return 0.15 }
                                         return (Date().timeIntervalSince(t) < 2.0) ? 0.9 : 0.15
@@ -1664,6 +2026,9 @@ struct OrderFlowView: View {
                                     if !AppConfig.isDemoMode {
                                         ZCreditPaymentHandler.shared.cancelCurrent()
                                     }
+                                    markPaymentAttemptFailedFinal()
+                                    resetPaymentRequestTracking()
+                                    cardPaymentState = .idle
                                     activeSplitIndex = idx
                                     manualCashTargetAmount = nil
                                     cashInput = ""
@@ -1692,10 +2057,15 @@ struct OrderFlowView: View {
 
     // Toggle split on/off, equal-splitting like in the demo
     private func toggleSplitMode() {
-        // 🔹 Always cancel any in-flight ZCredit transaction first
+        // Cancel any in-flight ZCredit transaction and reset payment state
+        print("[Cancel] from toggleSplitMode")
         if !AppConfig.isDemoMode {
             ZCreditPaymentHandler.shared.cancelCurrent()
         }
+        markPaymentAttemptFailedFinal()
+        resetPaymentRequestTracking()
+        payError = nil
+        cardPaymentState = .idle
 
         if isSplitMode {
             // Turn OFF split – keep outstanding amount as-is
@@ -1739,9 +2109,11 @@ struct OrderFlowView: View {
 
     
     private func handleChargeEntered() {
+        let ts = { let f = DateFormatter(); f.dateFormat = "HH:mm:ss.SSS"; return f.string(from: Date()) }()
         // ✅ Auto-start ONLY for the clean "full card" flow
-        guard !paymentStarted else { return }
-        guard !isPaying else { return }
+        guard !paymentStarted else { print("[TipRestart] \(ts) handleChargeEntered SKIP paymentStarted"); return }
+        guard !tipRestartPending else { print("[TipRestart] \(ts) handleChargeEntered SKIP tipRestartPending"); return }
+        guard !isPaying else { print("[TipRestart] \(ts) handleChargeEntered SKIP isPaying"); return }
         guard !payingWithCash else { return }
         guard !isSplitMode else { return }
         guard manualCashTargetAmount == nil else { return }
@@ -1750,6 +2122,16 @@ struct OrderFlowView: View {
         guard !showSplitSheet else { return }
         guard !showSplitAmountPad else { return }
         guard (cardPaidTotal + cashPaidTotal) < 0.01 else { return }
+        print("[TipRestart] \(ts) handleChargeEntered PASSED all guards → auto-start")
+
+        // ✅ Clear any stale attempt from a previous order — all guards above
+        // confirm no payment has been made for the current order, so any
+        // lingering attempt in the store belongs to an earlier session.
+        if PaymentAttemptStore.shared.activeAttempt != nil {
+            print("[OrderFlow] handleChargeEntered clearing stale attempt before auto-start")
+            PaymentAttemptStore.shared.markFailedFinal()
+            PaymentAttemptStore.shared.clearIfTerminal()
+        }
 
         paymentStarted = true
         payError = nil
@@ -1768,9 +2150,12 @@ struct OrderFlowView: View {
     
     /// Called after the tip sheet closes to restart ZCredit with the new total (including tip)
     private func restartPaymentAfterTipChangeIfNeeded() {
+        let ts = { let f = DateFormatter(); f.dateFormat = "HH:mm:ss.SSS"; return f.string(from: Date()) }()
+        print("[TipRestart] \(ts) restartPaymentAfterTipChangeIfNeeded called hasAnyPayment=\(hasAnyPayment)")
 
         // ✅ If any money was already taken → refuse (refund/void is required)
         guard !hasAnyPayment else {
+            print("[TipRestart] \(ts) BLOCKED — hasAnyPayment")
             showLockedPricingAlert = true
             Haptics.error()
             return
@@ -1781,36 +2166,49 @@ struct OrderFlowView: View {
         restartWork = nil
 
         // 1) Cancel any in-flight ZCredit transaction
+        print("[TipRestart] \(ts) cancelCurrent()")
         if !AppConfig.isDemoMode {
             ZCreditPaymentHandler.shared.cancelCurrent()
         }
 
-        // 2) Reset payment UI state
-        isPaying = false
-        payError = nil
+        // 2) Clear stale attempt — tip changes the amount, old key can't be reused
+        markPaymentAttemptFailedFinal()
 
-        // 3) Only auto-restart if this is a simple full-card flow
+        // 3) Reset payment UI state
+        resetPaymentRequestTracking()
+        payError = nil
+        cardPaymentState = .idle
+        paymentStarted = false
+
+        // 4) Reset remainingToPay to the new total WITH tip
+        recomputeRemainingFromTotals()
+        print("[TipRestart] \(ts) after recompute remaining=\(remainingToPay) totalWithTip=\(totalWithTip)")
+
+        // 5) Only auto-restart if this is a simple full-card flow
         guard !payingWithCash,
               !isSplitMode,
               manualCashTargetAmount == nil,
               activeSplitIndex == nil
         else {
-            // In other flows just update remaining, and let cashier trigger payment manually
-            recomputeRemainingFromTotals()
+            print("[TipRestart] \(ts) skip auto-restart (not simple card flow)")
             return
         }
 
-        // 4) Reset remainingToPay to the new total WITH tip
-        recomputeRemainingFromTotals()
-
-        // 5) Restart ZCredit once (debounced)
+        // 6) Mark pending — blocks handleChargeEntered() from racing us.
+        //    The 6-second timer starts HERE (after cancel), guaranteeing
+        //    the terminal has time to finish the cancel before we start.
+        tipRestartPending = true
         paymentStarted = true
+        print("[TipRestart] \(ts) scheduling startPayment in 3s")
 
-        let work = DispatchWorkItem {
-            self.startPayment()
+        let work = DispatchWorkItem { [self] in
+            let ts2 = { let f = DateFormatter(); f.dateFormat = "HH:mm:ss.SSS"; return f.string(from: Date()) }()
+            print("[TipRestart] \(ts2) FIRING startPayment (scheduled at \(ts))")
+            tipRestartPending = false
+            startPayment()
         }
         restartWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0, execute: work)
     }
     
     private struct TerminalActivityRing: View {
@@ -1877,6 +2275,8 @@ struct OrderFlowView: View {
     }
     // MARK: - Step: Charge (card OR cash)
     private func toggleStudentDiscount() {
+        let ts = { let f = DateFormatter(); f.dateFormat = "HH:mm:ss.SSS"; return f.string(from: Date()) }()
+        print("[DiscountRestart] \(ts) toggleStudentDiscount called hasAnyPayment=\(hasAnyPayment)")
 
         // ✅ If any money was already taken → refuse (refund flow is required)
         guard !hasAnyPayment else {
@@ -1892,40 +2292,43 @@ struct OrderFlowView: View {
         studentDiscountActive.toggle()
 
         // 1) Cancel any in-flight ZCredit transaction
+        print("[Cancel] from toggleStudentDiscount")
         if !AppConfig.isDemoMode {
             ZCreditPaymentHandler.shared.cancelCurrent()
         }
 
-        // 2) Reset payment UI state
-        isPaying = false
-        payError = nil
+        // 2) Clear stale attempt — discount changes the amount
+        markPaymentAttemptFailedFinal()
 
-        // ✅ In the clean full-card flow, update remaining and restart once
-        if !isSplitMode, manualCashTargetAmount == nil, activeSplitIndex == nil {
-            recomputeRemainingFromTotals()
-        }
+        // 3) Reset payment UI state
+        resetPaymentRequestTracking()
+        payError = nil
+        cardPaymentState = .idle
+        paymentStarted = false
+
+        // 4) Recompute remaining with new discount
+        recomputeRemainingFromTotals()
+        print("[DiscountRestart] \(ts) after recompute remaining=\(remainingToPay) effectiveTotal=\(effectiveTotal)")
 
         // Only auto-restart for clean full-card flow
         guard !payingWithCash,
               !isSplitMode,
               manualCashTargetAmount == nil,
               activeSplitIndex == nil
-        else { return }
+        else {
+            print("[DiscountRestart] \(ts) skip auto-restart (not simple card flow)")
+            return
+        }
 
-        // 3) Mark started so nothing else auto-starts during the wait
+        // 5) Block handleChargeEntered() from racing, wait 6s then restart
+        tipRestartPending = true
         paymentStarted = true
+        print("[DiscountRestart] \(ts) scheduling startPayment in 3s")
 
-        // 4) ✅ Wait 3 seconds after cancel, then start again
-        // 4) ✅ Wait 3 seconds after cancel, then start again
-        let work = DispatchWorkItem {
-            // If something changed during the wait, don’t start
-            guard !isPaying,
-                  !payingWithCash,
-                  !isSplitMode,
-                  manualCashTargetAmount == nil,
-                  activeSplitIndex == nil
-            else { return }
-
+        let work = DispatchWorkItem { [self] in
+            let ts2 = { let f = DateFormatter(); f.dateFormat = "HH:mm:ss.SSS"; return f.string(from: Date()) }()
+            print("[DiscountRestart] \(ts2) FIRING startPayment (scheduled at \(ts))")
+            tipRestartPending = false
             startPayment()
         }
 
@@ -1934,16 +2337,12 @@ struct OrderFlowView: View {
     }
     
     private func retryZCreditNow() {
-        paymentTrace("manualRetry tapped")
-        replayPendingPaymentAttemptIfNeeded()
-        if !hasOpenPaymentAttempt {
-            startCardForRemainingNow()
-        }
+        retryPayment()
     }
     
     private func startCardForRemainingNow() {
         if hasOpenPaymentAttempt {
-            replayPendingPaymentAttemptIfNeeded()
+            retryPayment()
             return
         }
 
@@ -1961,6 +2360,7 @@ struct OrderFlowView: View {
         // if !AppConfig.isDemoMode { ZCreditPaymentHandler.shared.cancelCurrent() }
 
         payError = nil
+        cardPaymentState = .idle
         lastResultWasUnknown = false
 
         // Clear blockers
@@ -1996,7 +2396,7 @@ struct OrderFlowView: View {
     }
     
     private var chargeStep: some View {
-        let terminalActive = (isPaying || isReconcilingPayment) && !payingWithCash
+        let terminalActive = (cardPaymentState == .charging || (cardPaymentState == .verifying && isPaying)) && !payingWithCash
 
         // ✅ Amount logic (single source of truth for display)
         let baseWithTip: Double = totalWithTip
@@ -2012,17 +2412,10 @@ struct OrderFlowView: View {
         }()
 
         let isPhone = UIDevice.current.userInterfaceIdiom == .phone
-        let errorSlotH: CGFloat = 28
-
         return GeometryReader { geo in
             ScrollView(.vertical, showsIndicators: false) {
 
                 VStack(spacing: 24) {
-
-                    // Title
-                    Text(isRtl ? "הסכום לתשלום" : "Amount to charge")
-                        .font(kioskFont(20, weight: .medium))
-                        .foregroundColor(.secondary)
 
                     // 🔢 Big amount + discount/tip lines
                     VStack(spacing: 4) {
@@ -2058,7 +2451,6 @@ struct OrderFlowView: View {
                                 VStack(spacing: 10) {
 
                                     HStack(spacing: 10) {
-                                        // Split
                                         Button { toggleSplitMode() } label: {
                                             HStack(spacing: 8) {
                                                 Image(systemName: "plus.circle.fill")
@@ -2071,12 +2463,11 @@ struct OrderFlowView: View {
                                             .padding(.horizontal, 16)
                                             .padding(.vertical, 10)
                                             .frame(maxWidth: .infinity)
-                                            .background(Color(.secondarySystemBackground))
+                                            .background(chipBackground)
                                             .clipShape(Capsule())
                                         }
                                         .disabled(total <= 0)
 
-                                        // Pay on the bill
                                         Button {
                                             if !AppConfig.isDemoMode { ZCreditPaymentHandler.shared.cancelCurrent() }
                                             isSplitMode = false
@@ -2085,7 +2476,7 @@ struct OrderFlowView: View {
                                             splitBaseTotal = nil
                                             onBillInput = ""
                                             payError = nil
-                                            isPaying = false
+                                            resetPaymentRequestTracking()
                                             showOnBillPad = true
                                         } label: {
                                             HStack(spacing: 6) {
@@ -2098,14 +2489,13 @@ struct OrderFlowView: View {
                                             .padding(.horizontal, 16)
                                             .padding(.vertical, 10)
                                             .frame(maxWidth: .infinity)
-                                            .background(Color(.secondarySystemBackground))
+                                            .background(chipBackground)
                                             .clipShape(Capsule())
                                         }
                                         .disabled(total <= 0)
                                     }
 
                                     HStack(spacing: 10) {
-                                        // Student 10% discount
                                         Button { toggleStudentDiscount() } label: {
                                             HStack(spacing: 6) {
                                                 Image(systemName: "graduationcap.fill")
@@ -2118,15 +2508,12 @@ struct OrderFlowView: View {
                                             .padding(.horizontal, 12)
                                             .padding(.vertical, 8)
                                             .frame(maxWidth: .infinity)
-                                            .background(studentDiscountActive
-                                                        ? Color.black.opacity(0.15)
-                                                        : Color(.secondarySystemBackground))
-                                            .foregroundColor(studentDiscountActive ? .black : .primary)
+                                            .background(studentDiscountActive ? chipActiveBackground : chipBackground)
+                                            .foregroundColor(chipForeground)
                                             .clipShape(Capsule())
                                         }
                                         .disabled(total <= 0 || isSplitMode || pricingLocked)
 
-                                        // Tip
                                         Button {
                                             guard !isSplitMode else { return }
                                             showTipSheet = true
@@ -2142,8 +2529,8 @@ struct OrderFlowView: View {
                                             .padding(.horizontal, 12)
                                             .padding(.vertical, 8)
                                             .frame(maxWidth: .infinity)
-                                            .background(Color(.secondarySystemBackground))
-                                            .foregroundColor(.primary)
+                                            .background(chipBackground)
+                                            .foregroundColor(chipForeground)
                                             .clipShape(Capsule())
                                         }
                                         .disabled(total <= 0 || isSplitMode || pricingLocked)
@@ -2163,7 +2550,7 @@ struct OrderFlowView: View {
                                         }
                                         .padding(.horizontal, 16)
                                         .padding(.vertical, 10)
-                                        .background(Color(.secondarySystemBackground))
+                                        .background(chipBackground)
                                         .clipShape(Capsule())
                                     }
                                     .disabled(total <= 0)
@@ -2176,7 +2563,7 @@ struct OrderFlowView: View {
                                         splitBaseTotal = nil
                                         onBillInput = ""
                                         payError = nil
-                                        isPaying = false
+                                        resetPaymentRequestTracking()
                                         showOnBillPad = true
                                     } label: {
                                         HStack(spacing: 6) {
@@ -2186,7 +2573,7 @@ struct OrderFlowView: View {
                                         }
                                         .padding(.horizontal, 16)
                                         .padding(.vertical, 10)
-                                        .background(Color(.secondarySystemBackground))
+                                        .background(chipBackground)
                                         .clipShape(Capsule())
                                     }
                                     .disabled(total <= 0)
@@ -2218,8 +2605,8 @@ struct OrderFlowView: View {
                                         }
                                         .padding(.horizontal, 12)
                                         .padding(.vertical, 8)
-                                        .background(Color(.secondarySystemBackground))
-                                        .foregroundColor(.primary)
+                                        .background(chipBackground)
+                                        .foregroundColor(chipForeground)
                                         .clipShape(Capsule())
                                     }
                                     .disabled(total <= 0 || isSplitMode || pricingLocked)
@@ -2234,19 +2621,23 @@ struct OrderFlowView: View {
                         splitPanel
                     }
 
-                    // Main prompt
-                    Text(isRtl ? "הכנס או הצמד כרטיס" : "Insert or tap card")
-                        .font(kioskFont(24, weight: .bold))
-                        .padding(.top, 8)
+                    // "Insert or tap card" prompt
+                    if cardPaymentState == .charging && !payingWithCash {
+                        Text(isRtl ? "הצמידו או הכניסו כרטיס" : "Insert or tap card")
+                            .font(kioskFont(18, weight: .semibold))
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.top, 8)
+                    }
 
                     // Terminal indicator slot
                     Group {
                         if terminalActive {
                             TerminalActivityRing(
                                 isActive: true,
-                                label: isRtl
-                                    ? ""
-                                    : (isReconcilingPayment ? "Checking payment..." : "Waiting for terminal…")
+                                label: cardPaymentState == .verifying
+                                    ? verifyProgressMessage
+                                    : chargingProgressMessage
                             )
                             .padding(.top, 40)
                         } else {
@@ -2260,9 +2651,11 @@ struct OrderFlowView: View {
                         if let payError, !payError.isEmpty {
                             VStack(spacing: 15) {
                                 Text(
-                                    isReconcilingPayment
-                                        ? (isRtl ? "בודק תשלום" : "Checking payment...")
-                                        : (isRtl ? "התשלום נכשל" : "Payment failed")
+                                    cardPaymentState == .verifying
+                                        ? verifyProgressMessage
+                                        : (cardPaymentState == .declined
+                                            ? (isRtl ? "התשלום נדחה" : "Payment declined")
+                                            : (isRtl ? "החיוב לא הושלם" : "Payment not completed"))
                                 )
                                     .font(kioskFont(20, weight: .semibold))
                                     .multilineTextAlignment(.center)
@@ -2271,25 +2664,52 @@ struct OrderFlowView: View {
                                     .font(.system(size: 14))
                                     .foregroundColor(.secondary)
                                     .multilineTextAlignment(.center)
+                                    .lineLimit(nil)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 10)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 16)
+                                            .fill(Color(.secondarySystemBackground))
+                                    )
 
-                                if !isReconcilingPayment && !cashPointMode {
-                                    Button { retryZCreditNow() } label: {
+                                if cardPaymentState == .verifying {
+                                    Text(verifyHoldMessage)
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .foregroundColor(.secondary)
+                                        .multilineTextAlignment(.center)
+                                }
+
+                                if cardPaymentState == .verifying && !isPaying {
+                                    Button { retryPayment() } label: {
+                                        Text(isRtl ? "בדוק שוב" : "Check again")
+                                            .font(kioskFont(18, weight: .bold))
+                                            .foregroundColor(.white)
+                                            .frame(width: 240, height: 50)
+                                            .background(MenuTheme.buttonBackground)
+                                            .clipShape(RoundedRectangle(cornerRadius: 18))
+                                    }
+                                }
+
+                                if cardPaymentState == .declined || cardPaymentState == .failed {
+                                    Button { retryPayment() } label: {
                                         Text(isRtl ? "נסה שוב" : "Try again")
                                             .font(kioskFont(18, weight: .bold))
                                             .foregroundColor(.white)
-                                            .frame(width: 220, height: 48)
-                                            .background(isPaying ? Color.gray.opacity(0.4) : MenuTheme.buttonBackground)
-                                            .clipShape(RoundedRectangle(cornerRadius: 16))
+                                            .frame(width: 240, height: 50)
+                                            .background(MenuTheme.buttonBackground)
+                                            .clipShape(RoundedRectangle(cornerRadius: 18))
                                     }
-                                    .disabled(isPaying)
                                 }
+
                             }
                             .padding(.horizontal, 40)
+                            .frame(maxWidth: .infinity)
                         } else {
                             Spacer().frame(height: 22)
                         }
                     }
-                    .frame(height: cashPointMode ? errorSlotH : 90)
                     .frame(maxWidth: .infinity)
 
                     // Card / Cash / Pay later (POS)
@@ -2298,17 +2718,22 @@ struct OrderFlowView: View {
 
                             if shouldShowCardButton {
                                 Button {
-                                   
-                                    startCardForRemainingNow()
+                                    if cardPaymentState == .declined || cardPaymentState == .failed {
+                                        retryPayment()
+                                    } else {
+                                        startCardForRemainingNow()
+                                    }
                                 } label: {
-                                    Text(isRtl ? "תשלום באשראי" : "Pay by card")
+                                    Text((cardPaymentState == .declined || cardPaymentState == .failed)
+                                         ? (isRtl ? "נסה שוב" : "Try again")
+                                         : (isRtl ? "תשלום באשראי" : "Pay by card"))
                                         .font(.system(size: 18, weight: .semibold))
-                                        .foregroundColor(.white)
+                                        .foregroundColor(terminalActive ? .white.opacity(0.8) : .black)
                                         .frame(width: 240, height: 50)
-                                        .background((terminalActive || hasOpenPaymentAttempt) ? Color.gray.opacity(0.4) : Color.gray.opacity(0.4))
+                                        .background(terminalActive ? Color.gray.opacity(0.45) : Color.white)
                                         .clipShape(RoundedRectangle(cornerRadius: 18))
                                 }
-                                .disabled(terminalActive || hasOpenPaymentAttempt || (hasApprovedCardPayment && isOrderFullyPaid))
+                                .disabled(terminalActive || (hasApprovedCardPayment && isOrderFullyPaid))
                             }
 
                             Button {
@@ -2318,29 +2743,29 @@ struct OrderFlowView: View {
                                
                                 payingWithCash = true
                                 payError = nil
-                                isPaying = false
+                                resetPaymentRequestTracking()
                                 paymentStarted = false
                                 cashInput = ""
                                 manualCashTargetAmount = nil
+                                print("[Cancel] from cashButton")
                                 if !AppConfig.isDemoMode { ZCreditPaymentHandler.shared.cancelCurrent() }
                             } label: {
                                 Text(isRtl ? "תשלום במזומן" : "Pay with cash")
                                     .font(.system(size: 18, weight: .semibold))
-                                    .foregroundColor(.primary)
-                                    .frame(width: 220, height: 48)
-                                    .background(Color(.systemGray5))
+                                    .foregroundColor(.black)
+                                    .frame(width: 240, height: 50)
+                                    .background(Color.white)
                                     .clipShape(RoundedRectangle(cornerRadius: 18))
                             }
-                            .disabled(hasOpenPaymentAttempt)
 
                             if allowPayLater {
                                 Button { submitPayLaterNow() } label: {
                                     Text(isRtl ? "תשלום מאוחר יותר" : "Pay later")
                                         .font(.system(size: 16, weight: .semibold))
                                         .foregroundColor(.secondary)
-                                        .frame(width: 220, height: 44)
+                                        .frame(width: 240, height: 44)
                                 }
-                                .disabled(didSubmitThisFlow || isSubmittingNow || hasOpenPaymentAttempt)
+                                .disabled(didSubmitThisFlow || isSubmittingNow)
                                 .padding(.bottom, isSmallPhone ? 14 : 0) // ✅ extra breathing room on iPhone 8ֿ
                                 .padding(.top, isSmallPhone ? 0 : 70)
                             }
@@ -2353,6 +2778,19 @@ struct OrderFlowView: View {
                 .padding(.bottom, isSmallPhone ? 26 : 24)  // ✅ ensures Pay later can scroll into view
                 .frame(minHeight: geo.size.height - 20, alignment: .center) // ✅ center on big screens
             }
+        }
+        .onChange(of: networkMonitor.isOnline) { isOnline in
+            guard !isOnline else { return }
+            guard cardPaymentState == .charging || (cardPaymentState == .verifying && isPaying) else { return }
+            // Network dropped during active charge → stop ring, show "Try again"
+            print("[Cancel] from networkDrop")
+            if !AppConfig.isDemoMode { ZCreditPaymentHandler.shared.cancelCurrent() }
+            resetPaymentRequestTracking()
+            setFreshRetryArmed(false, reason: "network_drop")
+            cardPaymentState = .failed
+            payError = isRtl
+                ? "אין חיבור לאינטרנט. בדוק את החיבור ונסה שוב."
+                : "No internet connection. Check your connection and try again."
         }
     }
 
@@ -2421,15 +2859,23 @@ struct OrderFlowView: View {
                                 Spacer()
 
                                 if part.isPaid {
-                                    Text(isRtl ? "שולם" : "Paid")
-                                        .font(.system(size: 16, weight: .semibold))
-                                        .foregroundColor(.primary)
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .foregroundColor(.green)
+                                        Text(isRtl ? "שולם" : "Paid")
+                                            .foregroundColor(.green)
+                                    }
+                                    .font(.system(size: 16, weight: .semibold))
                                 } else {
                                     // Card
                                     Button {
+                                        print("[Split] iPad card tapped row=\(idx) activeReqs=\(activePaymentRequestCount) isPaying=\(isPaying) storeAttempt=\(PaymentAttemptStore.shared.activeAttempt?.state.rawValue ?? "nil")")
                                         if !AppConfig.isDemoMode {
                                             ZCreditPaymentHandler.shared.cancelCurrent()
                                         }
+                                        markPaymentAttemptFailedFinal()
+                                        resetPaymentRequestTracking()
+                                        cardPaymentState = .idle
                                         activeSplitIndex = idx
                                         payError = nil
 
@@ -2450,6 +2896,9 @@ struct OrderFlowView: View {
                                         if !AppConfig.isDemoMode {
                                             ZCreditPaymentHandler.shared.cancelCurrent()
                                         }
+                                        markPaymentAttemptFailedFinal()
+                                        resetPaymentRequestTracking()
+                                        cardPaymentState = .idle
                                         activeSplitIndex = idx
                                         cashInput = ""
                                         payError = nil
@@ -2911,7 +3360,8 @@ struct OrderFlowView: View {
 
     private func payOnBillWithCard(
         amount: Double,
-        onCompletion: ((_ approved: Bool) -> Void)? = nil
+        onCompletion: ((_ approved: Bool) -> Void)? = nil,
+        sendKind: PaymentSendKind = .initial
     ) {
         // ✅ kill any pending delayed restart
         cancelPendingRestart()
@@ -2920,40 +3370,89 @@ struct OrderFlowView: View {
         guard amt >= 0.01 else { return }
 
         // ✅ prevent double starts
-        guard !isPaying else { return }
+        guard activePaymentRequestCount == 0 || sendKind == .verifyReplay || sendKind == .freshRetry else { return }
 
         let existingAttempt = PaymentAttemptStore.shared.currentAttempt(
             reusingAmount: amt,
             orderReference: currentOrderReference()
         )
-        guard let paymentAttempt = existingAttempt ?? paymentAttemptForStart(amount: amt) else {
-            isReconcilingPayment = true
-            payError = isRtl
-                ? "בודק את מצב התשלום הקודם. אין להתחיל חיוב נוסף."
-                : "Checking the previous payment. Do not start another charge."
-            replayPendingPaymentAttemptIfNeeded()
+        let paymentAttempt: PaymentAttempt
+        let isReplay: Bool
+        switch sendKind {
+        case .initial:
+            guard let resolvedAttempt = existingAttempt ?? paymentAttemptForStart(amount: amt) else {
+                isReconcilingPayment = true
+                cardPaymentState = .verifying
+                payError = isRtl
+                    ? "בודק את מצב התשלום הקודם. אין להתחיל חיוב נוסף."
+                    : "Checking the previous payment. Do not start another charge."
+                replayPendingPaymentAttemptIfNeeded()
+                return
+            }
+            paymentAttempt = resolvedAttempt
+            isReplay = (existingAttempt != nil)
+        case .verifyReplay:
+            guard let resolvedAttempt = existingAttempt else {
+                cardPaymentState = .failed
+                payError = verificationFallbackMessage()
+                return
+            }
+            paymentAttempt = resolvedAttempt
+            isReplay = true
+        case .freshRetry:
+            let previousKey = PaymentAttemptStore.shared.activeAttempt?.idempotencyKey
+            guard let resolvedAttempt = paymentAttemptForStart(amount: amt, creationReason: "fresh_retry") else {
+                cardPaymentState = .failed
+                payError = isRtl
+                    ? "לא ניתן להתחיל ניסיון חיוב חדש."
+                    : "Unable to start a fresh charge attempt."
+                return
+            }
+            paymentAttempt = resolvedAttempt
+            isReplay = false
+            logTryAgainDecision(sendKind: sendKind, selectedAttempt: paymentAttempt, previousKey: previousKey)
+        }
+        if isReplay {
+            print("[ZCredit] reusing existing idempotency=\(paymentAttempt.idempotencyKey)")
+            logTryAgainDecision(sendKind: sendKind, selectedAttempt: paymentAttempt, previousKey: paymentAttempt.idempotencyKey)
+        }
+        if sendKind == .verifyReplay {
+            // A same-key replay intentionally reopens the previous attempt so we can ask the backend again.
+            completedPaymentAttemptIds.remove(paymentAttempt.attemptId)
+        }
+        guard !completedPaymentAttemptIds.contains(paymentAttempt.attemptId) else {
+            if approvedPaymentAttemptIds.contains(paymentAttempt.attemptId) {
+                cardPaymentState = .approved
+                hasApprovedCardPayment = true
+                if remainingToPay <= 0.1, !didSubmitThisFlow {
+                    playSuccessAndCompleteOrder()
+                }
+                return
+            }
+            cardPaymentState = .failed
+            payError = closedAttemptStatusMessage(for: paymentAttempt.attemptId)
             return
         }
-        let isReplay = (existingAttempt != nil)
 
         // ✅ ring is owned HERE (not by the caller)
-        isPaying = true
-        payError = isReplay
-            ? (isRtl ? "בודק את מצב התשלום..." : "Checking payment...")
-            : nil
-        isReconcilingPayment = isReplay
+        markPaymentRequestStarted(
+            attempt: paymentAttempt,
+            pending: .payOnBill(amount: amt),
+            sendKind: sendKind
+        )
         if !isReplay { lastResultWasUnknown = false }
         if isReplay {
             PaymentAttemptStore.shared.markReconciling()
-            paymentTrace("payOnBill replay amount=\(amt)", attempt: paymentAttempt)
+            paymentTrace("payOnBill sendType=\(paymentSendTypeLabel(sendKind)) amount=\(amt)", attempt: paymentAttempt)
         } else {
             PaymentAttemptStore.shared.markPending()
-            paymentTrace("payOnBill begin amount=\(amt)", attempt: paymentAttempt)
+            paymentTrace("payOnBill sendType=\(paymentSendTypeLabel(sendKind)) amount=\(amt)", attempt: paymentAttempt)
         }
 
         if AppConfig.isDemoMode {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                self.isPaying = false
+                self.markPaymentRequestFinished(for: paymentAttempt)
+                self.finishPaymentAttempt(paymentAttempt, state: .approved)
 
                 self.cardPaidTotal = self.round2(self.cardPaidTotal + amt)
                 self.remainingToPay = self.round2(max(self.remainingToPay - amt, 0))
@@ -2979,14 +3478,43 @@ struct OrderFlowView: View {
         ZCreditPaymentHandler.shared.pay(
             amount: amt,
             orderId: nil,
+            ticketId: currentOrderReference(),
             idempotencyKey: paymentAttempt.idempotencyKey
         ) { result in
             DispatchQueue.main.async {
-                self.isPaying = false
-
+                self.markPaymentRequestFinished(for: paymentAttempt)
+                if self.completedPaymentAttemptIds.contains(paymentAttempt.attemptId) {
+                    if result.status == .approved {
+                        self.setFreshRetryArmed(false, reason: "payOnBill_duplicateApproved")
+                        self.persistReturnedOrderIdIfNeeded(result)
+                        let inserted = self.approvedPaymentAttemptIds.insert(paymentAttempt.attemptId).inserted
+                        if inserted {
+                            self.finishPaymentAttempt(paymentAttempt, state: .approved)
+                            self.markPaymentAttemptSucceeded()
+                            self.lastResultWasUnknown = false
+                            self.cardPaidTotal = self.round2(self.cardPaidTotal + amt)
+                            self.remainingToPay = self.round2(max(self.remainingToPay - amt, 0))
+                            self.hasApprovedCardPayment = (self.remainingToPay <= 0.1)
+                        }
+                        if self.remainingToPay <= 0.1 {
+                            if !self.didSubmitThisFlow {
+                                self.playSuccessAndCompleteOrder()
+                            }
+                        } else {
+                            self.commitPartialSnapshot()
+                        }
+                    } else {
+                        self.paymentTrace("payOnBill ignored duplicate callback sendType=\(self.paymentSendTypeLabel(sendKind))", attempt: paymentAttempt)
+                    }
+                    return
+                }
                 switch result.status {
                 case .approved:
-                    self.paymentTrace("payOnBill sendType=\(isReplay ? "replay" : "first-send") result=approved amount=\(amt)", attempt: paymentAttempt)
+                    self.setFreshRetryArmed(false, reason: "payOnBill_approved")
+                    self.persistReturnedOrderIdIfNeeded(result)
+                    self.paymentTrace("payOnBill sendType=\(self.paymentSendTypeLabel(sendKind)) result=approved amount=\(amt)", attempt: paymentAttempt)
+                    self.approvedPaymentAttemptIds.insert(paymentAttempt.attemptId)
+                    self.finishPaymentAttempt(paymentAttempt, state: .approved)
                     self.markPaymentAttemptSucceeded()
                     self.lastResultWasUnknown = false
 
@@ -3003,30 +3531,54 @@ struct OrderFlowView: View {
                     }
 
                 case .declined:
-                    self.paymentTrace("payOnBill sendType=\(isReplay ? "replay" : "first-send") result=declined amount=\(amt)", attempt: paymentAttempt)
-                    self.markPaymentAttemptFailedFinal()
-                    self.payError = self.isRtl
-                        ? "התשלום נדחה. נסה שוב או בחר אמצעי תשלום אחר."
-                        : "Payment was declined. Try again or choose another method."
+                    self.setFreshRetryArmed(true, reason: "payOnBill_declined_response")
+                    self.persistReturnedOrderIdIfNeeded(result)
+                    self.paymentTrace("payOnBill sendType=\(self.paymentSendTypeLabel(sendKind)) result=declined amount=\(amt)", attempt: paymentAttempt)
+                    // Inline cleanup — preserve pendingCardReconcile so retry knows it's payOnBill
+                    self.reconcileTask?.cancel()
+                    self.reconcileTask = nil
+                    self.verifyReplayTask?.cancel()
+                    self.verifyReplayTask = nil
+                    self.isReconcilingPayment = false
+                    PaymentAttemptStore.shared.markFailedFinal()
+                    PaymentAttemptStore.shared.clearIfTerminal()
+                    self.finishPaymentAttempt(
+                        paymentAttempt,
+                        state: .declined,
+                        message: self.isRtl
+                            ? "התשלום נדחה. נסה שוב או בחר אמצעי תשלום אחר."
+                            : "Payment was declined. Try again or choose another method."
+                    )
                     onCompletion?(false)
 
                 case .unknown:
-                    self.paymentTrace("payOnBill sendType=\(isReplay ? "replay" : "first-send") result=unknown amount=\(amt)", attempt: paymentAttempt)
+                    self.setFreshRetryArmed(false, reason: "payOnBill_unknown_response")
+                    self.persistReturnedOrderIdIfNeeded(result)
+                    self.paymentTrace("payOnBill sendType=\(self.paymentSendTypeLabel(sendKind)) result=unknown amount=\(amt)", attempt: paymentAttempt)
                     if self.shouldEnterReconciling(for: result) {
-                        let fallback = self.isRtl
-                            ? "בודק אם התשלום כבר אושר. אין לנסות לחייב שוב."
-                            : "Checking whether the payment already succeeded. Do not charge again."
+                        let fallback = self.verifyHoldMessage
                         self.enterReconcilingState(
                             .payOnBill(amount: amt),
-                            message: result.message.isEmpty ? fallback : result.message
+                            message: result.message.isEmpty ? fallback : result.message,
+                            scheduleReplay: sendKind != .verifyReplay
                         )
                     } else {
-                        self.markPaymentAttemptFailedFinal()
-                        self.lastResultWasUnknown = false
+                        // Hard failure — arm fresh retry so next attempt gets a new key
+                        self.setFreshRetryArmed(true, reason: "payOnBill_unknown_hard_failure")
+                        self.reconcileTask?.cancel()
+                        self.reconcileTask = nil
+                        self.verifyReplayTask?.cancel()
+                        self.verifyReplayTask = nil
                         self.isReconcilingPayment = false
-                        self.payError = result.message.isEmpty
-                            ? (self.isRtl ? "שגיאה בתחילת עסקה במסוף" : "Terminal start error")
-                            : result.message
+                        PaymentAttemptStore.shared.markFailedFinal()
+                        self.lastResultWasUnknown = false
+                        self.finishPaymentAttempt(
+                            paymentAttempt,
+                            state: .failed,
+                            message: result.message.isEmpty
+                                ? (self.isRtl ? "שגיאה בתחילת עסקה במסוף" : "Terminal start error")
+                                : result.message
+                        )
                     }
                     onCompletion?(false)
                 }
@@ -3040,7 +3592,8 @@ struct OrderFlowView: View {
         let phoneParam = phoneDigits.trimmedIsEmpty ? nil : phoneDigits
         let nameClean  = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let nameParam  = nameClean.isEmpty ? nil : nameClean
-        let summary    = buildPaymentSummary()
+        let summary    = forcedCompletionPaymentSummary ?? buildPaymentSummary()
+        let existingOrderId = submitOrderIdForCurrentFlow
 
         // ✅ IMPORTANT: persist BEFORE submit so any printing that relies on AppStorage has the name
         if let n = nameParam { posSavedName = n }
@@ -3073,10 +3626,11 @@ struct OrderFlowView: View {
 
                 let tipOff = max(0, tipAmount)
 
-                print("✅ SUCCESS → submitting. method=\(summary.method.rawValue) totalWithTip=\(totalWithTip)")
                 clearPartialPaySnapshot()
+                forcedCompletionPaymentSummary = nil
                 // 1) ✅ submit up to parent (parent can print / save metadata)
-                onCompleted(phoneParam, nameParam, summary, discountOff, tipOff)
+                print("[Split] onCompleted → method=\(summary.method) card=\(summary.cardAmount) cash=\(summary.cashAmount) orderId=\(existingOrderId ?? -1)")
+                onCompleted(phoneParam, nameParam, summary, discountOff, tipOff, existingOrderId)
 
                 // 2) ✅ Kiosk/customer: push to confirmation instead of dismiss
                 if !cashPointMode {
@@ -3122,6 +3676,7 @@ struct OrderFlowView: View {
     }
 
     private func cancelAll() {
+        print("[Cancel] from cancelAll")
         ensureTicketNow(reason: "X")
            if ticketNow > 0 {
                pLog(.uiBlocked, ticket: ticketNow, amount: round2(currentTargetAmount), reason: "X")
@@ -3134,9 +3689,10 @@ struct OrderFlowView: View {
         reconcileTask?.cancel()
         reconcileTask = nil
 
-        isPaying = false
+        resetPaymentRequestTracking()
         isReconcilingPayment = false
         payError = nil
+        cardPaymentState = .idle
         paymentStarted = false
         payingWithCash = false
         cashInput = ""
@@ -3162,9 +3718,10 @@ struct OrderFlowView: View {
         reconcileTask?.cancel()
         reconcileTask = nil
 
-        isPaying = false
+        resetPaymentRequestTracking()
         isReconcilingPayment = false
         payError = nil
+        cardPaymentState = .idle
         paymentStarted = false
         payingWithCash = false
         cashInput = ""
@@ -3178,10 +3735,10 @@ struct OrderFlowView: View {
         onCancel()
     }
 
-    private func startPayment() {
+    private func startPayment(sendKind: PaymentSendKind = .initial) {
 
         // ✅ Don’t start another generic charge if already paying
-        guard !isPaying else { return }
+        guard activePaymentRequestCount == 0 || sendKind == .verifyReplay || sendKind == .freshRetry else { return }
 
         // ✅ Don’t auto-start while in cash / split / manual / specific split row flows
         guard !payingWithCash,
@@ -3196,9 +3753,6 @@ struct OrderFlowView: View {
             return
         }
 
-        isPaying = true
-        payError = nil
-
         // ✅ single source of truth for the “base total” we want to collect (includes tip)
         let baseTotal = round2(initialPaymentTarget)
 
@@ -3208,7 +3762,7 @@ struct OrderFlowView: View {
 
         // guard against 0 / floating leftovers / accidental tiny charges
         guard amountToCharge >= 0.01 else {
-            isPaying = false
+            resetPaymentRequestTracking()
             return
         }
 
@@ -3216,34 +3770,93 @@ struct OrderFlowView: View {
             reusingAmount: amountToCharge,
             orderReference: currentOrderReference()
         )
-        guard let paymentAttempt = existingAttempt ?? paymentAttemptForStart(amount: amountToCharge) else {
-            isReconcilingPayment = true
-            payError = isRtl
-                ? "בודק את מצב התשלום הקודם. אין להתחיל חיוב נוסף."
-                : "Checking the previous payment. Do not start another charge."
-            replayPendingPaymentAttemptIfNeeded()
+        let paymentAttempt: PaymentAttempt
+        let isReplay: Bool
+        switch sendKind {
+        case .initial:
+            guard let resolvedAttempt = existingAttempt ?? paymentAttemptForStart(amount: amountToCharge) else {
+                isReconcilingPayment = true
+                cardPaymentState = .verifying
+                payError = isRtl
+                    ? "בודק את מצב התשלום הקודם. אין להתחיל חיוב נוסף."
+                    : "Checking the previous payment. Do not start another charge."
+                replayPendingPaymentAttemptIfNeeded()
+                return
+            }
+            paymentAttempt = resolvedAttempt
+            isReplay = (existingAttempt != nil)
+        case .verifyReplay:
+            guard let resolvedAttempt = existingAttempt else {
+                cardPaymentState = .failed
+                payError = verificationFallbackMessage()
+                return
+            }
+            paymentAttempt = resolvedAttempt
+            isReplay = true
+        case .freshRetry:
+            let previousKey = PaymentAttemptStore.shared.activeAttempt?.idempotencyKey
+            guard let resolvedAttempt = paymentAttemptForStart(amount: amountToCharge, creationReason: "fresh_retry") else {
+                cardPaymentState = .failed
+                payError = isRtl
+                    ? "לא ניתן להתחיל ניסיון חיוב חדש."
+                    : "Unable to start a fresh charge attempt."
+                return
+            }
+            paymentAttempt = resolvedAttempt
+            isReplay = false
+            logTryAgainDecision(sendKind: sendKind, selectedAttempt: paymentAttempt, previousKey: previousKey)
+        }
+        if isReplay {
+            print("[ZCredit] reusing existing idempotency=\(paymentAttempt.idempotencyKey)")
+            logTryAgainDecision(sendKind: sendKind, selectedAttempt: paymentAttempt, previousKey: paymentAttempt.idempotencyKey)
+        }
+        if sendKind == .verifyReplay {
+            // A same-key replay intentionally reopens the previous attempt so we can ask the backend again.
+            completedPaymentAttemptIds.remove(paymentAttempt.attemptId)
+        }
+        guard !completedPaymentAttemptIds.contains(paymentAttempt.attemptId) else {
+            if approvedPaymentAttemptIds.contains(paymentAttempt.attemptId) {
+                cardPaymentState = .approved
+                hasApprovedCardPayment = true
+                if remainingToPay <= 0.1, !didSubmitThisFlow {
+                    playSuccessAndCompleteOrder()
+                } else {
+                    commitPartialSnapshot()
+                }
+                return
+            }
+            cardPaymentState = .failed
+            payError = closedAttemptStatusMessage(for: paymentAttempt.attemptId)
             return
         }
-        let isReplay = (existingAttempt != nil)
 
         if isReplay {
             PaymentAttemptStore.shared.markReconciling()
-            isReconcilingPayment = true
-            payError = isRtl
-                ? "בודק את מצב התשלום. אל תבצע חיוב נוסף."
-                : "Checking payment status. Do not start another charge."
-            paymentTrace("startPayment replay amount=\(amountToCharge)", attempt: paymentAttempt)
+            paymentTrace("startPayment sendType=\(paymentSendTypeLabel(sendKind)) amount=\(amountToCharge)", attempt: paymentAttempt)
         } else {
             PaymentAttemptStore.shared.markPending()
-            isReconcilingPayment = false
-            paymentTrace("startPayment begin amount=\(amountToCharge)", attempt: paymentAttempt)
+            paymentTrace("startPayment sendType=\(paymentSendTypeLabel(sendKind)) amount=\(amountToCharge)", attempt: paymentAttempt)
         }
+        markPaymentRequestStarted(
+            attempt: paymentAttempt,
+            pending: .full(amount: amountToCharge),
+            sendKind: sendKind
+        )
 
         // ✅ helper to apply “approved” consistently (demo + real)
         @MainActor
         func applyApproved(amount: Double) {
-            
+            let inserted = approvedPaymentAttemptIds.insert(paymentAttempt.attemptId).inserted
+            if !inserted {
+                if remainingToPay <= 0.1 || hasApprovedCardPayment {
+                    if !didSubmitThisFlow {
+                        playSuccessAndCompleteOrder()
+                    }
+                }
+                return
+            }
             lastResultWasUnknown = false
+            finishPaymentAttempt(paymentAttempt, state: .approved)
             markPaymentAttemptSucceeded()
 
             cardPaidTotal = round2(cardPaidTotal + amount)
@@ -3272,7 +3885,7 @@ struct OrderFlowView: View {
         if AppConfig.isDemoMode {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 Task { @MainActor in
-                    self.isPaying = false
+                    self.markPaymentRequestFinished(for: paymentAttempt)
                     applyApproved(amount: amountToCharge)
                 }
             }
@@ -3288,6 +3901,7 @@ struct OrderFlowView: View {
         ZCreditPaymentHandler.shared.pay(
             amount: amountToCharge,
             orderId: nil,
+            ticketId: currentOrderReference(),
             idempotencyKey: paymentAttempt.idempotencyKey
         ) { result in
             Task { @MainActor in
@@ -3301,47 +3915,87 @@ struct OrderFlowView: View {
                                     reason: result.message)
                       }
 
-                self.isPaying = false
+                self.markPaymentRequestFinished(for: paymentAttempt)
+                if self.completedPaymentAttemptIds.contains(paymentAttempt.attemptId) {
+                    if result.status == .approved {
+                        self.setFreshRetryArmed(false, reason: "startPayment_duplicateApproved")
+                        self.persistReturnedOrderIdIfNeeded(result)
+                        applyApproved(amount: amountToCharge)
+                    } else {
+                        self.paymentTrace("startPayment ignored duplicate callback sendType=\(self.paymentSendTypeLabel(sendKind))", attempt: paymentAttempt)
+                    }
+                    return
+                }
+                guard !self.completedPaymentAttemptIds.contains(paymentAttempt.attemptId) else {
+                    self.paymentTrace("startPayment ignored duplicate callback sendType=\(self.paymentSendTypeLabel(sendKind))", attempt: paymentAttempt)
+                    return
+                }
 
                 switch result.status {
                 case .approved:
-                    self.paymentTrace("startPayment sendType=\(isReplay ? "replay" : "first-send") result=approved amount=\(amountToCharge)", attempt: paymentAttempt)
+                    self.setFreshRetryArmed(false, reason: "startPayment_approved")
+                    self.persistReturnedOrderIdIfNeeded(result)
+                    self.paymentTrace("startPayment sendType=\(self.paymentSendTypeLabel(sendKind)) result=approved amount=\(amountToCharge)", attempt: paymentAttempt)
                     if self.ticketNow > 0 {
                            self.pLog(.resultApproved, ticket: self.ticketNow, amount: amountToCharge, status: "approved")
                        }
                     applyApproved(amount: amountToCharge)
 
                 case .declined:
-                    self.paymentTrace("startPayment sendType=\(isReplay ? "replay" : "first-send") result=declined amount=\(amountToCharge)", attempt: paymentAttempt)
-                    self.markPaymentAttemptFailedFinal()
+                    self.setFreshRetryArmed(true, reason: "startPayment_declined_response")
+                    self.persistReturnedOrderIdIfNeeded(result)
+                    self.paymentTrace("startPayment sendType=\(self.paymentSendTypeLabel(sendKind)) result=declined amount=\(amountToCharge)", attempt: paymentAttempt)
+                    // Inline cleanup — preserve pendingCardReconcile so retry knows the context
+                    self.reconcileTask?.cancel()
+                    self.reconcileTask = nil
+                    self.verifyReplayTask?.cancel()
+                    self.verifyReplayTask = nil
+                    self.isReconcilingPayment = false
+                    PaymentAttemptStore.shared.markFailedFinal()
+                    PaymentAttemptStore.shared.clearIfTerminal()
                     if self.ticketNow > 0 {
                             self.pLog(.resultDeclined, ticket: self.ticketNow, amount: amountToCharge, status: "declined", reason: result.message)
                         }
                     let fallback = self.isRtl
                         ? "התשלום נדחה. נסה שוב או בחר אמצעי תשלום אחר."
                         : "Payment declined. Please try again or choose another method."
-                    self.payError = result.message.isEmpty ? fallback : result.message
+                    self.finishPaymentAttempt(
+                        paymentAttempt,
+                        state: .declined,
+                        message: result.message.isEmpty ? fallback : result.message
+                    )
 
                 case .unknown:
-                    self.paymentTrace("startPayment sendType=\(isReplay ? "replay" : "first-send") result=unknown amount=\(amountToCharge)", attempt: paymentAttempt)
+                    self.setFreshRetryArmed(false, reason: "startPayment_unknown_response")
+                    self.persistReturnedOrderIdIfNeeded(result)
+                    self.paymentTrace("startPayment sendType=\(self.paymentSendTypeLabel(sendKind)) result=unknown amount=\(amountToCharge)", attempt: paymentAttempt)
                     if self.ticketNow > 0 {
                            self.pLog(.resultUnknown, ticket: self.ticketNow, amount: amountToCharge, status: "unknown", reason: result.message)
                        }
                     if self.shouldEnterReconciling(for: result) {
-                        let fallback = self.isRtl
-                            ? "בודק אם התשלום כבר אושר. אין לנסות לחייב שוב."
-                            : "Checking whether the payment already succeeded. Do not charge again."
+                        let fallback = self.verifyHoldMessage
                         self.enterReconcilingState(
                             .full(amount: amountToCharge),
-                            message: result.message.isEmpty ? fallback : result.message
+                            message: result.message.isEmpty ? fallback : result.message,
+                            scheduleReplay: sendKind != .verifyReplay
                         )
                     } else {
-                        self.markPaymentAttemptFailedFinal()
-                        self.lastResultWasUnknown = false
+                        // Hard failure — arm fresh retry so next attempt gets a new key
+                        self.setFreshRetryArmed(true, reason: "startPayment_unknown_hard_failure")
+                        self.reconcileTask?.cancel()
+                        self.reconcileTask = nil
+                        self.verifyReplayTask?.cancel()
+                        self.verifyReplayTask = nil
                         self.isReconcilingPayment = false
-                        self.payError = result.message.isEmpty
-                            ? (self.isRtl ? "שגיאה בתחילת עסקה במסוף" : "Terminal start error")
-                            : result.message
+                        PaymentAttemptStore.shared.markFailedFinal()
+                        self.lastResultWasUnknown = false
+                        self.finishPaymentAttempt(
+                            paymentAttempt,
+                            state: .failed,
+                            message: result.message.isEmpty
+                                ? (self.isRtl ? "שגיאה בתחילת עסקה במסוף" : "Terminal start error")
+                                : result.message
+                        )
                     }
                 }
             }
@@ -3353,11 +4007,13 @@ struct OrderFlowView: View {
     }
 
     private func completeWithoutPayment() {
+           print("[Cancel] from completeWithoutPayment")
            if !AppConfig.isDemoMode {
                ZCreditPaymentHandler.shared.cancelCurrent()
            }
-           isPaying = false
+           resetPaymentRequestTracking()
            payError = nil
+           cardPaymentState = .idle
            paymentStarted = false
            payingWithCash = false
            cashInput = ""
@@ -3433,13 +4089,15 @@ struct OrderFlowView: View {
     }
     @MainActor
     private func completeWithCash() {
+        print("[Cancel] from completeWithCash")
         if !AppConfig.isDemoMode {
             ZCreditPaymentHandler.shared.cancelCurrent()
         }
 
         // Common UI reset (but DO NOT dismiss screens here)
-        isPaying = false
+        resetPaymentRequestTracking()
         payError = nil
+        cardPaymentState = .idle
         paymentStarted = false
 
         // 💰 How much cash did we just take in THIS action?
@@ -3490,7 +4148,7 @@ struct OrderFlowView: View {
         }
 
         // 3️⃣ Simple non-split cash (may be partial)
-        if remainingToPay == 0 {
+        if remainingToPay < 0.01 {
             recomputeRemainingFromTotals()
         }
 
@@ -4144,7 +4802,7 @@ struct OrderFlowView: View {
     }
 
     private var hasConfirmedPhoneForThisFlow: Bool {
-        cashPointMode ? hasSavedPhone : false
+        false
     }
     
     @FocusState private var nameFocused: Bool
@@ -4208,7 +4866,6 @@ struct OrderFlowView: View {
 
                 if !displayName.isEmpty {
                     Button {
-                        print("✅ CLEAR tapped")
                         name = ""
                         posSavedName = ""
                         didConfirmNameThisSession = false
@@ -4474,7 +5131,7 @@ struct OrderFlowView: View {
         remainingToPay = round2(max(base - paid, 0))
     }
     // MARK: - Split card helper
-    private func startCardForSplitPart(index: Int) {
+    private func startCardForSplitPart(index: Int, sendKind: PaymentSendKind = .initial) {
         cancelPendingRestart()
         guard splitParts.indices.contains(index),
               !splitParts[index].isPaid else {
@@ -4489,7 +5146,7 @@ struct OrderFlowView: View {
             return
         }
 
-        guard !isPaying else {
+        guard activePaymentRequestCount == 0 || sendKind == .verifyReplay || sendKind == .freshRetry else {
             splitCardTapLocked = false
             return
         }
@@ -4498,21 +5155,72 @@ struct OrderFlowView: View {
             reusingAmount: amount,
             orderReference: currentOrderReference()
         )
-        guard let paymentAttempt = existingAttempt ?? paymentAttemptForStart(amount: amount, allowDebugFixedKey: false) else {
+        let paymentAttempt: PaymentAttempt
+        let isReplay: Bool
+        switch sendKind {
+        case .initial:
+            guard let resolvedAttempt = existingAttempt ?? paymentAttemptForStart(amount: amount, allowDebugFixedKey: false) else {
+                splitCardTapLocked = false
+                isReconcilingPayment = true
+                cardPaymentState = .verifying
+                payError = isRtl
+                    ? "בודק את מצב התשלום הקודם. אין להתחיל חיוב נוסף."
+                    : "Checking the previous payment. Do not start another charge."
+                replayPendingPaymentAttemptIfNeeded()
+                return
+            }
+            paymentAttempt = resolvedAttempt
+            isReplay = (existingAttempt != nil)
+        case .verifyReplay:
+            guard let resolvedAttempt = existingAttempt else {
+                splitCardTapLocked = false
+                cardPaymentState = .failed
+                payError = verificationFallbackMessage()
+                return
+            }
+            paymentAttempt = resolvedAttempt
+            isReplay = true
+        case .freshRetry:
+            let previousKey = PaymentAttemptStore.shared.activeAttempt?.idempotencyKey
+            guard let resolvedAttempt = paymentAttemptForStart(amount: amount, allowDebugFixedKey: false, creationReason: "fresh_retry") else {
+                splitCardTapLocked = false
+                cardPaymentState = .failed
+                payError = isRtl
+                    ? "לא ניתן להתחיל ניסיון חיוב חדש."
+                    : "Unable to start a fresh charge attempt."
+                return
+            }
+            paymentAttempt = resolvedAttempt
+            isReplay = false
+            logTryAgainDecision(sendKind: sendKind, selectedAttempt: paymentAttempt, previousKey: previousKey)
+        }
+        if isReplay {
+            print("[ZCredit] reusing existing idempotency=\(paymentAttempt.idempotencyKey)")
+            logTryAgainDecision(sendKind: sendKind, selectedAttempt: paymentAttempt, previousKey: paymentAttempt.idempotencyKey)
+        }
+        if sendKind == .verifyReplay {
+            // A same-key replay intentionally reopens the previous attempt so we can ask the backend again.
+            completedPaymentAttemptIds.remove(paymentAttempt.attemptId)
+        }
+        guard !completedPaymentAttemptIds.contains(paymentAttempt.attemptId) else {
+            if approvedPaymentAttemptIds.contains(paymentAttempt.attemptId) {
+                cardPaymentState = .approved
+                if remainingToPay <= 0.1, !didSubmitThisFlow {
+                    playSuccessAndCompleteOrder()
+                }
+                return
+            }
             splitCardTapLocked = false
-            isReconcilingPayment = true
-            payError = isRtl
-                ? "בודק את מצב התשלום הקודם. אין להתחיל חיוב נוסף."
-                : "Checking the previous payment. Do not start another charge."
-            replayPendingPaymentAttemptIfNeeded()
+            cardPaymentState = .failed
+            payError = closedAttemptStatusMessage(for: paymentAttempt.attemptId)
             return
         }
-        let isReplay = (existingAttempt != nil)
 
         // ✅ common helper (demo + real) — always on MainActor
         @MainActor
         func applyApprovedSplit(amount: Double) {
             lastResultWasUnknown = false
+            finishPaymentAttempt(paymentAttempt, state: .approved)
             markPaymentAttemptSucceeded()
 
             // ✅ totals
@@ -4533,23 +5241,23 @@ struct OrderFlowView: View {
         }
 
         // Start payment UI state
-        isPaying = true
-        payError = isReplay
-            ? (isRtl ? "בודק את מצב התשלום..." : "Checking payment...")
-            : nil
-        isReconcilingPayment = isReplay
+        markPaymentRequestStarted(
+            attempt: paymentAttempt,
+            pending: .split(index: index, amount: amount),
+            sendKind: sendKind
+        )
         if isReplay {
             PaymentAttemptStore.shared.markReconciling()
-            paymentTrace("split replay idx=\(index) amount=\(amount)", attempt: paymentAttempt)
+            paymentTrace("split sendType=\(paymentSendTypeLabel(sendKind)) idx=\(index) amount=\(amount)", attempt: paymentAttempt)
         } else {
             PaymentAttemptStore.shared.markPending()
-            paymentTrace("split begin idx=\(index) amount=\(amount)", attempt: paymentAttempt)
+            paymentTrace("split sendType=\(paymentSendTypeLabel(sendKind)) idx=\(index) amount=\(amount)", attempt: paymentAttempt)
         }
 
         if AppConfig.isDemoMode {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 Task { @MainActor in
-                    self.isPaying = false
+                    self.markPaymentRequestFinished(for: paymentAttempt)
                     self.splitCardTapLocked = false
                     applyApprovedSplit(amount: amount)   // ✅ no "self."
                 }
@@ -4568,7 +5276,9 @@ struct OrderFlowView: View {
         ZCreditPaymentHandler.shared.pay(
             amount: amount,
             orderId: nil,
-            idempotencyKey: paymentAttempt.idempotencyKey
+            ticketId: currentOrderReference(),
+            idempotencyKey: paymentAttempt.idempotencyKey,
+            useLegacyEndpoint: true
         ) { result in
             Task { @MainActor in
                 let ms = Int(Date().timeIntervalSince(t0) * 1000)
@@ -4581,12 +5291,30 @@ struct OrderFlowView: View {
                               reason: result.message)
                 }
 
-                self.isPaying = false
+                self.markPaymentRequestFinished(for: paymentAttempt)
                 self.splitCardTapLocked = false
+                if self.completedPaymentAttemptIds.contains(paymentAttempt.attemptId) {
+                    if result.status == .approved {
+                        self.setFreshRetryArmed(false, reason: "split_duplicateApproved")
+                        self.persistReturnedOrderIdIfNeeded(result)
+                        let inserted = self.approvedPaymentAttemptIds.insert(paymentAttempt.attemptId).inserted
+                        if inserted {
+                            applyApprovedSplit(amount: amount)
+                        } else if self.remainingToPay <= 0.1, !self.didSubmitThisFlow {
+                            self.playSuccessAndCompleteOrder()
+                        }
+                    } else {
+                        self.paymentTrace("split ignored duplicate callback sendType=\(self.paymentSendTypeLabel(sendKind))", attempt: paymentAttempt)
+                    }
+                    return
+                }
 
                 switch result.status {
                 case .approved:
-                    self.paymentTrace("split sendType=\(isReplay ? "replay" : "first-send") result=approved idx=\(index) amount=\(amount)", attempt: paymentAttempt)
+                    self.setFreshRetryArmed(false, reason: "split_approved")
+                    self.persistReturnedOrderIdIfNeeded(result)
+                    self.paymentTrace("split sendType=\(self.paymentSendTypeLabel(sendKind)) result=approved idx=\(index) amount=\(amount)", attempt: paymentAttempt)
+                    self.approvedPaymentAttemptIds.insert(paymentAttempt.attemptId)
                     if self.ticketNow > 0 {
                         self.pLog(.resultApproved,
                                   ticket: self.ticketNow,
@@ -4596,8 +5324,17 @@ struct OrderFlowView: View {
                     applyApprovedSplit(amount: amount)
 
                 case .declined:
-                    self.paymentTrace("split sendType=\(isReplay ? "replay" : "first-send") result=declined idx=\(index) amount=\(amount)", attempt: paymentAttempt)
-                    self.markPaymentAttemptFailedFinal()
+                    self.setFreshRetryArmed(true, reason: "split_declined_response")
+                    self.persistReturnedOrderIdIfNeeded(result)
+                    self.paymentTrace("split sendType=\(self.paymentSendTypeLabel(sendKind)) result=declined idx=\(index) amount=\(amount)", attempt: paymentAttempt)
+                    // Inline cleanup — preserve pendingCardReconcile so retry knows it's a split
+                    self.reconcileTask?.cancel()
+                    self.reconcileTask = nil
+                    self.verifyReplayTask?.cancel()
+                    self.verifyReplayTask = nil
+                    self.isReconcilingPayment = false
+                    PaymentAttemptStore.shared.markFailedFinal()
+                    PaymentAttemptStore.shared.clearIfTerminal()
                     if self.ticketNow > 0 {
                         self.pLog(.resultDeclined,
                                   ticket: self.ticketNow,
@@ -4608,10 +5345,16 @@ struct OrderFlowView: View {
                     let fallback = self.isRtl
                         ? "תשלום החלק נדחה. נסה שוב או בחר אמצעי תשלום אחר."
                         : "This part of the payment was declined. Try again or choose another method."
-                    self.payError = result.message.isEmpty ? fallback : result.message
+                    self.finishPaymentAttempt(
+                        paymentAttempt,
+                        state: .declined,
+                        message: result.message.isEmpty ? fallback : result.message
+                    )
 
                 case .unknown:
-                    self.paymentTrace("split sendType=\(isReplay ? "replay" : "first-send") result=unknown idx=\(index) amount=\(amount)", attempt: paymentAttempt)
+                    self.setFreshRetryArmed(false, reason: "split_unknown_response")
+                    self.persistReturnedOrderIdIfNeeded(result)
+                    self.paymentTrace("split sendType=\(self.paymentSendTypeLabel(sendKind)) result=unknown idx=\(index) amount=\(amount)", attempt: paymentAttempt)
                     if self.ticketNow > 0 {
                         self.pLog(.resultUnknown,
                                   ticket: self.ticketNow,
@@ -4620,20 +5363,29 @@ struct OrderFlowView: View {
                                   reason: result.message)
                     }
                     if self.shouldEnterReconciling(for: result) {
-                        let fallback = self.isRtl
-                            ? "בודק אם התשלום על החלק הזה כבר אושר. אין לנסות לחייב שוב."
-                            : "Checking whether this split payment already succeeded. Do not charge again."
+                        let fallback = self.verifyHoldMessage
                         self.enterReconcilingState(
                             .split(index: index, amount: amount),
-                            message: result.message.isEmpty ? fallback : result.message
+                            message: result.message.isEmpty ? fallback : result.message,
+                            scheduleReplay: sendKind != .verifyReplay
                         )
                     } else {
-                        self.markPaymentAttemptFailedFinal()
-                        self.lastResultWasUnknown = false
+                        // Hard failure — arm fresh retry so next attempt gets a new key
+                        self.setFreshRetryArmed(true, reason: "split_unknown_hard_failure")
+                        self.reconcileTask?.cancel()
+                        self.reconcileTask = nil
+                        self.verifyReplayTask?.cancel()
+                        self.verifyReplayTask = nil
                         self.isReconcilingPayment = false
-                        self.payError = result.message.isEmpty
-                            ? (self.isRtl ? "שגיאה בתחילת עסקה במסוף" : "Terminal start error")
-                            : result.message
+                        PaymentAttemptStore.shared.markFailedFinal()
+                        self.lastResultWasUnknown = false
+                        self.finishPaymentAttempt(
+                            paymentAttempt,
+                            state: .failed,
+                            message: result.message.isEmpty
+                                ? (self.isRtl ? "שגיאה בתחילת עסקה במסוף" : "Terminal start error")
+                                : result.message
+                        )
                     }
                 }
             }
@@ -4828,9 +5580,10 @@ struct OrderFlowView: View {
         didFinishThisFlow = true
 
         // clean UI state
-        isPaying = false
+        resetPaymentRequestTracking()
         paymentStarted = false
         payError = nil
+        cardPaymentState = .idle
 
         // ✅ navigate (root if we’re at root, push if we’re already in stack)
         if path.isEmpty {
@@ -4842,8 +5595,9 @@ struct OrderFlowView: View {
     
     private func debugShowConfirmation() {
         // stop any payment UI
-        isPaying = false
+        resetPaymentRequestTracking()
         paymentStarted = false
+        cardPaymentState = .idle
 
         // 🔧 DEBUG: call onCompleted as if order finished
         let phoneParam = phoneDigits.trimmedIsEmpty ? nil : phoneDigits

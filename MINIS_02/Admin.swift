@@ -1318,8 +1318,8 @@ struct AdminProductEditorView: View {
                 case .success(let savedName):
                     let encoded = savedName.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? savedName
                     self.draft.imageURL = "https://minitel.co.uk/images/uploads/\(encoded).png"
-                case .failure(let error):
-                    print("❌ image upload failed:", error.localizedDescription)
+                case .failure:
+                    break
                 }
             }
         }
@@ -2471,7 +2471,6 @@ extension AdminProductDraft {
         )
 
         if let modifierGroups = baseJsonDict["ModifierGroups"] {
-            print("🧨 baseJsonDict ModifierGroups =", modifierGroups)
         }
         // -----------------------------
         // 3) Inject BOTH systems:
@@ -2539,27 +2538,13 @@ extension AdminProductDraft {
         }
         if let data = try? JSONSerialization.data(withJSONObject: groups, options: [.prettyPrinted]),
            let text = String(data: data, encoding: .utf8) {
-            print("🧩 FINAL GROUPS BEFORE buildJsonData:")
-            print(text)
         }
-        print("🧩 UPSERT PRODUCT DEBUG")
-        print("Name:", name)
-        print("ProductId:", productId ?? -1)
-        print("PrinterId:", printerId)
-        print("PrinterIds:", Array(printerIds).sorted())
-        print("ModifierGroups count:", modifierGroups.count)
 
         for g in modifierGroups {
-            print("➡️ GROUP RAW:",
-                  "title=\(g.title)",
-                  "kind=\(g.kind.rawValue)",
-                  "defaultFirstBool=\(g.defaultFirst)")
         }
 
         if let jsonData = try? JSONSerialization.data(withJSONObject: groups, options: [.prettyPrinted]),
            let jsonString = String(data: jsonData, encoding: .utf8) {
-            print("📦 ModifierGroups payload:")
-            print(jsonString)
         }
         
         return .init(

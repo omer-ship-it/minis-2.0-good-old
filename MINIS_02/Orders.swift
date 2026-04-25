@@ -353,8 +353,6 @@ final class KDSOrdersVM: ObservableObject {
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
             guard let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-                print("❌ setStatus HTTP fail:", (resp as? HTTPURLResponse)?.statusCode ?? -1,
-                      String(data: data, encoding: .utf8) ?? "")
                 return false
             }
 
@@ -411,7 +409,6 @@ final class KDSOrdersVM: ObservableObject {
 
             return true
         } catch {
-            print("❌ setStatus network error:", error.localizedDescription)
             return false
         }
     }
@@ -420,7 +417,6 @@ final class KDSOrdersVM: ObservableObject {
 
     private func playAlertSound() {
         guard let url = Bundle.main.url(forResource: "bell", withExtension: "mp4") else {
-            print("⚠️ bell.mp4 not found in bundle")
             return
         }
         do {
@@ -428,7 +424,6 @@ final class KDSOrdersVM: ObservableObject {
             player?.prepareToPlay()
             player?.play()
         } catch {
-            print("❌ Audio playback error:", error.localizedDescription)
         }
     }
     
@@ -436,7 +431,6 @@ final class KDSOrdersVM: ObservableObject {
         Task {                             // ← flip flag 5 s after launch
                     try? await Task.sleep(nanoseconds: 5_000_000_000)
                     await MainActor.run { self.allowAutoPrint = true }
-                    print("✅ Auto-print enabled")
                 }
         NotificationCenter.default.addObserver(
             forName: .refreshOrders,
@@ -463,7 +457,6 @@ final class KDSOrdersVM: ObservableObject {
         defer { isLoading = false }
 
         guard let url = URL(string: "\(baseURL)?miniAppId=\(miniAppId)") else {
-            print("❌ admin/orders: bad URL")
             return
         }
 
@@ -473,12 +466,10 @@ final class KDSOrdersVM: ObservableObject {
         do {
             let (data, response) = try await URLSession.shared.data(for: req)
             guard let http = response as? HTTPURLResponse else {
-                print("❌ admin/orders: no HTTPURLResponse")
                 return
             }
             guard http.statusCode == 200 else {
                 let body = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
-                print("❌ admin/orders HTTP \(http.statusCode)\n\(body)")
                 return
             }
 
@@ -603,12 +594,10 @@ final class KDSOrdersVM: ObservableObject {
                 parsed = try decoder.decode(ApiResponse.self, from: data)
             } catch {
                 let body = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
-                print("❌ Decode failed: \(error)\nBody:\n\(body)")
                 return
             }
 
             guard parsed.ok else {
-                print("❌ admin/orders returned ok=false")
                 return
             }
 

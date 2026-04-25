@@ -73,7 +73,6 @@ struct MINIS_02App: App {
         launchMenuOnce = false
         cashPointMode = false
 
-        print("🧼 Cleared miniAppId/shopId context (miniAppId is now NIL in UserDefaults)")
     }
     
     
@@ -103,7 +102,6 @@ struct MINIS_02App: App {
             let clean = loc.trimmingCharacters(in: .whitespacesAndNewlines)
             deliveryLoc = clean
             UserDefaults.standard.set(clean, forKey: "deliveryLoc")
-            print("📍 Stored deliveryLoc =", clean)
         }
 
         // keep your existing behavior
@@ -117,14 +115,12 @@ struct MINIS_02App: App {
 
         pingInstallIfNeeded(force: true)
 
-        print("✅ Applied miniAppId=\(miniAppId) shopId=\(shopId) deliveryLoc=\(deliveryLoc)")
         
     }
 
     // MARK: - Init
     init() {
-        UserDefaults.standard.set("12", forKey: "miniAppId")
-        print("🔑 principalId =", principalId)
+        UserDefaults.standard.set(12, forKey: "miniAppId")
 
         configureNavBarAppearance()
         configureStripe()
@@ -134,9 +130,7 @@ struct MINIS_02App: App {
         UserDefaults.standard.removeObject(forKey: "printers.config.shop13")
 
         if let ip = detectLANIPv4() {
-            print("🌐 LAN IP detected:", ip)
         } else {
-            print("🌐 LAN IP detected: none")
         }
 
         // ✅ Clear drafts on launch (as you wanted)
@@ -179,10 +173,11 @@ struct MINIS_02App: App {
                     CashPointView()
                         .tint(.primary)
                         .preferredColorScheme(.dark)
-                        .environment(\.locale, appLocale)
+                        .
+                    environment(\.locale, appLocale)
                         .environment(\.isRtl, appIsRtl)
                 } else {
-                    menuView()
+                    Tesla3()
                                .environment(\.layoutDirection, .leftToRight)
                                .environment(\.locale, appLocale)
                                   .environment(\.isRtl, appIsRtl)   // your custom env key
@@ -203,10 +198,8 @@ struct MINIS_02App: App {
             }
             .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
                 if let url = activity.webpageURL {
-                    print("🌐 onContinueUserActivity → \(url.absoluteString)")
                     handleIncoming(url: url)
                 } else {
-                    print("🌐 onContinueUserActivity → nil url")
                 }
             }
 
@@ -221,7 +214,6 @@ struct MINIS_02App: App {
 
                 if let s = MinisShared.sharedDefaults.string(forKey: kPendingUniversalLink),
                    let url = URL(string: s) {
-                    print("🥶 cold-launch pendingUniversalLink → \(url.absoluteString)")
                     handleIncoming(url: url)
 
                     MinisShared.sharedDefaults.removeObject(forKey: kPendingUniversalLink)
@@ -236,7 +228,6 @@ struct MINIS_02App: App {
                     pingInstallIfNeeded()
 
                     if isIPad && autoPrintEnabled {
-                        print("🖨️ Auto print activated")
                         OrdersAutoPrinter.shared.startPolling(interval: 10)
                     } else {
                         OrdersAutoPrinter.shared.stopPolling()
@@ -264,7 +255,6 @@ struct MINIS_02App: App {
     // MARK: - Incoming URL Router
 
     private func handleIncoming(url: URL) {
-        print("🔗 handleIncoming → \(url.absoluteString)")
         guard url.host?.lowercased() == "minis.studio" else { return }
 
         // Save for attribution + cold-launch fallback
@@ -273,7 +263,6 @@ struct MINIS_02App: App {
 
         // ✅ 1) STUDENT CLAIM FIRST
         if let claim = StudentClaim.from(url: url) {
-            print("🎓 Student claim detected → \(claim)")
             saveClaimToAppGroup(claim)
             NotificationCenter.default.post(name: .studentClaimArrived, object: nil)
             return
@@ -292,10 +281,8 @@ struct MINIS_02App: App {
             let mid = Int(miniStr ?? "") ?? 0
             let tok = (tokStr ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
 
-            print("🔐 Pair link detected → miniAppId=\(mid) token=\(tok)")
 
             guard mid > 0, !tok.isEmpty else {
-                print("❌ Pair link missing miniAppId/token")
                 return
             }
 
@@ -313,14 +300,12 @@ struct MINIS_02App: App {
         // https://minis.studio/mini/12
         if let last = pathParts.last, let id = Int(last) {
             let miniType = pathParts.dropLast().last ?? "root"
-            print("🎯 Deep link → type=\(miniType), miniAppId=\(id)")
             Task { @MainActor in
                 applyMiniAppContext(id, url: url)
             }
             return
         }
 
-        print("⚠️ Deep link ignored: no numeric id / no pair token: path=\(url.path)")
     }
 
     // MARK: - Admin claim (pairing)
@@ -351,16 +336,11 @@ struct MINIS_02App: App {
         req.setValue(UUID().uuidString, forHTTPHeaderField: "X-Request-Id")
         req.httpBody = try? JSONEncoder().encode(payload)
 
-        print("📤 claim invite -> \(url.absoluteString)")
-        print("   principalId=\(principalId)")
-        print("   miniAppId=\(miniAppId)")
-        print("   token=\(token)")
 
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
             let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
             let text = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
-            print("📥 claim invite HTTP \(code) body=\(String(text.prefix(600)))")
 
             guard (200...299).contains(code) else {
                 UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
@@ -397,9 +377,7 @@ struct MINIS_02App: App {
             }
 
             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-            print("✅ Pair claim success -> role=\(role)")
         } catch {
-            print("❌ claim invite network error:", error.localizedDescription)
             UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
         }
     }
@@ -408,16 +386,13 @@ struct MINIS_02App: App {
 
     private func saveClaimToAppGroup(_ claim: StudentClaim) {
         guard let suite = UserDefaults(suiteName: appGroupId) else {
-            print("❌ App Group suite is NIL — check App Groups capability / id")
             return
         }
         guard let data = try? JSONEncoder().encode(claim) else {
-            print("❌ FAILED to encode StudentClaim")
             return
         }
         suite.set(data, forKey: kPendingStudentClaim)
         suite.synchronize()
-        print("✅ Saved \(kPendingStudentClaim) to App Group. bytes=\(data.count)")
     }
 
     private func loadPendingClaimFromAppGroupIfAny() {
@@ -435,7 +410,6 @@ struct MINIS_02App: App {
         suite.removeObject(forKey: kPendingStudentClaim)
         suite.synchronize()
 
-        print("✅ Loaded pending student claim from App Group → showing")
     }
 
     // MARK: - Install Ping
@@ -533,14 +507,11 @@ struct MINIS_02App: App {
 
         URLSession.shared.dataTask(with: req) { data, resp, err in
             if let err = err {
-                print("📈 installs/ping error:", err.localizedDescription)
                 return
             }
             if let http = resp as? HTTPURLResponse {
-                print("📈 installs/ping status:", http.statusCode)
             }
             if let data = data, let s = String(data: data, encoding: .utf8) {
-                print("📈 installs/ping resp:", s)
             }
         }.resume()
     }

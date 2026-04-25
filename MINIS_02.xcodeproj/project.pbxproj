@@ -19,6 +19,13 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		1CA6F4852F9A579C001BBEBE /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 3A6F59752ECE43AC00062F59 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 3A6F597C2ECE43AC00062F59;
+			remoteInfo = MINIS_02;
+		};
 		3A5D0EC32EEF2F660020509C /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 3A6F59752ECE43AC00062F59 /* Project object */;
@@ -43,6 +50,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		1CA6F4812F9A579B001BBEBE /* MINIS_02Tests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MINIS_02Tests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		3A5D0EA32EEF2F640020509C /* Mini.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Mini.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		3A6F597D2ECE43AC00062F59 /* MINIS_02.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MINIS_02.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -91,6 +99,11 @@
 /* End PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
+		1CA6F4822F9A579C001BBEBE /* MINIS_02Tests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = MINIS_02Tests;
+			sourceTree = "<group>";
+		};
 		3A5D0EA42EEF2F640020509C /* Mini */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
@@ -147,6 +160,13 @@
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		1CA6F47E2F9A579B001BBEBE /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		3A5D0EA02EEF2F640020509C /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -184,6 +204,7 @@
 				3A5D0EA42EEF2F640020509C /* Mini */,
 				3A5D0EB42EEF2F660020509C /* MiniTests */,
 				3A5D0EBE2EEF2F660020509C /* MiniUITests */,
+				1CA6F4822F9A579C001BBEBE /* MINIS_02Tests */,
 				3A6F59A92ECE535800062F59 /* Frameworks */,
 				3A6F597E2ECE43AC00062F59 /* Products */,
 			);
@@ -194,6 +215,7 @@
 			children = (
 				3A6F597D2ECE43AC00062F59 /* MINIS_02.app */,
 				3A5D0EA32EEF2F640020509C /* Mini.app */,
+				1CA6F4812F9A579B001BBEBE /* MINIS_02Tests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -208,6 +230,29 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		1CA6F4802F9A579B001BBEBE /* MINIS_02Tests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 1CA6F4872F9A579C001BBEBE /* Build configuration list for PBXNativeTarget "MINIS_02Tests" */;
+			buildPhases = (
+				1CA6F47D2F9A579B001BBEBE /* Sources */,
+				1CA6F47E2F9A579B001BBEBE /* Frameworks */,
+				1CA6F47F2F9A579B001BBEBE /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				1CA6F4862F9A579C001BBEBE /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				1CA6F4822F9A579C001BBEBE /* MINIS_02Tests */,
+			);
+			name = MINIS_02Tests;
+			packageProductDependencies = (
+			);
+			productName = MINIS_02Tests;
+			productReference = 1CA6F4812F9A579B001BBEBE /* MINIS_02Tests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 		3A5D0EA22EEF2F640020509C /* Mini */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 3A5D0EC72EEF2F660020509C /* Build configuration list for PBXNativeTarget "Mini" */;
@@ -270,9 +315,13 @@
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
-				LastSwiftUpdateCheck = 2610;
+				LastSwiftUpdateCheck = 2640;
 				LastUpgradeCheck = 1640;
 				TargetAttributes = {
+					1CA6F4802F9A579B001BBEBE = {
+						CreatedOnToolsVersion = 26.4.1;
+						TestTargetID = 3A6F597C2ECE43AC00062F59;
+					};
 					3A5D0EA22EEF2F640020509C = {
 						CreatedOnToolsVersion = 26.1.1;
 					};
@@ -301,11 +350,19 @@
 			targets = (
 				3A6F597C2ECE43AC00062F59 /* MINIS_02 */,
 				3A5D0EA22EEF2F640020509C /* Mini */,
+				1CA6F4802F9A579B001BBEBE /* MINIS_02Tests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		1CA6F47F2F9A579B001BBEBE /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		3A5D0EA12EEF2F640020509C /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -338,11 +395,18 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "# Tycd /Users/minis/Documents/Github/Minis-3.0 || exit 0\n\nif [ -n \"$(git status --porcelain 2>/dev/null)\" ]; then\n  git add . || exit 0\n  git commit -m \"WIP\" || true\n  git pull --rebase || true\n  git push || true\nelse\n  echo \"No changes to commit\"\nfi\n\nexit 0\npe a script or drag a script file from your workspace to insert its path.\n";
+			shellScript = "cd /Users/minis/Documents/Github/Minis-3.0 || exit 0\n\nif [ -n \"$(git status --porcelain 2>/dev/null)\" ]; then\n  git add . || exit 0\n  git commit -m \"WIP\" || true\n  git pull --rebase origin main || true\n  git push origin HEAD:main || true\nelse\n  echo \"No changes to commit\"\nfi\n\nexit 0\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		1CA6F47D2F9A579B001BBEBE /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		3A5D0E9F2EEF2F640020509C /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -360,6 +424,11 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		1CA6F4862F9A579C001BBEBE /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 3A6F597C2ECE43AC00062F59 /* MINIS_02 */;
+			targetProxy = 1CA6F4852F9A579C001BBEBE /* PBXContainerItemProxy */;
+		};
 		3A5D0EC42EEF2F660020509C /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = 3A5D0EA22EEF2F640020509C /* Mini */;
@@ -368,6 +437,51 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		1CA6F4882F9A579C001BBEBE /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.4;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "Minis.MINIS-02Tests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/MINIS_02.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/MINIS_02";
+			};
+			name = Debug;
+		};
+		1CA6F4892F9A579C001BBEBE /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.4;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "Minis.MINIS-02Tests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/MINIS_02.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/MINIS_02";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
 		3A5D0EC82EEF2F660020509C /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -392,7 +506,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 16.2;
+				MARKETING_VERSION = 16.4;
 				PRODUCT_BUNDLE_IDENTIFIER = minis.co.uk.Clip;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -431,7 +545,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 16.2;
+				MARKETING_VERSION = 16.4;
 				PRODUCT_BUNDLE_IDENTIFIER = minis.co.uk.Clip;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -588,7 +702,7 @@
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 15.5;
-				MARKETING_VERSION = 16.2;
+				MARKETING_VERSION = 16.4;
 				PRODUCT_BUNDLE_IDENTIFIER = minis.co.uk;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -628,7 +742,7 @@
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 15.5;
-				MARKETING_VERSION = 16.2;
+				MARKETING_VERSION = 16.4;
 				PRODUCT_BUNDLE_IDENTIFIER = minis.co.uk;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -644,6 +758,15 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		1CA6F4872F9A579C001BBEBE /* Build configuration list for PBXNativeTarget "MINIS_02Tests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1CA6F4882F9A579C001BBEBE /* Debug */,
+				1CA6F4892F9A579C001BBEBE /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		3A5D0EC72EEF2F660020509C /* Build configuration list for PBXNativeTarget "Mini" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
