@@ -1765,7 +1765,14 @@ enum OrderAPI {
                 var card = r2(max(payment.cardAmount, 0))
                 let sum  = r2(cash + card)
 
-                if orderId == nil, sum > 0.01, !closeEnough(sum, dueVar) {
+                // ✅ FIX (Z-report gap): rebump dueVar/total to match cash+card on EVERY submit,
+                // not just brand-new orders. Pre-/start-safe this guard was harmless because
+                // orderId was always nil. After /start-safe, every cashpoint order already has
+                // an orderId by the time we reach here, so the rebump silently stopped firing
+                // for any order with a tip — producing the Gross > Payments gap on the Z report.
+                // Dropping the `orderId == nil` clause keeps Total in sync with what was actually
+                // collected, and the Z reconciles to the cent again.
+                if sum > 0.01, !closeEnough(sum, dueVar) {
                     dueVar = sum
                     finalTotals["total"] = dueVar
                 }
