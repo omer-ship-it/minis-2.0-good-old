@@ -4326,7 +4326,7 @@ struct CashPointView: View {
 
             // 🔒 HEADER (fixed)
             HStack {
-                Text("קפה יהושע")
+                Text("קופה")
                     .font(.system(size: 22, weight: .bold))
 
                 Spacer()

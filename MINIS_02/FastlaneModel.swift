@@ -88,6 +88,37 @@ final class MenuApiModel: ObservableObject {
         }
         let mini: Mini?
     }
+
+    /// Server-driven feature flags published in /json/{shopId}.json.
+    /// Lets us flip /charge on/off WITHOUT a TestFlight rebuild — operator
+    /// edits the JSON, iPads pick up the new value on the next fetch
+    /// (typically within a minute, or immediately on app launch).
+    ///
+    /// Supported JSON paths (checked in order):
+    ///   1. mini.settings.payments.useChargeV2  ← preferred, extensible
+    ///   2. mini.useChargeV2                    ← shortcut for quick toggle
+    ///
+    /// Default if neither is present: false (safe — uses legacy /start).
+    private struct PaymentsConfigProbe: Decodable {
+        struct Mini: Decodable {
+            let useChargeV2: Bool?
+            let settings: Settings?
+
+            struct Settings: Decodable {
+                let payments: Payments?
+                struct Payments: Decodable {
+                    let useChargeV2: Bool?
+                }
+            }
+        }
+        let mini: Mini?
+
+        var resolvedUseChargeV2: Bool {
+            mini?.settings?.payments?.useChargeV2
+                ?? mini?.useChargeV2
+                ?? false
+        }
+    }
     
     func load(shopId explicit: String? = nil, skipCache: Bool = false) {
         let defaults = UserDefaults.standard
@@ -411,6 +442,24 @@ final class MenuApiModel: ObservableObject {
             }
         } catch {
             print("❌ MINI OPEN probe decode failed:", error.localizedDescription)
+        }
+
+        // ✅ Payments feature flags (server-driven, no app rebuild needed).
+        //    Writes to UserDefaults under "payments.useChargeV2" — read by
+        //    ZCreditPaymentHandler.payLegacyStart and OrderFlowView's @AppStorage.
+        //    Operator can flip /charge on/off by editing the published JSON;
+        //    next fetch propagates the new value to all iPads automatically.
+        do {
+            let probe = try JSONDecoder().decode(PaymentsConfigProbe.self, from: data)
+            let useChargeV2 = probe.resolvedUseChargeV2
+            let prev = UserDefaults.standard.bool(forKey: "payments.useChargeV2")
+            UserDefaults.standard.set(useChargeV2, forKey: "payments.useChargeV2")
+            if prev != useChargeV2 {
+                print("✅ PAYMENTS FLAG: useChargeV2 \(prev) → \(useChargeV2) (from JSON)")
+            }
+        } catch {
+            // No probe match → leave UserDefaults value untouched.
+            print("ℹ️ PAYMENTS probe: no payments config in JSON, leaving flag untouched")
         }
 
         do {
@@ -1995,6 +2044,9 @@ struct ZCreditResult {
     let transactionId: String?
     let rawPath: String?        // e.g. "commit_final", "status_exhausted"
     let rawReturnCode: String?  // e.g. "0", "-80", etc.
+    let orderId: Int?           // Server-issued orderId (only set by /charge endpoint).
+                                // Kept by OrderFlowView in @State for retry within
+                                // the same payment attempt; nil for legacy /start.
 
     /// Convenience flag so old code `if result.approved` keeps working
     var approved: Bool { status == .approved }
@@ -2019,7 +2071,13 @@ final class ZCreditPaymentHandler {
     }
 
     // One-line rollback switch for production.
-    private let cardStartMode: CardStartMode = .unifiedSubmit
+    // Disabled staging unified submit (staging-api.minis.studio/orders/submit):
+    //   - simulator hardcode (#if targetEnvironment(simulator) above) routes to /charge directly
+    //   - real iPads route to /start (or /charge when server flag is on) directly
+    //   - eliminates the staging round-trip that was creating orphan dbo.Orders rows
+    //     and a duplicate /submitOrder forward toward production
+    // Set back to .unifiedSubmit if the staging path is restored.
+    private let cardStartMode: CardStartMode = .legacyStart
     private let shouldFallbackToLegacyStart = true
 
     private let baseURL = URL(string: "https://minis.studio")!
@@ -2094,7 +2152,8 @@ final class ZCreditPaymentHandler {
             referenceNumber: nil,
             transactionId: nil,
             rawPath: "client_bad_url",
-            rawReturnCode: nil
+            rawReturnCode: nil,
+            orderId: nil
         )
     }
 
@@ -2111,6 +2170,16 @@ final class ZCreditPaymentHandler {
         let reference = json["referenceNumber"] as? String
         let txId      = json["transactionId"] as? String
         let rc        = (json["invoiceReturnCode"] as? String) ?? (json["returnCode"] as? String)
+
+        // /charge endpoint returns server-issued orderId in the response. Capture
+        // it so the caller can store it in @State and pass it on retry within the
+        // same payment attempt (lost-response recovery via Z-Credit dup detection).
+        let serverOrderId: Int? = {
+            if let n = json["orderId"] as? Int { return n }
+            if let n = (json["orderId"] as? NSNumber)?.intValue { return n }
+            if let s = json["orderId"] as? String, let n = Int(s) { return n }
+            return nil
+        }()
 
         let msg = (json["invoiceReturnMessage"] as? String) ??
                   (json["ZCreditMessage"] as? String) ??
@@ -2136,7 +2205,8 @@ final class ZCreditPaymentHandler {
                 referenceNumber: reference,
                 transactionId: txId,
                 rawPath: pathRaw,
-                rawReturnCode: rc
+                rawReturnCode: rc,
+                orderId: serverOrderId
             )
             DispatchQueue.main.async { completion(result) }
             return
@@ -2157,7 +2227,8 @@ final class ZCreditPaymentHandler {
                 referenceNumber: reference,
                 transactionId: txId,
                 rawPath: pathRaw,
-                rawReturnCode: rc
+                rawReturnCode: rc,
+                orderId: serverOrderId
             )
             DispatchQueue.main.async { completion(result) }
             return
@@ -2169,13 +2240,20 @@ final class ZCreditPaymentHandler {
             path == "status_declined" ||
             path == "no_reference" ||
             path == "commit_cancelled" ||
-            path == "status_cancelled"
+            path == "status_cancelled" ||
+            path == "charge_wrong_status" ||
+            path == "charge_precheck_db_error" ||
+            path == "charge_insert_failed"
         )
 
         let isApprovedPath = (
             path == "commit_final" ||
+            path == "commit_final_fast" ||
             path == "status_final" ||
-            path == "commit_approved"
+            path == "status_approved_fast" ||
+            path == "commit_approved" ||
+            path == "charge_already_paid" ||
+            path == "charge_recovered_duplicate"
         )
 
         let isApprovedStatus = (resultStr == "approved")
@@ -2209,7 +2287,8 @@ final class ZCreditPaymentHandler {
             referenceNumber: reference,
             transactionId: txId,
             rawPath: pathRaw,
-            rawReturnCode: rc
+            rawReturnCode: rc,
+            orderId: serverOrderId
         )
 
         DispatchQueue.main.async {
@@ -2220,6 +2299,7 @@ final class ZCreditPaymentHandler {
         amount: Double,
         orderId: Int?,
         transactionType: String,
+        isSplitPayment: Bool = false,
         completion: @escaping (ZCreditResult) -> Void
     ) {
         let _ = CashpointID(rawValue: UserDefaults.standard.integer(forKey: "cashpointID")) ?? .one
@@ -2234,7 +2314,38 @@ final class ZCreditPaymentHandler {
         currentCorrelationId = correlationId
         currentPinpadId = pinpadId
 
-        let startBody: [String: Any] = [
+        // ✅ Route between legacy /start and new /charge based on AppStorage flag.
+        //    /charge accepts the same request body, returns the same response shape,
+        //    plus an `orderId` field captured into ZCreditResult.orderId so the
+        //    OrderFlowView can store and pass it on retry within the same attempt.
+        //
+        //    /charge is RESTRICTED to:
+        //      - flag enabled (payments.useChargeV2 = true)
+        //      - non-split payments (splits use /start until row-insertion lands there)
+        //      - regular charges only (transactionType == "01")
+        //
+        //    Refunds (transactionType == "53") and any other non-"01" types stay on
+        //    /start. /charge would create a row + set Status=1, which is wrong
+        //    semantically for refunds (Status=1 means "paid", not "refunded").
+        // 🧪 SIMULATOR-ONLY HARDCODE for /charge canary testing.
+        //    On the simulator we always route eligible transactions to /charge so we
+        //    can validate the new endpoint end-to-end without touching real iPads.
+        //    On any device build (TestFlight / App Store / direct install) we still
+        //    respect the server-driven flag from UserDefaults — flag default is false,
+        //    so production iPads keep using /start until the server flag is flipped on.
+        //    Result: even if this build is accidentally archived to a real iPad, that
+        //    iPad behaves exactly like snapshot v2 (server-flag controlled).
+        #if targetEnvironment(simulator)
+        let useChargeV2 = !isSplitPayment
+            && transactionType == "01"
+        #else
+        let useChargeV2 = !isSplitPayment
+            && transactionType == "01"
+            && UserDefaults.standard.bool(forKey: "payments.useChargeV2")
+        #endif
+        let endpointPath = useChargeV2 ? "/payments/zcredit/charge" : "/payments/zcredit/start"
+
+        var startBody: [String: Any] = [
             "amount": safeAmount,
             "currency": "ILS",
             "authOnly": false,
@@ -2242,8 +2353,14 @@ final class ZCreditPaymentHandler {
             "pinpadId": pinpadId,
             "transactionType": transactionType
         ]
+        // miniAppId in body is required for /charge (resolves credentials when
+        // header is omitted, e.g., for shop 12). Skip for /start to keep the
+        // request body byte-identical to today's known-good behavior.
+        if useChargeV2 {
+            startBody["miniAppId"] = mid
+        }
 
-        guard let startURL = URL(string: "/payments/zcredit/start", relativeTo: baseURL) else {
+        guard let startURL = URL(string: endpointPath, relativeTo: baseURL) else {
             DispatchQueue.main.async { completion(self.legacyBadURLResult()) }
             return
         }
@@ -2259,7 +2376,7 @@ final class ZCreditPaymentHandler {
 
         req.httpBody = try? JSONSerialization.data(withJSONObject: startBody)
 
-        print("🔵 ZCredit /payments/zcredit/start cURL:")
+        print("🔵 ZCredit \(endpointPath) cURL: (useChargeV2=\(useChargeV2))")
         print(req.curlDebug)
 
         URLSession.shared.dataTask(with: req) { [weak self] data, resp, error in
@@ -2491,6 +2608,13 @@ final class ZCreditPaymentHandler {
         orderId: Int?,
         transactionType: String = "01",   // ✅ NEW: "01" = regular, "53" = refund
         unifiedContext: ZCreditUnifiedSubmitContext? = nil,
+        isSplitPayment: Bool = false,     // ✅ NEW: when true, force legacy /start path
+                                          //    (skip /charge even if useChargeV2 flag is on).
+                                          //    /charge creates Orders rows + sets Status=1
+                                          //    per charge, which conflicts with split's
+                                          //    "Status=1 only when fully paid" semantics.
+                                          //    Splits stay on /start until we add row-creation
+                                          //    support there too (next iteration).
         completion: @escaping (ZCreditResult) -> Void
     ) {
         let canUseUnifiedSubmit = (
@@ -2511,6 +2635,7 @@ final class ZCreditPaymentHandler {
                             amount: amount,
                             orderId: orderId,
                             transactionType: transactionType,
+                            isSplitPayment: isSplitPayment,
                             completion: completion
                         )
                     } else {
@@ -2526,6 +2651,7 @@ final class ZCreditPaymentHandler {
             amount: amount,
             orderId: orderId,
             transactionType: transactionType,
+            isSplitPayment: isSplitPayment,
             completion: completion
         )
     }

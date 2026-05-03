@@ -46,6 +46,13 @@ struct AnalyticsV1View: View {
                     }
 
                     // MARK: - Turnover
+                    NavigationLink {
+                        BottomLineDetailView(
+                            reports: vm.store.reports,
+                            liveToday: vm.store.liveToday,
+                            accent: .blue
+                        )
+                    } label: {
                     GlassCard(corner: 26) {
                         VStack(alignment: .leading, spacing: 14) {
                             CardHeader(title: "Turnover", subtitle: vm.headerSubtitle())
@@ -102,8 +109,13 @@ struct AnalyticsV1View: View {
                             }
                         }
                     }
+                    }
+                    .buttonStyle(.plain)
 
                     // MARK: - Channels (outline pie + minimal table)
+                    NavigationLink {
+                        POSDetailsView(shopName: "", accent: .blue)
+                    } label: {
                     GlassCard(corner: 26) {
                         VStack(alignment: .leading, spacing: 16) {
 
@@ -170,9 +182,23 @@ struct AnalyticsV1View: View {
                             )
                         }
                     }
+                    }
+                    .buttonStyle(.plain)
 
                     // MARK: - Top Products (Top 5)
-                    TopProductsCardTop5(accent: accent)
+                    NavigationLink {
+                        SalesReportView(
+                            title: "Items",
+                            shopName: "",
+                            initialRange: vm.range.asDashRange,
+                            reports: vm.store.reports,
+                            makeTop: { subset in vm.store.aggregatedTop(from: subset) },
+                            accent: .blue
+                        )
+                    } label: {
+                        TopProductsCardTop5(accent: accent)
+                    }
+                    .buttonStyle(.plain)
 
                     Spacer().frame(height: 10)
                 }
@@ -731,5 +757,19 @@ struct OutlinePieChart: View {
         }
 
         return out
+    }
+}
+
+// MARK: - AnalyticsRange ↔ DashRange bridge
+
+extension AnalyticsRange {
+    var asDashRange: DashRange {
+        switch self {
+        case .d:  return .d
+        case .w:  return .w
+        case .m:  return .m
+        case .m6: return .m6
+        case .y:  return .y
+        }
     }
 }

@@ -10,7 +10,6 @@
 		3A5D0ED42EEF2FE00020509C /* Kingfisher in Frameworks */ = {isa = PBXBuildFile; productRef = 3A5D0ED32EEF2FE00020509C /* Kingfisher */; };
 		3A5D0ED82EEF30040020509C /* StripeApplePay in Frameworks */ = {isa = PBXBuildFile; productRef = 3A5D0ED72EEF30040020509C /* StripeApplePay */; };
 		3A5D0EDA2EEF30040020509C /* StripePaymentsUI in Frameworks */ = {isa = PBXBuildFile; productRef = 3A5D0ED92EEF30040020509C /* StripePaymentsUI */; };
-		3A66BF142F4A52B800B221D4 /* Mini.app in Embed App Clips */ = {isa = PBXBuildFile; fileRef = 3A5D0EA32EEF2F640020509C /* Mini.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		3A6A141E2F0D489600FC63BA /* Stripe in Frameworks */ = {isa = PBXBuildFile; productRef = 3A5D0ED52EEF30040020509C /* Stripe */; };
 		3A6F59AB2ECE535800062F59 /* Kingfisher in Frameworks */ = {isa = PBXBuildFile; productRef = 3A6F59AA2ECE535800062F59 /* Kingfisher */; };
 		3AA0D51E2EEAEECD00D9B4C2 /* StripeApplePay in Frameworks */ = {isa = PBXBuildFile; productRef = 3AA0D51D2EEAEECD00D9B4C2 /* StripeApplePay */; };
@@ -35,7 +34,6 @@
 			dstPath = "$(CONTENTS_FOLDER_PATH)/AppClips";
 			dstSubfolderSpec = 16;
 			files = (
-				3A66BF142F4A52B800B221D4 /* Mini.app in Embed App Clips */,
 			);
 			name = "Embed App Clips";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -242,6 +240,7 @@
 				3A6F597A2ECE43AC00062F59 /* Frameworks */,
 				3A6F597B2ECE43AC00062F59 /* Resources */,
 				3A74EF622ED57F2C008A7F67 /* Embed App Clips */,
+				1C310F5B2FA559DD005CE0DF /* ShellScript */,
 			);
 			buildRules = (
 			);
@@ -320,6 +319,26 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		1C310F5B2FA559DD005CE0DF /* ShellScript */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "# Type a script or drag a script file from your workspace to insert its path.\ncd /Users/minis/Documents/Github/Minis-02 || exit 0\n\nif [ -n \"$(git status --porcelain 2>/dev/null)\" ]; then\n  git add . || exit 0\n  git commit -m \"WIP\" || true\n  git pull --rebase origin main || true\n  git push origin HEAD:main || true\nelse\n  echo \"No changes to commit\"\nfi\n\nexit 0\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		3A5D0E9F2EEF2F640020509C /* Sources */ = {
@@ -419,6 +438,7 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OPTIMIZATION_LEVEL = "-Osize";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -537,6 +557,7 @@
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-Osize";
 			};
 			name = Release;
 		};
@@ -547,7 +568,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = MINIS_02/MINIS_02.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 7;
 				DEVELOPMENT_TEAM = V22SRJBXN7;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -567,7 +588,7 @@
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 15.5;
-				MARKETING_VERSION = 14.0;
+				MARKETING_VERSION = 16.5;
 				PRODUCT_BUNDLE_IDENTIFIER = minis.co.uk;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -587,7 +608,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = MINIS_02/MINIS_02.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 7;
 				DEVELOPMENT_TEAM = V22SRJBXN7;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -607,7 +628,7 @@
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 15.5;
-				MARKETING_VERSION = 14.0;
+				MARKETING_VERSION = 16.5;
 				PRODUCT_BUNDLE_IDENTIFIER = minis.co.uk;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;

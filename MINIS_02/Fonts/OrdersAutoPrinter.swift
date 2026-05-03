@@ -534,7 +534,8 @@ final class OrdersAutoPrinter {
             total: order.total,
             diningMode: mode,
             customerName: order.customerName,
-            customerPhone: order.customerPhone
+            customerPhone: order.customerPhone,
+            showMinisRow: true   // auto-printer = app/auto order → show MINIS
         )
 
         guard ok else {

@@ -26,6 +26,18 @@ struct OrderFlowView: View {
     @State private var paySessionId: String? = nil
     @State private var payRef: String? = nil
     @State private var payTxId: String? = nil
+
+    // Server-issued orderId from /charge endpoint, captured on first response.
+    // Passed to subsequent pay() calls within the SAME view lifetime so the
+    // server can reuse the existing pending row instead of creating a new one.
+    // ⚠️ DO NOT persist to AppStorage / UserDefaults — must die with view dismiss.
+    // The full-screen-cover lifecycle is the safety mechanism against stale orderIds.
+    @State private var pendingChargeOrderId: Int? = nil
+
+    // Canary flag for routing pay() to /charge instead of /start. Default OFF.
+    // Toggle via the hidden admin gesture (long-press 5x on a debug label).
+    // When OFF, behavior is identical to today's /start flow.
+    @AppStorage("payments.useChargeV2") private var useChargeV2: Bool = false
     
     @AppStorage("pos.ticketNumber") private var posTicketNumber: Int = 0
     @MainActor
@@ -338,6 +350,18 @@ struct OrderFlowView: View {
         name.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// Resolves the customer's name for SUBMIT/PRINT, falling back to the
+    /// AppStorage-persisted `posSavedName` if the in-memory `name` field
+    /// has been cleared between the name step and submit (view recreation,
+    /// hydrate, navigation, etc.). Mirrors the display fallback used in
+    /// `nameStep` so what the customer sees on screen is what gets sent.
+    private var resolvedNameForSubmit: String? {
+        let live = cleanName
+        if !live.isEmpty { return live }
+        let saved = posSavedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return saved.isEmpty ? nil : saved
+    }
+
     private var nameValid: Bool {
         cleanName.count >= 2
     }
@@ -441,7 +465,7 @@ struct OrderFlowView: View {
     @MainActor
     private func commitPartialSnapshot() {
         let phoneParam = phoneDigits.trimmedIsEmpty ? nil : phoneDigits
-        let nameParam  = cleanName.isEmpty ? nil : cleanName
+        let nameParam  = resolvedNameForSubmit
         let summary    = buildPaymentSummary()
 
         let discountOff = studentDiscountActive ? max(0, total - effectiveTotal) : 0
@@ -483,7 +507,7 @@ struct OrderFlowView: View {
         isSubmittingNow = true
         clearPartialPaySnapshot()
         let phoneParam = phoneDigits.trimmedIsEmpty ? nil : phoneDigits
-        let nameParam  = cleanName.isEmpty ? nil : cleanName
+        let nameParam  = resolvedNameForSubmit
 
         // ✅ persist BEFORE submit
         if let n = nameParam { posSavedName = n }
@@ -528,7 +552,7 @@ struct OrderFlowView: View {
         }
 
         let phoneParam = phoneDigits.trimmedIsEmpty ? nil : phoneDigits
-        let nameParam  = cleanName.isEmpty ? nil : cleanName
+        let nameParam  = resolvedNameForSubmit
 
         // ✅ Decide "due now" based on mode (single source of truth)
         let dueNow: Double = {
@@ -2763,15 +2787,28 @@ struct OrderFlowView: View {
         }
         ZCreditPaymentHandler.shared.pay(
             amount: amt,
-            orderId: nil,
+            orderId: pendingChargeOrderId,
             unifiedContext: buildUnifiedCardContext()
         ) { result in
             DispatchQueue.main.async {
                 self.isPaying = false
 
+                // ✅ Capture server orderId from /charge response so retries
+                //    within this view's lifetime hit the same row (lost-response
+                //    recovery via Z-Credit dup detection).
+                if let oid = result.orderId, oid > 0 {
+                    self.pendingChargeOrderId = oid
+                }
+
                 switch result.status {
                 case .approved:
                     self.lastResultWasUnknown = false
+                    // ✅ Clear pendingChargeOrderId so the NEXT charge in this
+                    //    view (e.g., second half of a split payment) creates a
+                    //    fresh row. Without this, split half 2 would hit the
+                    //    pre-check, see Status=1 from half 1, return
+                    //    "charge_already_paid", and skip the actual charge.
+                    self.pendingChargeOrderId = nil
 
                     self.cardPaidTotal = self.round2(self.cardPaidTotal + amt)
                     self.remainingToPay = self.round2(max(self.remainingToPay - amt, 0))
@@ -2806,8 +2843,7 @@ struct OrderFlowView: View {
     @MainActor
     private func playSuccessAndCompleteOrder() {
         let phoneParam = phoneDigits.trimmedIsEmpty ? nil : phoneDigits
-        let nameClean  = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let nameParam  = nameClean.isEmpty ? nil : nameClean
+        let nameParam  = resolvedNameForSubmit
         let summary    = buildPaymentSummary()
 
         // ✅ IMPORTANT: persist BEFORE submit so any printing that relies on AppStorage has the name
@@ -3020,7 +3056,7 @@ struct OrderFlowView: View {
         }
         ZCreditPaymentHandler.shared.pay(
             amount: amountToCharge,
-            orderId: nil,
+            orderId: pendingChargeOrderId,
             unifiedContext: buildUnifiedCardContext()
         ) { result in
             Task { @MainActor in
@@ -3036,8 +3072,16 @@ struct OrderFlowView: View {
 
                 self.isPaying = false
 
+                // ✅ Capture server orderId for retry within this view's lifetime.
+                if let oid = result.orderId, oid > 0 {
+                    self.pendingChargeOrderId = oid
+                }
+
                 switch result.status {
                 case .approved:
+                    // ✅ Clear so next charge (split half 2, new attempt) gets a fresh row.
+                    self.pendingChargeOrderId = nil
+
                     if self.ticketNow > 0 {
                            self.pLog(.resultApproved, ticket: self.ticketNow, amount: amountToCharge, status: "approved")
                        }
@@ -4266,8 +4310,12 @@ struct OrderFlowView: View {
 
         ZCreditPaymentHandler.shared.pay(
             amount: amount,
-            orderId: nil,
-            unifiedContext: buildUnifiedCardContext()
+            orderId: pendingChargeOrderId,
+            unifiedContext: buildUnifiedCardContext(),
+            isSplitPayment: true   // ✅ split → always /start, never /charge.
+                                   //    Splits create per-charge Status=1 rows that conflict
+                                   //    with the "fully paid" Status=1 semantic. Revisit
+                                   //    once /start gets row-insertion support too.
         ) { result in
             Task { @MainActor in
                 let ms = Int(Date().timeIntervalSince(t0) * 1000)
@@ -4283,8 +4331,16 @@ struct OrderFlowView: View {
                 self.isPaying = false
                 self.splitCardTapLocked = false
 
+                // ✅ Capture server orderId for retry within this view's lifetime.
+                if let oid = result.orderId, oid > 0 {
+                    self.pendingChargeOrderId = oid
+                }
+
                 switch result.status {
                 case .approved:
+                    // ✅ Clear so next split half charges fresh row, not the same one.
+                    self.pendingChargeOrderId = nil
+
                     if self.ticketNow > 0 {
                         self.pLog(.resultApproved,
                                   ticket: self.ticketNow,
@@ -4429,8 +4485,6 @@ struct OrderFlowView: View {
     }
     
     private var confirmationStep: some View {
-        let qrURL = "https://minis.studio/shop/12"
-
         return VStack(spacing: 18) {
             Spacer()
 
@@ -4441,18 +4495,6 @@ struct OrderFlowView: View {
             Text(isRtl ? "ההזמנה שלך בהכנה" : "Your order is being prepared")
                 .font(kioskFont(26, weight: .semibold))
                 .multilineTextAlignment(.center)
-            
-            Text("הרווחת חותמת אחת - כל קפה 10 עלינו.\nלשמירת החותמת בכרטיסיה סרוק את הקוד")
-                .font(kioskFont(18))
-                .multilineTextAlignment(.center)
-                .lineSpacing(8)
-
-            DotQRView(
-                text: qrURL,
-                overlayLabel: "MINI",
-                logoKnockoutFraction: 0.28
-            )
-            .frame(width: 220, height: 220)
 
             Button {
                 cancelConfirmationAutoReset()
@@ -4531,7 +4573,7 @@ struct OrderFlowView: View {
 
         // 🔧 DEBUG: call onCompleted as if order finished
         let phoneParam = phoneDigits.trimmedIsEmpty ? nil : phoneDigits
-        let nameParam  = name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : name
+        let nameParam  = resolvedNameForSubmit
 
         let summary = buildPaymentSummary()
 

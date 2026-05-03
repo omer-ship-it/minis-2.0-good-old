@@ -580,6 +580,16 @@ struct ForceRTL<Content: View>: View {
         func updateUIViewController(_ uiViewController: UIViewController, context: Context) {}
 
         final class Controller: UIViewController {
+            // Explicit, optimizer-exempt deinit. The synthesized deinit of this
+            // nested-generic UIViewController subclass triggers a Swift 6.3.1 SIL
+            // crash in EarlyPerfInliner ("isCallerAndCalleeLayoutConstraintsCompatible")
+            // when this file is compiled with -O or -Osize for the Mini AppClip
+            // target. Annotating an explicit deinit with @_optimize(none) keeps
+            // the rest of the module optimized while skipping the inliner pass
+            // for this one function. Safe to remove on a future Swift toolchain.
+            @_optimize(none)
+            deinit {}
+
             override func viewDidAppear(_ animated: Bool) {
                 super.viewDidAppear(animated)
                 view.semanticContentAttribute = .forceRightToLeft

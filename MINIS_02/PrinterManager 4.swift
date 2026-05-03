@@ -1918,7 +1918,7 @@ final class PrinterManager {
 
             if shouldShowMinisRow {
                 job += EscPos.feed(1)
-                job += makeBlackTitle("MINIS", totalWidth: 24)
+                job += asciiLine("***MINIS***")
                 job += EscPos.feed(1)
             }
 
@@ -1977,7 +1977,7 @@ final class PrinterManager {
 
             if shouldShowMinisRow {
                 job += EscPos.feed(1)
-                job += makeBlackTitle("MINIS", totalWidth: 24)
+                job += asciiLine("***MINIS***")
                 job += EscPos.feed(1)
             }
 
@@ -2778,7 +2778,11 @@ extension PrinterManager {
         total: Double,
         diningMode: DiningMode,
         customerName: String?,
-        customerPhone: String?
+        customerPhone: String?,
+        // Whether this is a self-service (kiosk) order or an auto/app order
+        // that should display the ***MINIS*** row on the printed ticket.
+        // Regular cashpoint (staff-typed POS) orders default to false → no MINIS row.
+        showMinisRow: Bool = false
     ) async -> Bool {
 
         // ✅ tiny stagger between printers (reduces burst/connect collisions)
@@ -2803,9 +2807,13 @@ extension PrinterManager {
             )
         }
 
+        // ✅ source decides whether the ***MINIS*** row is printed inside makeJob().
+        //    .kiosk → shouldPrintMinisSourceRow returns true → MINIS row prints.
+        //    .delivery → false → no MINIS row.
+        //    Nothing else inside makeJob() depends on this source value.
         let order = KDSAdminOrder(
             id: orderNumber,
-            source: .kiosk,
+            source: showMinisRow ? .kiosk : .delivery,
             tableLabel: nil,
             bucket: .active,
             stage: .received,

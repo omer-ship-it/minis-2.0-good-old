@@ -2667,7 +2667,8 @@ if miniAppId == 12  || miniAppId == 13 {
                                 total: totalToSend,
                                 diningMode: dm,
                                 customerName: UserDefaults.standard.string(forKey: "userName"),
-                                customerPhone: UserDefaults.standard.string(forKey: "userPhone")
+                                customerPhone: UserDefaults.standard.string(forKey: "userPhone"),
+                                showMinisRow: true   // kiosk customer flow → show MINIS
                             )
 
                             if !ok {
@@ -2716,7 +2717,8 @@ if miniAppId == 12  || miniAppId == 13 {
                                 total: totalToSend,
                                 diningMode: dm,
                                 customerName: safeName,
-                                customerPhone: safePhone
+                                customerPhone: safePhone,
+                                showMinisRow: true   // kiosk customer flow → show MINIS
                             )
 
                             if !ok {
@@ -7479,16 +7481,8 @@ struct KioskWelcomeView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
 
-        // ✅ Place pill safely under top bars
-        .safeAreaInset(edge: .top) {
-            HStack {
-                Spacer()
-                languagePill
-            }
-            .padding(.horizontal, 16)
-            .padding(.top, 10)
-            .padding(.bottom, 6)
-        }
+        // Language pill hidden from welcome view per request.
+        // (Original `.safeAreaInset(edge: .top) { … languagePill … }` removed.)
 
        // .toolbar(.hidden, for: .navigationBar)
         //.navigationBarHidden(true)
@@ -7533,6 +7527,12 @@ struct KioskWelcomeView: View {
     // MARK: - Actions
 
     private func choose(intent: String) {
+        // ✅ Set didShowWelcome BEFORE checkoutIntentRaw so the parent gate
+        //    (`!didShowWelcome && checkoutIntentRaw.isEmpty`) can never re-fire
+        //    while a rapid-tap still has the welcome sheet visible. Otherwise
+        //    a fast double-tap can race the dismiss and leave the welcome view
+        //    stuck on screen.
+        didShowWelcome = true
         checkoutIntentRaw = intent
 
         // ✅ Keep stored labels aligned with language
@@ -7542,7 +7542,6 @@ struct KioskWelcomeView: View {
             serviceModeLabel = (intent == "sit") ? "Dine-in" : "Takeaway"
         }
 
-        didShowWelcome = true
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         dismiss()
     }

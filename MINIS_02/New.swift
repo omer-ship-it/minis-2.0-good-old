@@ -1942,7 +1942,8 @@ struct MenuPrototypeView: View {
                     isPad: true,
                     isRtl: effectiveIsRtl,
 
-                    languagePill: languagePillView,
+                    // Hide language pill while welcome overlay is up.
+                    languagePill: showWelcome ? AnyView(EmptyView()) : languagePillView,
 
                     contextTitle: contextTitle,
                     contextValue: contextValue,
