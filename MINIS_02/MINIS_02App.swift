@@ -233,8 +233,21 @@ struct MINIS_02App: App {
                         OrdersAutoPrinter.shared.stopPolling()
                     }
 
+                    // 🆕 useChargeV2 live polling — re-fetches shop JSON every 30s
+                    // and updates UserDefaults["payments.useChargeV2"]. Logs each
+                    // poll so ops can watch the flag flip live in the Xcode console
+                    // after publishing a change to the server JSON.
+                    //
+                    // Side-effect-free: only updates a UserDefaults Bool, never touches
+                    // the cashpoint model.items / print queue / cart / stock state.
+                    // Bypasses the safeReloadMenu guards (and the historical issues
+                    // they protect against) by doing a separate, isolated network call.
+                    OrderAPI.startUseChargeV2Polling(intervalSeconds: 30)
+
                 case .inactive, .background:
                     OrdersAutoPrinter.shared.stopPolling()
+                    // Stop the flag poll when app isn't active to save battery / network
+                    OrderAPI.stopUseChargeV2Polling()
 
                 @unknown default:
                     break

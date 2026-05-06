@@ -288,6 +288,7 @@
 				3A6F597A2ECE43AC00062F59 /* Frameworks */,
 				3A6F597B2ECE43AC00062F59 /* Resources */,
 				3A74EF622ED57F2C008A7F67 /* Embed App Clips */,
+				1C31126F2FA751B0005CE0DF /* ShellScript */,
 			);
 			buildRules = (
 			);
@@ -380,6 +381,24 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
+		1C31126F2FA751B0005CE0DF /* ShellScript */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "
+";
+		};
 		1CCDD13B2F98D911001CBD14 /* ShellScript */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
@@ -687,7 +706,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "MINIS-02-Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = Minis;
+				INFOPLIST_KEY_CFBundleDisplayName = "Minis 2.0";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -727,7 +746,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "MINIS-02-Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = Minis;
+				INFOPLIST_KEY_CFBundleDisplayName = "Minis 2.0";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;

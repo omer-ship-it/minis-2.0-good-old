@@ -2272,7 +2272,7 @@ private struct EODStepTipsView: View {
 
                     VStack(spacing: 10) {
                         HStack(spacing: 12) {
-                            Text("מזומן מערכת (כולל טיפ)")
+                            Text("מזומן מערכת")
                                 .font(.system(size: 15, weight: .semibold))
                                 .frame(maxWidth: .infinity, alignment: .trailing)
 
@@ -2413,7 +2413,7 @@ private struct EODStepTipsView: View {
 
         do {
             let x = try await XReportAPI.fetch(miniAppId: miniAppId)
-            cashSystemInclTip = x.agg.cashTotal + x.agg.cashTipsTotal
+            cashSystemInclTip = x.agg.cashTotal
         } catch {
             let ns = error as NSError
 
@@ -2571,7 +2571,7 @@ private struct EODStepPreviewView: View {
                                     .font(.system(size: 14, weight: .semibold))
                                     .foregroundColor(.secondary)
 
-                line("מזומן מערכת (כולל טיפ)", v: formatILS(cashSystemInclTip))
+                line("מזומן מערכת", v: formatILS(cashSystemInclTip))
                 line("נספר במגירה", v: formatILS(countedCash))
                 line("פער", v: formatILS(gap), bad: !gapIsZero && !updateMatchesGap)
                 line("עדכון מזומן", v: formatILS(cashUpdate))

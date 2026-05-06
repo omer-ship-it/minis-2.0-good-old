@@ -1869,7 +1869,7 @@ final class PrinterManager {
                 job += EscPos.feed(1)
                 job += EscPos.align(1)
                 job += EscPos.style(doubleHeight: true, doubleWidth: true, bold: true)
-                job += asciiLine("MINIS")
+                job += asciiLine("***MINIS***")
                 job += EscPos.feed(1)
             }
 
@@ -1930,7 +1930,7 @@ final class PrinterManager {
                 job += EscPos.feed(1)
                 job += EscPos.align(1)
                 job += EscPos.style(doubleHeight: true, doubleWidth: true, bold: true)
-                job += asciiLine("MINIS")
+                job += asciiLine("***MINIS***")
                 job += EscPos.feed(1)
             }
 
@@ -2726,7 +2726,11 @@ extension PrinterManager {
         total: Double,
         diningMode: DiningMode,
         customerName: String?,
-        customerPhone: String?
+        customerPhone: String?,
+        // Whether this is a self-service (kiosk) order or an auto/app order
+        // that should display the ***MINIS*** row on the printed ticket.
+        // Regular cashpoint (staff-typed POS) orders default to false → no MINIS row.
+        showMinisRow: Bool = false
     ) async -> Bool {
 
         // ✅ tiny stagger between printers (reduces burst/connect collisions)
@@ -2751,9 +2755,13 @@ extension PrinterManager {
             )
         }
 
+        // ✅ source decides whether the ***MINIS*** row is printed inside makeJob().
+        //    .kiosk → shouldPrintMinisSourceRow returns true → MINIS row prints.
+        //    .delivery → false → no MINIS row.
+        //    Nothing else inside makeJob() depends on this source value.
         let order = KDSAdminOrder(
             id: orderNumber,
-            source: .kiosk,
+            source: showMinisRow ? .kiosk : .delivery,
             tableLabel: nil,
             bucket: .active,
             stage: .received,
@@ -2863,9 +2871,18 @@ extension PrinterManager {
         if !barOk { failed.append("Bar") }
 
         if !failed.isEmpty {
+            // 🆕 2026-05-05: log WHICH stations failed so we can diagnose why
+            // PrinterManager.printCashPointSplit returns false. Previously the
+            // failed[] array was computed but discarded — caller (OrdersAutoPrinter)
+            // saw only a Bool and had no idea which printer to investigate or retry.
+            // Tag with [printCashPointSplit] for easy filter alongside [items-load]
+            // and [useChargeV2] in the console.
+            let _ts = ISO8601DateFormatter().string(from: Date())
+          ///  print("[printCashPointSplit] ❌ orderNumber=\(orderNumber) failed_stations=\(failed.joined(separator: ",")) ts=\(_ts)")
             return false
         }
 
+     //   print("[printCashPointSplit] ✅ orderNumber=\(orderNumber) all_stations_ok ts=\(ISO8601DateFormatter().string(from: Date()))")
         return true
     }
     

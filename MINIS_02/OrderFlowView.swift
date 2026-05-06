@@ -362,6 +362,23 @@ struct OrderFlowView: View {
         name.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    // ✅ Name fallback chain for any /submitOrder call:
+    //    Live `name` state can be wiped between user input and submit (e.g. by a
+    //    rerender that runs hydrateDraftFromStorageIfNeeded, or by a successful
+    //    payment success handler clearing it). Without this fallback, the order
+    //    submitted to /submitOrder ends up with `name=null` even though the
+    //    cashier typed it correctly. Fall back to `posSavedName` (AppStorage),
+    //    which is the durable persisted copy.
+    private var resolvedNameForSubmit: String? {
+        let live = cleanName
+        let saved = posSavedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolved: String? = !live.isEmpty ? live : (saved.isEmpty ? nil : saved)
+        // 🆕 DIAGNOSTIC: log every call so we can trace name flow across submit paths
+        let _ts = ISO8601DateFormatter().string(from: Date())
+        print("[resolvedNameForSubmit] live='\(live)' posSavedName='\(saved)' → resolved='\(resolved ?? "nil")' ts=\(_ts)")
+        return resolved
+    }
+
     private var nameValid: Bool {
         cleanName.count >= 2
     }
@@ -468,7 +485,7 @@ struct OrderFlowView: View {
     @MainActor
     private func commitPartialSnapshot() {
         let phoneParam = phoneDigits.trimmedIsEmpty ? nil : phoneDigits
-        let nameParam  = cleanName.isEmpty ? nil : cleanName
+        let nameParam  = resolvedNameForSubmit   // ✅ falls back to posSavedName if live name was wiped
         let summary    = buildPaymentSummary()
         let existingOrderId = submitOrderIdForCurrentFlow
 
@@ -519,7 +536,7 @@ struct OrderFlowView: View {
 
         clearPartialPaySnapshot()
         let phoneParam = phoneDigits.trimmedIsEmpty ? nil : phoneDigits
-        let nameParam  = cleanName.isEmpty ? nil : cleanName
+        let nameParam  = resolvedNameForSubmit   // ✅ falls back to posSavedName if live name was wiped
 
         // ✅ persist BEFORE submit
         if let n = nameParam { posSavedName = n }
@@ -564,7 +581,7 @@ struct OrderFlowView: View {
         }
 
         let phoneParam = phoneDigits.trimmedIsEmpty ? nil : phoneDigits
-        let nameParam  = cleanName.isEmpty ? nil : cleanName
+        let nameParam  = resolvedNameForSubmit   // ✅ falls back to posSavedName if live name was wiped
 
         // ✅ Decide "due now" based on mode (single source of truth)
         let dueNow: Double = {
@@ -909,8 +926,14 @@ struct OrderFlowView: View {
     let skipServiceStep: Bool
     let onServiceChosen: () -> Void
     let startAtCharge: Bool
-    
-    
+    /// 🆕 When this OrderFlowView is being opened to resume an existing unpaid
+    /// order (cashier tapped a row in the unpaid orders list, or returned from
+    /// pay-later → תשלום), this carries that prior orderId. The submit path
+    /// prefers this over the new start-safe orderId so the second submit
+    /// UPDATES the existing row (status 0→1) instead of creating a duplicate.
+    /// Defaults to nil so existing call sites keep current behavior.
+    let resumedOrderId: Int?
+
     private var isOrderFullyPaid: Bool {
         remainingToPay <= 0.1
     }
@@ -991,9 +1014,21 @@ struct OrderFlowView: View {
 
     @MainActor
     private var submitOrderIdForCurrentFlow: Int? {
-        currentStartSafeOrderId
+        // 🆕 Prefer resumedOrderId when set — this means cashier reopened an
+        // existing unpaid order (e.g., pay-later → return → תשלום, or unpaid
+        // orders list → resume). Submitting under the existing orderId UPDATES
+        // that row (status 0→1, method unpaid→cash) instead of creating a
+        // duplicate row from start-safe's freshly-allocated orderId. Also
+        // preserves the customer name already on the existing row.
+        let resolved =
+            resumedOrderId
+            ?? currentStartSafeOrderId
             ?? PaymentAttemptStore.shared.activeAttempt?.orderId
             ?? ZCreditPaymentHandler.shared.lastReturnedOrderId
+        if let r = resumedOrderId, let s = currentStartSafeOrderId, r != s {
+            print("[submitOrderIdForCurrentFlow] preferring resumedOrderId=\(r) over currentStartSafeOrderId=\(s) — will UPDATE existing row instead of duplicating")
+        }
+        return resolved
     }
 
     @MainActor
@@ -1009,12 +1044,12 @@ struct OrderFlowView: View {
     @MainActor
     private func persistReturnedOrderIdIfNeeded(_ result: ZCreditResult) {
         guard let orderId = result.orderId, orderId > 0 else {
-            print("[OrderFlow] ⚠️ start-safe returned NO orderId (result.orderId=\(result.orderId.map(String.init) ?? "nil"), status=\(result.status), path=\(result.rawPath ?? "nil"))")
+            print("[OrderFlow] ⚠️ /charge returned NO orderId (result.orderId=\(result.orderId.map(String.init) ?? "nil"), status=\(result.status), path=\(result.rawPath ?? "nil"))")
             return
         }
         currentStartSafeOrderId = orderId
         PaymentAttemptStore.shared.updateOrderId(orderId)
-        print("[OrderFlow] start-safe returned orderId=\(orderId)")
+        print("[OrderFlow] /charge returned orderId=\(orderId)")
     }
 
     @MainActor
@@ -1234,7 +1269,20 @@ struct OrderFlowView: View {
         }
     }
 
-    private let terminalResponseTimeoutNs: UInt64 = 45_000_000_000
+    // Higher-level verify-replay timeout: how long the iPad stays in the .charging
+    // state before forcibly transitioning to .failed and showing paymentTimeoutMessage
+    // ("החיוב לא הושלם. נסה שוב.").
+    //
+    // 2026-05-03: bumped from 45s → 120s after a production incident where the
+    // server took ~45s to relay a successful Z-Credit charge back to the iPad. The
+    // 45s ceiling fired BEFORE our network-level paymentTimeoutSeconds (FastlaneModel.swift:2091)
+    // and BEFORE the URLRequest.timeoutInterval (FastlaneModel.swift:2572), making
+    // the network bumps useless until this one was raised too.
+    //
+    // All three iPad-side ceilings now align at 120s (2× terminal's 60s max),
+    // ensuring the iPad never gives up on a transaction that is still completing
+    // legitimately on the server / pinpad side.
+    private let terminalResponseTimeoutNs: UInt64 = 120_000_000_000
 
     @MainActor
     private func scheduleVerifyReplay(for attempt: PaymentAttempt, pending: PendingCardReconcile) {
@@ -1510,7 +1558,8 @@ struct OrderFlowView: View {
         skipServiceStep: Bool,
         onServiceChosen: @escaping () -> Void,
         startAtCharge: Bool,
-        onPartialUpdate: @escaping (String?, String?, OrderAPI.PaymentSummary, Double, Double, Int?) -> Void = { _,_,_,_,_,_ in }
+        onPartialUpdate: @escaping (String?, String?, OrderAPI.PaymentSummary, Double, Double, Int?) -> Void = { _,_,_,_,_,_ in },
+        resumedOrderId: Int? = nil
     ) {
         self.onSendToKitchen = onSendToKitchen
         self.total = total
@@ -1526,6 +1575,7 @@ struct OrderFlowView: View {
         self.onServiceChosen = onServiceChosen
         self.startAtCharge = startAtCharge
         self.onPartialUpdate = onPartialUpdate
+        self.resumedOrderId = resumedOrderId
     }
     @ViewBuilder
     private func billImageButton(amount: Int, imageURL: String) -> some View {
@@ -1763,7 +1813,16 @@ struct OrderFlowView: View {
                 if isMini13 { nameKbMode = NameKbMode(rawValue: nameKbMode13Raw) ?? .he }
 
                 if cashPointMode {
-                    clearDraftContact()
+                    // 🆕 Skip the wipe when resuming an existing order. A fresh
+                    // .onAppear with didInit=false fires every time the cashier
+                    // returns to OrderFlowView for a re-charge attempt; without
+                    // this guard, clearDraftContact() blanks posSavedName and
+                    // the next submit falls back to "Customer".
+                    if resumedOrderId == nil {
+                        clearDraftContact()
+                    } else {
+                        print("[OrderFlowView.onAppear] ⛔ skipping clearDraftContact — resumedOrderId=\(resumedOrderId!) (preserving posSavedName='\(posSavedName)')")
+                    }
                 } else {
                     name = ""
                     phoneDigits = ""
@@ -2692,16 +2751,12 @@ struct OrderFlowView: View {
                                     }
                                 }
 
-                                if cardPaymentState == .declined || cardPaymentState == .failed {
-                                    Button { retryPayment() } label: {
-                                        Text(isRtl ? "נסה שוב" : "Try again")
-                                            .font(kioskFont(18, weight: .bold))
-                                            .foregroundColor(.white)
-                                            .frame(width: 240, height: 50)
-                                            .background(MenuTheme.buttonBackground)
-                                            .clipShape(RoundedRectangle(cornerRadius: 18))
-                                    }
-                                }
+                                // 🗑️ Removed brand-green "נסה שוב" duplicate (2026-05-03):
+                                // The white "תשלום באשראי" button below (line ~2733) already
+                                // swaps its label to "נסה שוב" when cardPaymentState is .declined
+                                // or .failed (see line ~2741), so showing both produced two
+                                // visually competing retry CTAs on the charge step. Keep only
+                                // the white one — same action (retryPayment), single CTA.
 
                             }
                             .padding(.horizontal, 40)
@@ -2780,17 +2835,44 @@ struct OrderFlowView: View {
             }
         }
         .onChange(of: networkMonitor.isOnline) { isOnline in
-            guard !isOnline else { return }
+            guard !isOnline else {
+                // Network came BACK while a charge was in flight.
+                // The pinpad/Z-Credit transaction kept running independently of the
+                // iPad — it has its own 60s lifetime and will resolve on the server
+                // either way. Do NOT re-fire /charge here. The existing in-flight
+                // request (if any) will complete on its own; if it timed out at the
+                // network layer, the iPad's natural retry path (terminalResponseTimeoutNs)
+                // will surface a clean "Try again" UX where the user can decide.
+                //
+                // TODO (post-crunch): when network returns mid-charge, automatically
+                // call a server-side status endpoint with the existing orderId to
+                // confirm whether Z-Credit approved the transaction during the
+                // disconnect window. If approved → mark .approved + skip re-charge.
+                // If not → safe to retry. This avoids double-charge on flaky wifi.
+                return
+            }
             guard cardPaymentState == .charging || (cardPaymentState == .verifying && isPaying) else { return }
-            // Network dropped during active charge → stop ring, show "Try again"
-            print("[Cancel] from networkDrop")
-            if !AppConfig.isDemoMode { ZCreditPaymentHandler.shared.cancelCurrent() }
-            resetPaymentRequestTracking()
-            setFreshRetryArmed(false, reason: "network_drop")
-            cardPaymentState = .failed
+
+            // 🟡 NETWORK DROPPED MID-CHARGE — DO NOT CANCEL.
+            //
+            // 2026-05-03 fix: previously this called ZCreditPaymentHandler.cancelCurrent()
+            // and forced state to .failed. That was correct for /start-safe semantics
+            // (2-phase commit) but actively HARMFUL for /charge: the pinpad/Z-Credit
+            // transaction completes regardless of iPad connectivity, so cancelling
+            // from the iPad side leaves the customer charged with no order record,
+            // and the auto-retry on network recovery fires a brand new /charge with
+            // a NEW orderId — risking a double charge.
+            //
+            // New behavior: keep cardPaymentState as .charging (the pinpad is still
+            // working), keep the orderId/idempotency context, and surface a soft
+            // "no internet" banner via payError so the cashier sees something is
+            // up. The existing 120s ceilings (paymentTimeoutSeconds, URLRequest
+            // timeout, terminalResponseTimeoutNs) will surface a clean failure
+            // path if the network never comes back.
+            print("[NetworkDrop] in-flight charge — keeping .charging state, no cancel, no retry")
             payError = isRtl
-                ? "אין חיבור לאינטרנט. בדוק את החיבור ונסה שוב."
-                : "No internet connection. Check your connection and try again."
+                ? "אין אינטרנט — ממתינים לחיבור (העסקה ממשיכה במסוף)"
+                : "No internet — waiting for connection (transaction continues at the terminal)"
         }
     }
 
@@ -3477,7 +3559,10 @@ struct OrderFlowView: View {
         }
         ZCreditPaymentHandler.shared.pay(
             amount: amt,
-            orderId: nil,
+            // 🆕 Pass resumedOrderId so /charge attaches to the existing open
+            // order (from a prior pay-later submit) instead of creating a new
+            // orderId on every retry. nil for fresh orders → server allocates.
+            orderId: resumedOrderId,
             ticketId: currentOrderReference(),
             idempotencyKey: paymentAttempt.idempotencyKey
         ) { result in
@@ -3590,8 +3675,7 @@ struct OrderFlowView: View {
     @MainActor
     private func playSuccessAndCompleteOrder() {
         let phoneParam = phoneDigits.trimmedIsEmpty ? nil : phoneDigits
-        let nameClean  = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let nameParam  = nameClean.isEmpty ? nil : nameClean
+        let nameParam  = resolvedNameForSubmit   // ✅ falls back to posSavedName if live name was wiped
         let summary    = forcedCompletionPaymentSummary ?? buildPaymentSummary()
         let existingOrderId = submitOrderIdForCurrentFlow
 
@@ -5515,12 +5599,7 @@ struct OrderFlowView: View {
                 .multilineTextAlignment(.center)
                 .lineSpacing(8)
 
-            DotQRView(
-                text: qrURL,
-                overlayLabel: "MINI",
-                logoKnockoutFraction: 0.28
-            )
-            .frame(width: 220, height: 220)
+           
 
             Button {
                 cancelConfirmationAutoReset()
@@ -5601,7 +5680,7 @@ struct OrderFlowView: View {
 
         // 🔧 DEBUG: call onCompleted as if order finished
         let phoneParam = phoneDigits.trimmedIsEmpty ? nil : phoneDigits
-        let nameParam  = name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : name
+        let nameParam  = resolvedNameForSubmit   // ✅ falls back to posSavedName if live name was wiped
 
         let summary = buildPaymentSummary()
 

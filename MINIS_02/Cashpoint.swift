@@ -1235,12 +1235,34 @@ struct CashPointView: View {
     }
     
     private func safeReloadMenu(reason: String) {
-        if showOrderFlow { return }
-        if !basket.isEmpty { return }
-        if printInFlight { return }
-        if isStockEditMode { return }
-        if stockCommitInFlight { return }
-        if !dirtyStockIds.isEmpty { return }
+        // 🆕 Diagnostic prints so we can debug why a refresh might be skipped.
+        // Tag: [safeReloadMenu]. Filter alongside [items-load] and [useChargeV2].
+        let _ts = ISO8601DateFormatter().string(from: Date())
+        if showOrderFlow {
+            print("[safeReloadMenu] ⛔ skip reason=\(reason) blockedBy=showOrderFlow ts=\(_ts)")
+            return
+        }
+        if !basket.isEmpty {
+            print("[safeReloadMenu] ⛔ skip reason=\(reason) blockedBy=basketNotEmpty(count=\(basket.count)) ts=\(_ts)")
+            return
+        }
+        if printInFlight {
+            print("[safeReloadMenu] ⛔ skip reason=\(reason) blockedBy=printInFlight ts=\(_ts)")
+            return
+        }
+        if isStockEditMode {
+            print("[safeReloadMenu] ⛔ skip reason=\(reason) blockedBy=isStockEditMode ts=\(_ts)")
+            return
+        }
+        if stockCommitInFlight {
+            print("[safeReloadMenu] ⛔ skip reason=\(reason) blockedBy=stockCommitInFlight ts=\(_ts)")
+            return
+        }
+        if !dirtyStockIds.isEmpty {
+            print("[safeReloadMenu] ⛔ skip reason=\(reason) blockedBy=dirtyStockIds(count=\(dirtyStockIds.count)) ts=\(_ts)")
+            return
+        }
+        print("[safeReloadMenu] ✅ allow reason=\(reason) → api.load(skipCache:true) ts=\(_ts)")
         api.load(skipCache: true)
     }
 
@@ -4395,7 +4417,7 @@ struct CashPointView: View {
 
             // 🔒 HEADER (fixed)
             HStack {
-                Text("קפה יהושע")
+                Text("קופה")
                     .font(.system(size: 22, weight: .bold))
 
                 Spacer()
@@ -5920,11 +5942,14 @@ struct CashPointView: View {
                 lineSessionTime.removeAll()
 
                 // ✅ Use cached menu first, then network if available
+                let _onAppearTs = ISO8601DateFormatter().string(from: Date())
                 if api.items.isEmpty {
+                    print("[CashpointView] 🟢 onAppear: api.items EMPTY → api.load(skipCache:false) ts=\(_onAppearTs)")
                     api.load(skipCache: false)   // allow UserDefaults/file cache
                 } else {
                     // Already have items (e.g. returning to view) – just try a network refresh
-                    safeReloadMenu(reason: "toggle isOpen")
+                    print("[CashpointView] 🟡 onAppear: api.items HAS \(api.items.count) items → safeReloadMenu ts=\(_onAppearTs)")
+                    safeReloadMenu(reason: "cashpoint onAppear")
                 }
             }
             .onChange(of: focusedStockProductId) { newVal in
@@ -6027,7 +6052,7 @@ struct CashPointView: View {
                 ReportPreviewSheet(
                     isRtl: isRtl,
                     type: type,
-                    shopId: Int(UserDefaults.standard.string(forKey: "shopId") ?? "12") ?? 12,
+                    shopId: resolvedMiniAppId,
                     initialData: data,
                     restoreMode: isRestore,
                     restoreDate: $zRestoreDate,
@@ -6188,7 +6213,38 @@ struct CashPointView: View {
             }
             .fullScreenCover(isPresented: $showOrderFlow) {
                 let safeNameForPrint: String = resolvedCustomerNameForPrint()
-                OrderFlowView(
+                // 🆕 2026-05-06 production-safe restore: when reopening OrderFlowView
+                // for an existing unpaid order (Pay Later → תשלום), the previous
+                // pay-later submit's success handler wiped posSavedName to "".
+                // CashpointView's basket UI still shows the customer name (it reads
+                // from the saved order metadata), but OrderFlowView's @AppStorage-
+                // backed posSavedName is empty. resolvedNameForSubmit then returns
+                // nil, OrderAPI.submitOrder falls through to its "Customer" default,
+                // and the new order is submitted with name="Customer".
+                //
+                // Fix: restore posSavedName from the saved order's name BEFORE the
+                // OrderFlowView's @AppStorage reads it. Strict guards:
+                //   • Only when unpaidOrderId != nil (skip fresh orders entirely)
+                //   • Only when posSavedName is currently empty (never overwrite a
+                //     typed name)
+                //   • Exclude the "שם לקוח" printer placeholder
+                // Easy revert: delete this block.
+                let _restoreTs = ISO8601DateFormatter().string(from: Date())
+                let _currentPos = posSavedName.trimmingCharacters(in: .whitespacesAndNewlines)
+                let _restored = safeNameForPrint
+                    .replacingOccurrences(of: "שם לקוח", with: "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                print("[posSavedName-restore] unpaidOrderId=\(unpaidOrderId.map(String.init) ?? "nil") currentPos='\(_currentPos)' restored='\(_restored)' safeNameForPrint='\(safeNameForPrint)' ts=\(_restoreTs)")
+
+                if unpaidOrderId != nil
+                    && _currentPos.isEmpty
+                    && !_restored.isEmpty {
+                    posSavedName = _restored
+                    print("[posSavedName-restore] ✅ wrote posSavedName='\(_restored)' ts=\(_restoreTs)")
+                } else {
+                    print("[posSavedName-restore] ⛔ skip — unpaidOrderId=\(unpaidOrderId.map(String.init) ?? "nil") currentPosEmpty=\(_currentPos.isEmpty) restoredEmpty=\(_restored.isEmpty) ts=\(_restoreTs)")
+                }
+                return OrderFlowView(
                     onSendToKitchen: {
                         // 🔥 1. PRINT ONLY ONCE PER ORDER
                         guard !hasPrintedFromSwipe else { return }
@@ -6362,7 +6418,13 @@ struct CashPointView: View {
                     onServiceChosen: {
                         hasChosenServiceMode = true
                     },
-                    startAtCharge: isPayLaterMode
+                    startAtCharge: isPayLaterMode,
+                    // 🆕 Thread the resumed orderId so submitOrderIdForCurrentFlow
+                    // prefers it over the new start-safe orderId. Without this,
+                    // a re-attempted charge on an existing unpaid order created
+                    // a duplicate row (orphan status=0 + new status=1) AND lost
+                    // the customer name. See: order pair 55274/55275.
+                    resumedOrderId: unpaidOrderId
                 )
                 .environment(\.layoutDirection, isRtl ? .rightToLeft : .rightToLeft)
             }
@@ -6961,11 +7023,21 @@ struct CashPointView: View {
             DispatchQueue.main.async {
                 switch result {
                 case .success(let serverOrderId):
-                    clearSavedContactAndService()
+                    // 🆕 FIX: Only wipe saved contact (posSavedName/posSavedPhone) on
+                    // terminal (non-pay-later) submits. Pay-later submits leave
+                    // OrderFlowView open for additional submits in the same session
+                    // (e.g., return to order → תשלום, or cancel card → cash). Wiping
+                    // prematurely caused subsequent submits to lose the customer name
+                    // and fall back to FastlaneModel.swift's "Customer" default.
+                    let _wipeTs = ISO8601DateFormatter().string(from: Date())
+                    print("[posSavedName-WIPE] cashpoint completeOrder.success orderId=\(serverOrderId) prevName='\(posSavedName)' isPayLater=\(isPayLaterChoice) ts=\(_wipeTs)")
+                    if !isPayLaterChoice {
+                        clearSavedContactAndService()
+                    } else {
+                        print("[posSavedName-WIPE] ⛔ skipped clearSavedContactAndService (isPayLater=true) — keeping name='\(posSavedName)' for next submit")
+                    }
 
                     applyOrderToLocalStock(entries: entriesArray)
-                    posSavedName  = ""
-                    posSavedPhone = ""
 
                     let snapshot = CashOrderSnapshot(
                         orderNumber: ticketNumber,
@@ -8453,24 +8525,27 @@ struct CashPointView: View {
                 }
             }
             .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
-            .task {
+            .onAppear {
+                print("📊 [ReportSheet] onAppear type=\(type) shopId=\(shopId) restoreMode=\(restoreMode)")
                 if type == .z && restoreMode {
-                    await model.load(type: type, shopId: shopId, for: queryDate)
-                } else {
-                    await model.load(type: type, shopId: shopId, for: nil)
+                    if Calendar.current.isDateInToday(restoreDate) || restoreDate > Date() {
+                        restoreDate = yesterday
+                    }
+                }
+                Task {
+                    print("📊 [ReportSheet] Task started, calling model.load")
+                    if type == .z && restoreMode {
+                        await model.load(type: type, shopId: shopId, for: queryDate)
+                    } else {
+                        await model.load(type: type, shopId: shopId, for: nil)
+                    }
+                    print("📊 [ReportSheet] model.load done — data=\(model.data != nil) error=\(model.loadError ?? "nil")")
                 }
             }
             .onChange(of: restoreDate) { _ in
                 guard type == .z && restoreMode else { return }
                 Task {
                     await model.load(type: type, shopId: shopId, for: queryDate)
-                }
-            }
-            .onAppear {
-                if type == .z && restoreMode {
-                    if Calendar.current.isDateInToday(restoreDate) || restoreDate > Date() {
-                        restoreDate = yesterday
-                    }
                 }
             }
         }
@@ -8516,8 +8591,8 @@ struct CashPointView: View {
         @ViewBuilder
         private func rtlHeader(_ cols: [String]) -> some View {
             HStack(spacing: 8) {
-                ForEach(cols, id: \.self) { col in
-                    Text(col).font(monoBold).frame(maxWidth: .infinity)
+                ForEach(cols.indices, id: \.self) { i in
+                    Text(cols[i]).font(monoBold).frame(maxWidth: .infinity)
                 }
             }
         }
@@ -8525,8 +8600,8 @@ struct CashPointView: View {
         @ViewBuilder
         private func rtlRow(_ cols: [String]) -> some View {
             HStack(spacing: 8) {
-                ForEach(cols, id: \.self) { col in
-                    Text(col).font(mono).frame(maxWidth: .infinity)
+                ForEach(cols.indices, id: \.self) { i in
+                    Text(cols[i]).font(mono).frame(maxWidth: .infinity)
                 }
             }
         }

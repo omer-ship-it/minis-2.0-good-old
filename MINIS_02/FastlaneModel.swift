@@ -83,6 +83,15 @@ final class MenuApiModel: ObservableObject {
         struct Mini: Decodable {
             let productsLastUpdate: String?
             let isOpen: Bool?
+            let settings: Settings?
+
+            struct Settings: Decodable {
+                let payments: Payments?
+
+                struct Payments: Decodable {
+                    let useChargeV2: Bool?
+                }
+            }
         }
         let mini: Mini?
     }
@@ -103,6 +112,14 @@ final class MenuApiModel: ObservableObject {
             errorMessage = "No shop selected"
             return
         }
+
+        // 🆕 Debug log so ops can watch the items/stock JSON refresh sequence in the
+        // console alongside the [useChargeV2-poll] timer logs. Tagged distinctly so
+        // they can be filtered separately. Event-driven (not timer-based) — fires
+        // only when something explicitly calls load() (view onAppear, manual refresh,
+        // toggle isOpen, after a product/stock change, etc.).
+        let _loadTs = ISO8601DateFormatter().string(from: Date())
+        print("[items-load] 🔄 triggered  shopId=\(shopId)  skipCache=\(skipCache)  ts=\(_loadTs)")
 
         let baseURL = "https://minis.studio/json/\(shopId).json"
         let t = Int(Date().timeIntervalSince1970)
@@ -148,6 +165,38 @@ final class MenuApiModel: ObservableObject {
         func decodeIsOpen(_ data: Data) -> Bool? {
             let dec = JSONDecoder()
             return (try? dec.decode(ProductsLastUpdateProbe.self, from: data))?.mini?.isOpen
+        }
+
+        // 🆕 Server-driven /charge toggle (read from mini.settings.payments.useChargeV2)
+        // Persists to UserDefaults so the static OrderAPI.submitOrder helper can read it
+        // synchronously without re-decoding the JSON each time.
+        //
+        // Live debug logging: every parse logs the current value (regardless of whether
+        // it changed). Lets ops watch the console after publishing a JSON change to see
+        // when the iPad picks it up. Filter logs by "[useChargeV2]" to isolate.
+        func decodeAndPersistUseChargeV2(_ data: Data, source: String) {
+            let dec = JSONDecoder()
+            let parsed = (try? dec.decode(ProductsLastUpdateProbe.self, from: data))?
+                .mini?.settings?.payments?.useChargeV2
+            let prev = defaults.bool(forKey: "payments.useChargeV2")
+            let ts = ISO8601DateFormatter().string(from: Date())
+
+            if let v2 = parsed {
+                defaults.set(v2, forKey: "payments.useChargeV2")
+                if prev != v2 {
+                    print("[useChargeV2] 🔄 CHANGED \(prev) → \(v2)  source=\(source)  ts=\(ts)")
+                } else {
+                    print("[useChargeV2] ✓ unchanged=\(v2)  source=\(source)  ts=\(ts)")
+                }
+            } else {
+                // Field absent or null in JSON — keep last known value, log it
+                print("[useChargeV2] ⚠️ field absent in JSON, keeping prev=\(prev)  source=\(source)  ts=\(ts)")
+            }
+        }
+
+        // Apply to any cached data we already have on disk
+        if let cd = cachedData {
+            decodeAndPersistUseChargeV2(cd, source: "cache")
         }
 
         let cachedTs = defaults.string(forKey: cacheTsKey) ?? (cachedData.flatMap(decodeProductsLastUpdate) ?? "")
@@ -219,6 +268,9 @@ final class MenuApiModel: ObservableObject {
                 if let ts = decodeProductsLastUpdate(data), !ts.isEmpty {
                     defaults.set(ts, forKey: cacheTsKey)
                 }
+
+                // 🆕 Persist server-driven /charge toggle from fresh JSON
+                decodeAndPersistUseChargeV2(data, source: "fresh-fetch")
 
                 Task { await self.parseAndApply(data: data) }
             }.resume()
@@ -1464,6 +1516,93 @@ final class AppStoreSheetPresenter {
 enum OrderAPI {
     struct SubmitError: Error { let message: String }
 
+    // MARK: - useChargeV2 polling (debug visibility into the server-driven flag)
+    //
+    // Polls the published shop JSON every N seconds while the app is active and
+    // updates UserDefaults["payments.useChargeV2"]. Logs every poll so ops can
+    // watch the flag live in the console after publishing a JSON change.
+    //
+    // Wire from MINIS_02App.swift's scenePhase .active / .inactive cases.
+    private static var useChargeV2PollTimer: Timer?
+
+    static func startUseChargeV2Polling(intervalSeconds: TimeInterval = 20) {
+        stopUseChargeV2Polling()
+        // Fire once immediately so the first log appears right after activation
+        pollUseChargeV2Once(reason: "active-start")
+        useChargeV2PollTimer = Timer.scheduledTimer(withTimeInterval: intervalSeconds, repeats: true) { _ in
+            pollUseChargeV2Once(reason: "timer-tick")
+        }
+        print("[useChargeV2-poll] ▶️ started — interval=\(Int(intervalSeconds))s")
+    }
+
+    static func stopUseChargeV2Polling() {
+        guard useChargeV2PollTimer != nil else { return }
+        useChargeV2PollTimer?.invalidate()
+        useChargeV2PollTimer = nil
+        print("[useChargeV2-poll] ⏸ stopped")
+    }
+
+    static func pollUseChargeV2Once(reason: String) {
+        let defaults = UserDefaults.standard
+        let miniAppIdFromDefaults = defaults.integer(forKey: "miniAppId")
+        let storedShopId = defaults.string(forKey: "shopId") ?? ""
+        let shopId: String
+        if miniAppIdFromDefaults > 0 {
+            shopId = String(miniAppIdFromDefaults)
+        } else if !storedShopId.isEmpty {
+            shopId = storedShopId
+        } else {
+            return // nothing to poll
+        }
+
+        let t = Int(Date().timeIntervalSince1970)
+        guard let url = URL(string: "https://minis.studio/json/\(shopId).json?poll=\(t)") else { return }
+
+        var req = URLRequest(url: url, timeoutInterval: 8)
+        req.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+
+        URLSession.shared.dataTask(with: req) { data, _, err in
+            let ts = ISO8601DateFormatter().string(from: Date())
+            if let err = err {
+                print("[useChargeV2-poll] ❌ network error: \(err.localizedDescription)  reason=\(reason)  ts=\(ts)")
+                return
+            }
+            guard let data else {
+                print("[useChargeV2-poll] ❌ no data  reason=\(reason)  ts=\(ts)")
+                return
+            }
+
+            // Minimal probe — just the flag, nothing else
+            struct Probe: Decodable {
+                struct Mini: Decodable {
+                    struct Settings: Decodable {
+                        struct Payments: Decodable { let useChargeV2: Bool? }
+                        let payments: Payments?
+                    }
+                    let settings: Settings?
+                }
+                let mini: Mini?
+            }
+
+            guard let parsed = try? JSONDecoder().decode(Probe.self, from: data) else {
+                print("[useChargeV2-poll] ❌ JSON decode failed  reason=\(reason)  ts=\(ts)")
+                return
+            }
+
+            let prev = UserDefaults.standard.bool(forKey: "payments.useChargeV2")
+            if let v2 = parsed.mini?.settings?.payments?.useChargeV2 {
+                UserDefaults.standard.set(v2, forKey: "payments.useChargeV2")
+                if prev != v2 {
+                    print("[useChargeV2-poll] 🔄 CHANGED \(prev) → \(v2)  reason=\(reason)  shopId=\(shopId)  ts=\(ts)")
+                } else {
+                    print("[useChargeV2-poll] ✓ unchanged=\(v2)  reason=\(reason)  shopId=\(shopId)  ts=\(ts)")
+                }
+            } else {
+                print("[useChargeV2-poll] ⚠️ field absent in JSON, keeping prev=\(prev)  reason=\(reason)  shopId=\(shopId)  ts=\(ts)")
+            }
+        }.resume()
+    }
+
     enum PaymentMethod: String {
         case card       // full card
         case cash       // full cash
@@ -1503,6 +1642,17 @@ enum OrderAPI {
 
             completion: @escaping (Result<Int, Error>) -> Void
         ) {
+            // 🔎 DUPLICATE-YESH DIAGNOSTIC: log every single submitOrder INVOCATION.
+            //   Each card transaction should produce EXACTLY ONE of these.
+            //   If you see two for the same physical order with different timestamps
+            //   close together → caller is double-firing. Capture call stack so we
+            //   know which UI path triggered it.
+            let __callerFile = (#file as NSString).lastPathComponent
+            let __ts = ISO8601DateFormatter().string(from: Date())
+            let __stackTop = Thread.callStackSymbols.prefix(6).joined(separator: " | ")
+            print("🟦 [submitOrder/INVOKE] ts=\(__ts) orderId=\(orderId.map(String.init) ?? "nil") ticket=\(ticketNumber.map(String.init) ?? "nil") src=\(source) total=\(total) caller=\(__callerFile)")
+            print("🟦 [submitOrder/STACK] \(__stackTop)")
+
             let isPad = UIDevice.current.userInterfaceIdiom == .pad
             let cashPointMode = UserDefaults.standard.bool(forKey: "cashPointMode")
             let defaults = UserDefaults.standard
@@ -1830,11 +1980,21 @@ enum OrderAPI {
             }
 
             // ✅ Idempotency key (persisted by outbox)
-            // When orderId exists (from start-safe), derive key deterministically
-            // so backend can match the existing row and UPDATE instead of INSERT.
+            // When orderId exists (from start-safe / resumedOrderId), derive key
+            // deterministically so backend matches the existing row and UPDATEs
+            // instead of INSERTing.
+            //
+            // 🆕 Include payment method in the suffix. Two distinct submits for
+            // the same orderId can occur (pay-later → cash on resumedOrderId),
+            // and a method-less key collides — the server's idempotency layer
+            // would replay the first submit's response and silently skip the
+            // status=0 → status=1 update. Same-method retries still collide on
+            // purpose, preserving idempotency for actual network retries.
             let idempotencyKey: String
             if let orderId {
-                idempotencyKey = "submit-\(orderId)"
+                let methodSuffix = (payload["payment"] as? [String: Any])?["method"] as? String
+                    ?? PaymentMethod.unpaid.rawValue
+                idempotencyKey = "submit-\(orderId)-\(methodSuffix)"
             } else {
                 idempotencyKey = UUID().uuidString.replacingOccurrences(of: "-", with: "")
             }
@@ -1890,7 +2050,7 @@ enum OrderAPI {
             print("[submitOrder/curl] \(req.curlDebug)")
 #endif
 
-            // ✅ Enqueue BEFORE sending (durability)
+            // ✅ Build envelope (used only on failure for retry)
             let env = OutboxEnvelope(
                 id: idempotencyKey,
                 createdAt: Date(),
@@ -1902,11 +2062,18 @@ enum OrderAPI {
                 headers: req.allHTTPHeaderFields ?? [:]
             )
 
-            Task { @MainActor in
-                OrderOutbox.shared.enqueue(env)
-                OrderOutbox.shared.drainNow()   // try immediately
-            }
-
+            // 🛑 DUPLICATE-YESH FIX (canary):
+            // Previously this fired BOTH the outbox (enqueue + drainNow) AND a direct
+            // URLSession in parallel — two network POSTs to /submitOrder with the SAME
+            // idempotency key, milliseconds apart. The server's early-replay SELECT is
+            // not transactionally atomic with the INSERT, so the two requests could race
+            // past it before either committed. Both INSERTed → two orderIds → two Yesh
+            // invoices.
+            //
+            // New behavior: ONLY the direct URLSession fires on the happy path.
+            // The outbox is only enqueued + drained if the direct fire fails (retry/durability).
+            // Same idempotency key is preserved, so any future retry from outbox will hit
+            // the server's idem dedup correctly.
 
             Task { @MainActor in
                 NotificationCenter.default.post(name: .resetModifiers, object: nil)
@@ -1916,12 +2083,24 @@ enum OrderAPI {
                 OutboxLog.shared.sending(id: idempotencyKey, msg: "sending…")
             }
 
-            // ✅ Fire normal request too (fast path). Outbox will retry if this fails.
+            // 🟥 [submitOrder/DIRECT-FIRE] direct URLSession = ONLY network hit on happy path
+            print("🟥 [submitOrder/DIRECT-FIRE] idem=\(idempotencyKey) ts=\(ISO8601DateFormatter().string(from: Date())) — direct URLSession.dataTask (outbox disabled on success path)")
+
+            // Helper: enqueue + drain outbox for retry on failure
+            func enqueueForRetry(reason: String) {
+                print("🔁 [submitOrder/RETRY-ENQUEUE] idem=\(idempotencyKey) reason=\(reason) — falling back to outbox")
+                Task { @MainActor in
+                    OrderOutbox.shared.enqueue(env)
+                    OrderOutbox.shared.drainNow()
+                }
+            }
+
             URLSession.shared.dataTask(with: req) { data, resp, err in
                 if let err = err {
                     Task { @MainActor in
                         OutboxLog.shared.failed(id: idempotencyKey, msg: err.localizedDescription)
                     }
+                    enqueueForRetry(reason: "direct-fire error: \(err.localizedDescription)")
                     completion(.failure(err))
                     return
                 }
@@ -1932,12 +2111,20 @@ enum OrderAPI {
                     let data = data,
                     let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
                 else {
+                    let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
+                    enqueueForRetry(reason: "direct-fire bad status \(code)")
                     completion(.failure(SubmitError(message: "Server error")))
                     return
                 }
 
                 let oid = obj["orderId"] as? Int ?? 0
                 let replay = (obj["replay"] as? Bool) ?? false
+
+                // 🟩 [submitOrder/RESPONSE] server ack — note replay flag
+                //   With outbox-on-failure-only, you should now see EXACTLY ONE RESPONSE
+                //   per submitOrder INVOKE. If you still see Yesh duplicates after this
+                //   fix is deployed, the source is server-side or external — not iPad.
+                print("🟩 [submitOrder/RESPONSE] idem=\(idempotencyKey) orderId=\(oid) replay=\(replay) ts=\(ISO8601DateFormatter().string(from: Date()))")
 
                 Task { @MainActor in
                     OutboxLog.shared.acked(
@@ -1949,14 +2136,15 @@ enum OrderAPI {
                 }
 
                 if oid > 0 {
-                    Task { @MainActor in OrderOutbox.shared.drainNow() }
+                    // ✅ Direct fire succeeded — outbox stays clean (we never enqueued).
                     completion(.success(oid))
                 } else {
+                    enqueueForRetry(reason: "direct-fire returned no orderId")
                     completion(.failure(SubmitError(message: "Server did not return orderId")))
                 }
             }.resume()
         }
-    
+
     
 }
 
@@ -2049,7 +2237,23 @@ final class ZCreditPaymentHandler {
     private var timeoutTimer: Timer?
 
     private var currentDataTask: URLSessionDataTask?
-    private var paymentTimeoutSeconds: TimeInterval = 30
+    // Client-side safety timer for the iPad → server pinpad-charge call.
+    //
+    // Timeline of changes:
+    //   30s → 60s on 2026-05-03 after a production incident where customer was charged
+    //                successfully but the iPad showed "המסוף לא הגיב" because the server
+    //                took >30s to return.
+    //   60s → 120s on 2026-05-03 (same day): even with 60s, edge case existed where
+    //                terminal hits its 60s limit + server processes Z-Credit response +
+    //                returns to iPad, all within ~70-80s. Set ceiling to 2× terminal max
+    //                so the iPad never gives up before the terminal has fully resolved.
+    //
+    // The matching URLRequest.timeoutInterval is also 120s (line ~2572), so URLSession
+    // and our Timer fire together. Terminal's max transaction lifetime is 60s, so this
+    // 120s gives 60s buffer for server-side Z-Credit roundtrip + JSON serialization +
+    // network. If the iPad ever fires this timeout, something is genuinely broken
+    // server-side, not a slow-but-successful pinpad transaction.
+    private var paymentTimeoutSeconds: TimeInterval = 120
 
     private var currentCorrelationId: String?
     private var currentReferenceOrSession: String?
@@ -2464,7 +2668,7 @@ final class ZCreditPaymentHandler {
         guard mid > 0 else {
             let result = ZCreditResult(
                 status: .unknown,
-                message: "Missing miniAppId/shopId for /payments/zcredit/start-safe",
+                message: "Missing miniAppId/shopId for /payments/zcredit/start",
                 referenceNumber: nil,
                 transactionId: nil,
                 orderId: nil,
@@ -2500,14 +2704,75 @@ final class ZCreditPaymentHandler {
             "idempotencyKey": idempotencyKey ?? ""
         ]
 
-        let endpoint = useLegacyEndpoint ? "/payments/zcredit/start" : "/payments/zcredit/start-safe"
-        print("[ZCredit] using endpoint: \(endpoint) amount=\(safeAmount) pinpadId=\(pinpadId) miniAppId=\(mid) idempotency=\(idempotencyKey?.prefix(8) ?? "-")")
+        // 🧪 SIMULATOR-ONLY CANARY HARDCODE for /charge.
+        //    Simulator routes eligible regular charges (txType=="01") to
+        //    /payments/zcredit/charge for end-to-end validation against the new endpoint.
+        //    Refunds (txType="53") and other types fall through to /start (legacy).
+        //
+        // 🛑 REAL iPad (any device build) — routes to /start (legacy).
+        //
+        //    History:
+        //    • /charge endpoint was promoted to all-builds-hardcode on 2026-05-04
+        //      morning after passing 10/10 canary tests (1× happy path, 1× network drop,
+        //      1× decline, 1× idem dedup probe, 1× single retry button, 5-in-a-row,
+        //      customer name persistence, Bones screen, self-cashpoint stock).
+        //    • Reverted to simulator-only on 2026-05-04 afternoon — see TODO/ticket
+        //      for the deciding incident. Server-side /charge endpoint remains
+        //      deployed and ready; flipping the gate back is a one-line change.
+        //
+        //    The `useLegacyEndpoint` parameter is kept in the signature for ABI
+        //    stability with callers, but is ignored here — endpoint is unconditional
+        //    per build environment.
+        // 🚦 SERVER-DRIVEN /charge TOGGLE — task #20 wiring (2026-05-04 afternoon).
+        //
+        // Reads the `payments.useChargeV2` flag from UserDefaults, which is populated
+        // each time the published shop JSON is parsed (see decodeAndPersistUseChargeV2
+        // in load() above). Source of truth: mini.settings.payments.useChargeV2 in
+        // https://minis.studio/json/{shopId}.json
+        //
+        // Selection logic:
+        //   - txType != "01" (refunds, force-charge, etc.) → /start (legacy, never /charge)
+        //   - txType == "01" and useChargeV2 = true        → /charge (new endpoint)
+        //   - txType == "01" and useChargeV2 = false       → /start (legacy)
+        //
+        // This lets ops flip /charge on/off per shop without an iPad rebuild — just
+        // republish the shop JSON with `payments.useChargeV2: true` (or false) and
+        // every iPad picks up the change on the next JSON refresh (cache TTL ~ minutes).
+        //
+        // 🟢 TEMPORARY CANARY HARDCODE — added 2026-05-05 to bypass the JSON flag
+        //    while testing /charge in isolation. Set to `true` to FORCE /charge for
+        //    txType==01 regardless of the server-driven flag. Set to `false` to use
+        //    the server-driven flag normally. REMOVE this hardcode once canary
+        //    validation is complete and the server JSON is the single source of truth.
+        let HARDCODE_FORCE_CHARGE_V2 = true   // ⚠️ TEMP — flip to false to restore JSON-driven control
+
+        let useChargeV2Flag = UserDefaults.standard.bool(forKey: "payments.useChargeV2")
+        let effectiveFlag = HARDCODE_FORCE_CHARGE_V2 || useChargeV2Flag
+        let endpoint: String
+        let endpointReason: String
+        if transactionType != "01" {
+            endpoint = "/payments/zcredit/start"
+            endpointReason = "LEGACY_NON_01_TXTYPE_\(transactionType)"
+        } else if effectiveFlag {
+            endpoint = "/payments/zcredit/charge"
+            endpointReason = HARDCODE_FORCE_CHARGE_V2
+                ? "HARDCODE_FORCE_CHARGE_V2"
+                : "FLAG_USECHARGEV2_ON"
+        } else {
+            endpoint = "/payments/zcredit/start"
+            endpointReason = "FLAG_USECHARGEV2_OFF"
+        }
+        print("[ZCredit] 🚦 endpoint=\(endpoint) reason=\(endpointReason) flag=\(useChargeV2Flag) hardcode=\(HARDCODE_FORCE_CHARGE_V2) txType=\(transactionType) amount=\(safeAmount) pinpadId=\(pinpadId) miniAppId=\(mid) idempotency=\(idempotencyKey?.prefix(8) ?? "-")")
         guard let startURL = URL(string: endpoint, relativeTo: baseURL) else {
             DispatchQueue.main.async { completion(self.legacyBadURLResult()) }
             return
         }
 
-        var req = URLRequest(url: startURL, timeoutInterval: 60)
+        // 120s: aligned with paymentTimeoutSeconds (line ~2091).
+        // Terminal's max transaction lifetime is 60s; we wait up to 2× that to cover
+        // server-side Z-Credit response + serialization + network jitter. See the
+        // detailed comment at paymentTimeoutSeconds for the timeline.
+        var req = URLRequest(url: startURL, timeoutInterval: 120)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue(correlationId, forHTTPHeaderField: "x-correlation-id")
@@ -3598,7 +3863,11 @@ final class ReportPreviewModel: ObservableObject {
 
     // ✅ NEW: optional date param for restore (used for Z restore)
     func load(type: CashPointView.ReportType, shopId: Int, for date: Date? = nil) async {
-        guard !isLoading else { return }
+        print("📊 [ReportModel] load called — type=\(type) shopId=\(shopId) date=\(String(describing: date)) isLoading=\(isLoading)")
+        guard !isLoading else {
+            print("📊 [ReportModel] SKIPPED — already loading")
+            return
+        }
         isLoading = true
         loadError = nil
         data = nil                  // ✅ clears UI while loading
@@ -3688,6 +3957,7 @@ final class ReportPreviewModel: ObservableObject {
             }
 
         } catch {
+            print("📊 [ReportModel] CATCH error: \(error)")
             let ns = error as NSError
             let body = (ns.userInfo[NSLocalizedDescriptionKey] as? String) ?? ""
             self.loadError = body.isEmpty ? String(describing: error) : body
@@ -3698,15 +3968,20 @@ final class ReportPreviewModel: ObservableObject {
 
     private func fetchXReport(miniAppId: Int) async throws -> XReportApiResponse {
         let url = URL(string: "https://minis.studio/api/xreport?miniAppId=\(miniAppId)")!
+        print("📊 [fetchXReport] GET \(url)")
         let (raw, resp) = try await URLSession.shared.data(from: url)
 
         let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
+        print("📊 [fetchXReport] HTTP \(code), \(raw.count) bytes")
         guard (200..<300).contains(code) else {
             let body = String(data: raw, encoding: .utf8) ?? "<non-utf8 \(raw.count) bytes>"
+            print("📊 [fetchXReport] ERROR body: \(body)")
             throw NSError(domain: "http", code: code, userInfo: [NSLocalizedDescriptionKey: body])
         }
 
-        return try JSONDecoder().decode(XReportApiResponse.self, from: raw)
+        let decoded = try JSONDecoder().decode(XReportApiResponse.self, from: raw)
+        print("📊 [fetchXReport] decoded ok=\(decoded.ok) ordersCount=\(decoded.agg.ordersCount)")
+        return decoded
     }
 
     // MARK: - Z by-day

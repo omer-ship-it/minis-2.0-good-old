@@ -2845,7 +2845,8 @@ if miniAppId == 12  || miniAppId == 13 {
                                 total: totalToSend,
                                 diningMode: dm,
                                 customerName: UserDefaults.standard.string(forKey: "userName"),
-                                customerPhone: UserDefaults.standard.string(forKey: "userPhone")
+                                customerPhone: UserDefaults.standard.string(forKey: "userPhone"),
+                                showMinisRow: true   // kiosk customer flow → show MINIS
                             )
 
                             if !ok {
@@ -2861,7 +2862,13 @@ if miniAppId == 12  || miniAppId == 13 {
                         // ✅ 0) Scroll request (fine to do early)
                         scrollVM.scrollToTop = true
 
-                        // ✅ 1) Persist contact (same as you had)
+                        // ✅ 1) Persist contact for shops that benefit from "remember me"
+                        //       behavior across customer sessions on the same device.
+                        //       Shop 3 (delivery) → persist phone for repeat customers.
+                        //       Other shops (self-cashpoint kiosk) → DO NOT persist phone,
+                        //       since one customer's phone shouldn't leak into the next
+                        //       customer's order. We'll use the live `phone` parameter
+                        //       directly instead (see safePhone resolution below).
                         if let name, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                             UserDefaults.standard.set(name, forKey: "userName")
                         }
@@ -2879,11 +2886,19 @@ if miniAppId == 12  || miniAppId == 13 {
                             return n.isEmpty ? nil : n
                         }()
 
+                        // 🆕 2026-05-05: resolve phone from the LIVE callback param first,
+                        //    fall back to UserDefaults only for legacy shop 3 behavior.
+                        //    Previously this read UserDefaults exclusively, which was empty
+                        //    for any shop other than 3 (because the persist branch above is
+                        //    gated on miniAppId == 3). Result: self-cashpoint orders from
+                        //    shop 12 / etc. lost the customer phone even when the customer
+                        //    typed it into the OrderFlowView phone step.
                         let safePhone: String? = {
-                          
-                            let p = (UserDefaults.standard.string(forKey: "userPhone") ?? "")
+                            let livePhone = (phone ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !livePhone.isEmpty { return livePhone }
+                            let storedPhone = (UserDefaults.standard.string(forKey: "userPhone") ?? "")
                                 .trimmingCharacters(in: .whitespacesAndNewlines)
-                            return p.isEmpty ? nil : p
+                            return storedPhone.isEmpty ? nil : storedPhone
                         }()
 
                         Task {
@@ -2893,7 +2908,8 @@ if miniAppId == 12  || miniAppId == 13 {
                                 total: totalToSend,
                                 diningMode: dm,
                                 customerName: safeName,
-                                customerPhone: safePhone
+                                customerPhone: safePhone,
+                                showMinisRow: true   // kiosk customer flow → show MINIS
                             )
 
                             if !ok {
@@ -2916,6 +2932,21 @@ if miniAppId == 12  || miniAppId == 13 {
                         meta["printedTicket"]   = ticket   // ✅ useful for debugging
 
                         OrderAPI.submitOrder(
+                            // 🆕 2026-05-04: forward orderId from /charge into /submitOrder.
+                            // The OrderFlowView.onCompleted closure receives `existingOrderId`
+                            // (line 2861 above) — the orderId server-side /charge created and
+                            // returned to the iPad. Without this, /submitOrder fires with no
+                            // orderId, mints a fresh UUID idem key, and creates a NEW order
+                            // row on the server that's disconnected from the /charge row.
+                            // Result: TWO Orders rows for one physical transaction (the
+                            // /charge one becomes a 'cashpoint-charge' orphan, the
+                            // /submitOrder one carries the basket data + Yesh invoice).
+                            // Forwarding orderId makes /submitOrder's deterministic
+                            // submit-{orderId} idem key trigger the existing-row UPDATE path
+                            // server-side, so we get exactly ONE row with both the Z-Credit
+                            // metadata AND the order/basket data. Mirrors what
+                            // CashpointView's `unpaidOrderId @State` does for staff cashpoint.
+                            orderId: existingOrderId,
                             entries: entriesToSend,
                             total: totalToSend,
                             diningMode: dm,
@@ -5679,7 +5710,7 @@ struct BasketSheet: View {
                     @AppStorage("checkout.intent")  var checkoutIntentRaw: String = "ta"
 
 
-                    UserDefaults.standard.set(true, forKey: "debugSkipApplePay")
+                    UserDefaults.standard.set(false, forKey: "debugSkipApplePay")
 
                     // ✅ always derive diningMode from the shared intent
                     syncDiningModeFromIntent()
@@ -6459,7 +6490,7 @@ struct BasketSheet: View {
 
         if skipApplePay {
             Haptics.light()
-            startSubmitOrder(zcreditMeta: ["debugSkipApplePay": true, "debugBuild": true])
+            startSubmitOrder(zcreditMeta: ["debugSkipApplePay": false, "debugBuild": true])
             return
         }
         
@@ -7710,6 +7741,13 @@ struct KioskWelcomeView: View {
 
     private func choose(intent: String) {
         print("[KioskWelcomeView] welcome tapped: \(intent)")
+
+        // ✅ Set didShowWelcome BEFORE checkoutIntentRaw so the parent gate
+        //    (`!didShowWelcome && checkoutIntentRaw.isEmpty`) can never re-fire
+        //    while a rapid-tap still has the welcome sheet visible. Otherwise
+        //    a fast double-tap can race the dismiss and leave the welcome view
+        //    stuck on screen.
+        didShowWelcome = true
         checkoutIntentRaw = intent
 
         // ✅ Keep stored labels aligned with language
@@ -7719,7 +7757,6 @@ struct KioskWelcomeView: View {
             serviceModeLabel = (intent == "sit") ? "Dine-in" : "Takeaway"
         }
 
-        didShowWelcome = true
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         isPresented = false
         dismiss()

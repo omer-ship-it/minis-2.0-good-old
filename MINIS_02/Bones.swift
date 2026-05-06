@@ -1056,10 +1056,22 @@ struct DigitalBonesView: View {
     }
     // MARK: - Rebuild bones arrays from allOrders (show ALL stations, filtered by search)
 
+    private static let bonesTimeWindowMinutes: Int = 30
+
     private func rebuildBonesFromOrders() {
         let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 
-        let stationFilteredBase = allOrders.filter { order in
+        // ⏱️ Only orders placed within the last `bonesTimeWindowMinutes`.
+        //    Without this, the bones screen accumulates everything ever loaded
+        //    into `allOrders` and shows stale stuff from earlier shifts.
+        let cutoff = Date().addingTimeInterval(
+            -TimeInterval(Self.bonesTimeWindowMinutes * 60)
+        )
+        let timeFilteredBase = allOrders.filter { order in
+            order.placedAt >= cutoff
+        }
+
+        let stationFilteredBase = timeFilteredBase.filter { order in
             // ✅ only show orders that have kitchen items
             let items = order.stationItems[.kitchen] ?? []
             return !items.isEmpty
@@ -1444,12 +1456,21 @@ struct DigitalBonesView: View {
         if showSpinner { isLoading = true }
         defer { if showSpinner { isLoading = false } }
 
-        guard let url = URL(string: "\(baseURL)?miniAppId=\(miniAppId)") else {
+        // 🚫 Cache-bust: append a millisecond timestamp so any intermediary
+        //    (CDN, NSURLCache, server-side response cache) treats every poll
+        //    as a unique request. Without this, bones would occasionally
+        //    show yesterday's orders because a stale cached response was
+        //    being served back to the iPad.
+        let ts = Int(Date().timeIntervalSince1970 * 1000)
+        guard let url = URL(string: "\(baseURL)?miniAppId=\(miniAppId)&_ts=\(ts)") else {
             return
         }
 
         var req = URLRequest(url: url, timeoutInterval: 15)
+        req.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+        req.setValue("no-cache", forHTTPHeaderField: "Pragma")
 
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)

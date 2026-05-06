@@ -521,16 +521,30 @@ final class OrdersAutoPrinter {
             total: order.total,
             diningMode: mode,
             customerName: order.customerName,
-            customerPhone: order.customerPhone
+            customerPhone: order.customerPhone,
+            showMinisRow: true   // auto-printer = app/auto order → show MINIS
         )
 
         guard ok else {
+            // 🆕 2026-05-05: log the silent-fail so stranded auto-prints are
+            // visible in the console. Pair with [printCashPointSplit] log inside
+            // PrinterManager (which logs which station failed). Together: we see
+            // both the orderId AND which printer station caused the failure.
+            // Tag with [OrdersAutoPrinter] for filtering.
+            // Order will stay PrintedAt=NULL on server until a manual reprint OR
+            // the server expires the claim and reissues to another iPad.
+            let _ts = ISO8601DateFormatter().string(from: Date())
+            print("[OrdersAutoPrinter] ❌ printAndMark FAILED orderId=\(order.id) trigger=\(trigger) total=\(order.total) ts=\(_ts)")
             return
         }
 
         let marked = await markPrinted(orderId: order.id, claimToken: order.claimToken)
         if marked {
+            print("[OrdersAutoPrinter] ✅ printed+marked orderId=\(order.id) trigger=\(trigger) ts=\(ISO8601DateFormatter().string(from: Date()))")
             printedOrderIds.insert(order.id)
+        } else {
+            // Edge case: print succeeded but server rejected the markPrinted POST
+            print("[OrdersAutoPrinter] ⚠️ printed but markPrinted FAILED orderId=\(order.id) trigger=\(trigger) ts=\(ISO8601DateFormatter().string(from: Date()))")
         }
     }
 
