@@ -1,34 +1,695 @@
 import SwiftUI
+import UIKit
+import Speech
+import AVFoundation
 
-// ✅ FINAL (as agreed):
-// 1) Executive Brief (page 0): KEEP clean (hero + your Manager Summary / AI Insights). NO story list here.
-//    - You can keep the setup card here.
-//    - (Optional) Keep the 2-circle controls row (Menu + Cashpoint) near the hero.
-// 2) Live Control (page 1): SHOW the TeslaStoryList (Cashpoint / Self Service / Mini App / Full App / Devices / Team).
-// 3) Each row NAVIGATES to its own EMPTY module view (placeholders) — we’ll build each later.
-//    - Cashpoint still goes to CashPointPushWrapper (real view).
-//    - Menu stays accessible via setup card + optional controls row (real view).
-//
-// NOTE: This file assumes AnalyticsV1View, CashPointView, menuView, DashboardVM, ShopOption, MiniTint,
-//       ordersPerHourSince8amIsrael(...) exist in your project.
+// MARK: - Brain Models
+
+struct BrainMetric: Identifiable, Hashable, Codable {
+    let title: String
+    let value: String
+
+    var id: String { title }
+}
+
+struct BrainBreakdownRow: Identifiable, Hashable, Codable {
+    let title: String
+    let value: String
+
+    var id: String { title + ":" + value }
+}
+
+struct BrainReportPeriod: Identifiable, Hashable, Codable {
+    let id: String
+    let label: String
+    let primaryValue: String
+    let primaryLabel: String
+    let metrics: [BrainMetric]
+    let graphValues: [Double]
+    let breakdownRows: [BrainBreakdownRow]
+
+    func hash(into hasher: inout Hasher) { hasher.combine(id) }
+    static func == (lhs: BrainReportPeriod, rhs: BrainReportPeriod) -> Bool { lhs.id == rhs.id }
+}
+
+struct BrainCard: Identifiable, Hashable, Codable {
+    let id: UUID
+    let queryKey: String
+    let title: String
+    let subtitle: String
+    let primaryValue: String
+    let primaryLabel: String
+    let metrics: [BrainMetric]
+    let graphValues: [Double]
+    var isPinned: Bool
+    let reportTitle: String
+    let reportSubtitle: String
+    let periods: [BrainReportPeriod]
+
+    func hash(into hasher: inout Hasher) { hasher.combine(id) }
+    static func == (lhs: BrainCard, rhs: BrainCard) -> Bool {
+        lhs.id == rhs.id && lhs.isPinned == rhs.isPinned
+    }
+
+    static let jordanWineMock = BrainCard(
+        id: UUID(uuidString: "11111111-1111-1111-1111-111111111111")!,
+        queryKey: "product_sales:jordan_wine:march",
+        title: "יין ירדן \u{00B7} מרץ",
+        subtitle: "מבוסס על מכירות מוצר בין 1\u{2013}31 במרץ",
+        primaryValue: "428",
+        primaryLabel: "בקבוקים נמכרו",
+        metrics: [
+            BrainMetric(title: "הכנסות", value: "\u{20AA}31,220"),
+            BrainMetric(title: "מול פבר׳", value: "+18%"),
+            BrainMetric(title: "ממוצע/יום", value: "13.8")
+        ],
+        graphValues: [34, 41, 29, 52, 47, 61, 58, 74, 69, 88, 79, 96],
+        isPinned: false,
+        reportTitle: "Jordan Wine",
+        reportSubtitle: "דוח מודיעין מוצר",
+        periods: [
+            BrainReportPeriod(
+                id: "D", label: "D",
+                primaryValue: "18", primaryLabel: "bottles sold",
+                metrics: [
+                    BrainMetric(title: "הכנסות", value: "\u{20AA}1,314"),
+                    BrainMetric(title: "שינוי", value: "+6%"),
+                    BrainMetric(title: "ממוצע", value: "2.2/hr")
+                ],
+                graphValues: [2, 4, 3, 5, 7, 4, 8, 9, 11, 13, 15, 18],
+                breakdownRows: [
+                    BrainBreakdownRow(title: "שעת שיא", value: "13:00\u{2013}14:00"),
+                    BrainBreakdownRow(title: "קופאי מוביל", value: "Dana \u{00B7} 6 בקבוקים"),
+                    BrainBreakdownRow(title: "מוצר קשור", value: "יין אדום ישראלי \u{00B7} +12%")
+                ]
+            ),
+            BrainReportPeriod(
+                id: "W", label: "W",
+                primaryValue: "96", primaryLabel: "bottles sold",
+                metrics: [
+                    BrainMetric(title: "הכנסות", value: "\u{20AA}7,104"),
+                    BrainMetric(title: "שינוי", value: "+11%"),
+                    BrainMetric(title: "ממוצע", value: "13.7/day")
+                ],
+                graphValues: [12, 18, 15, 21, 17, 28, 31],
+                breakdownRows: [
+                    BrainBreakdownRow(title: "יום שיא", value: "שישי \u{00B7} 28 בקבוקים"),
+                    BrainBreakdownRow(title: "שעת שיא", value: "21:00\u{2013}22:00"),
+                    BrainBreakdownRow(title: "קופאי מוביל", value: "Dana \u{00B7} 32 בקבוקים"),
+                    BrainBreakdownRow(title: "מוצר קשור", value: "יין אדום ישראלי \u{00B7} +12%")
+                ]
+            ),
+            BrainReportPeriod(
+                id: "M", label: "M",
+                primaryValue: "428", primaryLabel: "bottles sold",
+                metrics: [
+                    BrainMetric(title: "הכנסות", value: "\u{20AA}31,220"),
+                    BrainMetric(title: "שינוי", value: "+18%"),
+                    BrainMetric(title: "ממוצע", value: "13.8/day")
+                ],
+                graphValues: [34, 41, 29, 52, 47, 61, 58, 74, 69, 88, 79, 96],
+                breakdownRows: [
+                    BrainBreakdownRow(title: "יום שיא", value: "שישי \u{00B7} 74 בקבוקים"),
+                    BrainBreakdownRow(title: "שעת שיא", value: "21:00\u{2013}22:00"),
+                    BrainBreakdownRow(title: "קופאי מוביל", value: "Dana \u{00B7} 93 בקבוקים"),
+                    BrainBreakdownRow(title: "מוצר קשור", value: "יין אדום ישראלי \u{00B7} +12%")
+                ]
+            ),
+            BrainReportPeriod(
+                id: "6M", label: "6M",
+                primaryValue: "2,184", primaryLabel: "bottles sold",
+                metrics: [
+                    BrainMetric(title: "הכנסות", value: "\u{20AA}159k"),
+                    BrainMetric(title: "שינוי", value: "+22%"),
+                    BrainMetric(title: "ממוצע", value: "364/mo")
+                ],
+                graphValues: [280, 310, 344, 382, 415, 428],
+                breakdownRows: [
+                    BrainBreakdownRow(title: "חודש שיא", value: "מרץ \u{00B7} 428 בקבוקים"),
+                    BrainBreakdownRow(title: "שעת שיא", value: "21:00\u{2013}22:00"),
+                    BrainBreakdownRow(title: "קופאי מוביל", value: "Dana \u{00B7} 488 בקבוקים"),
+                    BrainBreakdownRow(title: "מוצר קשור", value: "יין אדום ישראלי \u{00B7} +12%")
+                ]
+            ),
+            BrainReportPeriod(
+                id: "Y", label: "Y",
+                primaryValue: "4,912", primaryLabel: "bottles sold",
+                metrics: [
+                    BrainMetric(title: "הכנסות", value: "\u{20AA}358k"),
+                    BrainMetric(title: "שינוי", value: "+31%"),
+                    BrainMetric(title: "ממוצע", value: "409/mo")
+                ],
+                graphValues: [210, 224, 260, 288, 310, 344, 360, 382, 391, 415, 428, 452],
+                breakdownRows: [
+                    BrainBreakdownRow(title: "חודש שיא", value: "מרץ \u{00B7} 428 בקבוקים"),
+                    BrainBreakdownRow(title: "שעת שיא", value: "21:00\u{2013}22:00"),
+                    BrainBreakdownRow(title: "קופאי מוביל", value: "Dana \u{00B7} 1,120 בקבוקים"),
+                    BrainBreakdownRow(title: "מוצר קשור", value: "יין אדום ישראלי \u{00B7} +12%")
+                ]
+            )
+        ]
+    )
+
+    static let dailySalesMock = BrainCard(
+        id: UUID(uuidString: "22222222-2222-2222-2222-222222222222")!,
+        queryKey: "daily_sales:today",
+        title: "מכירות יומיות \u{00B7} אתמול",
+        subtitle: "פירוט הכנסות לאתמול",
+        primaryValue: "\u{20AA}21,513",
+        primaryLabel: "revenue",
+        metrics: [
+            BrainMetric(title: "הזמנות", value: "443"),
+            BrainMetric(title: "ממוצע לקוח", value: "\u{20AA}49"),
+            BrainMetric(title: "שיא", value: "13:00")
+        ],
+        graphValues: [120, 340, 890, 1620, 2810, 4100, 6200, 8900, 11400, 14200, 17800, 21513],
+        isPinned: false,
+        reportTitle: "Daily Sales",
+        reportSubtitle: "דוח מודיעין מכירות",
+        periods: [
+            BrainReportPeriod(
+                id: "D", label: "D",
+                primaryValue: "\u{20AA}21,513", primaryLabel: "revenue",
+                metrics: [
+                    BrainMetric(title: "הזמנות", value: "443"),
+                    BrainMetric(title: "שינוי", value: "+14%"),
+                    BrainMetric(title: "ממוצע", value: "\u{20AA}49")
+                ],
+                graphValues: [120, 340, 890, 1620, 2810, 4100, 6200, 8900, 11400, 14200, 17800, 21513],
+                breakdownRows: [
+                    BrainBreakdownRow(title: "שעת שיא", value: "13:00\u{2013}14:00 \u{00B7} \u{20AA}3,420"),
+                    BrainBreakdownRow(title: "פריט מוביל", value: "Latte \u{00B7} 94 נמכרו"),
+                    BrainBreakdownRow(title: "קופאי מוביל", value: "Yael \u{00B7} \u{20AA}6,210")
+                ]
+            ),
+            BrainReportPeriod(
+                id: "W", label: "W",
+                primaryValue: "\u{20AA}148k", primaryLabel: "revenue",
+                metrics: [
+                    BrainMetric(title: "הזמנות", value: "3,012"),
+                    BrainMetric(title: "שינוי", value: "+11%"),
+                    BrainMetric(title: "ממוצע", value: "\u{20AA}49")
+                ],
+                graphValues: [18200, 21500, 19800, 22100, 24600, 20300, 21513],
+                breakdownRows: [
+                    BrainBreakdownRow(title: "יום שיא", value: "חמישי \u{00B7} \u{20AA}24,600"),
+                    BrainBreakdownRow(title: "פריט מוביל", value: "Latte \u{00B7} 620 נמכרו"),
+                    BrainBreakdownRow(title: "קופאי מוביל", value: "Yael \u{00B7} \u{20AA}41k")
+                ]
+            ),
+            BrainReportPeriod(
+                id: "M", label: "M",
+                primaryValue: "\u{20AA}612k", primaryLabel: "revenue",
+                metrics: [
+                    BrainMetric(title: "הזמנות", value: "12,480"),
+                    BrainMetric(title: "שינוי", value: "+18%"),
+                    BrainMetric(title: "ממוצע", value: "\u{20AA}49")
+                ],
+                graphValues: [14200, 15800, 18100, 19400, 20200, 21100, 22400, 19800, 21513, 23100, 20800, 22600],
+                breakdownRows: [
+                    BrainBreakdownRow(title: "שבוע שיא", value: "Week 3 \u{00B7} \u{20AA}162k"),
+                    BrainBreakdownRow(title: "פריט מוביל", value: "Latte \u{00B7} 2,640 נמכרו"),
+                    BrainBreakdownRow(title: "קופאי מוביל", value: "Yael \u{00B7} \u{20AA}168k")
+                ]
+            )
+        ]
+    )
+
+    static let cashierPerformanceMock = BrainCard(
+        id: UUID(uuidString: "33333333-3333-3333-3333-333333333333")!,
+        queryKey: "cashier_performance:all",
+        title: "ביצועי קופאים",
+        subtitle: "דירוג מכירות צוות החודש",
+        primaryValue: "12",
+        primaryLabel: "active cashiers",
+        metrics: [
+            BrainMetric(title: "מוביל", value: "Dana"),
+            BrainMetric(title: "הכנסות", value: "\u{20AA}168k"),
+            BrainMetric(title: "ממוצע/עובד", value: "\u{20AA}51k")
+        ],
+        graphValues: [168, 142, 131, 118, 104, 97, 88, 76, 64, 52, 41, 33],
+        isPinned: false,
+        reportTitle: "Cashier Performance",
+        reportSubtitle: "דוח מודיעין צוות",
+        periods: [
+            BrainReportPeriod(
+                id: "D", label: "D",
+                primaryValue: "8", primaryLabel: "active today",
+                metrics: [
+                    BrainMetric(title: "מוביל", value: "Yael"),
+                    BrainMetric(title: "הכנסות", value: "\u{20AA}6,210"),
+                    BrainMetric(title: "ממוצע", value: "\u{20AA}2,689")
+                ],
+                graphValues: [6210, 4800, 3920, 3100, 2400, 1800, 1200, 880],
+                breakdownRows: [
+                    BrainBreakdownRow(title: "#1 Yael", value: "\u{20AA}6,210 \u{00B7} 127 הזמנות"),
+                    BrainBreakdownRow(title: "#2 Dana", value: "\u{20AA}4,800 \u{00B7} 98 הזמנות"),
+                    BrainBreakdownRow(title: "#3 Omer", value: "\u{20AA}3,920 \u{00B7} 80 הזמנות")
+                ]
+            ),
+            BrainReportPeriod(
+                id: "M", label: "M",
+                primaryValue: "12", primaryLabel: "active cashiers",
+                metrics: [
+                    BrainMetric(title: "מוביל", value: "Dana"),
+                    BrainMetric(title: "הכנסות", value: "\u{20AA}168k"),
+                    BrainMetric(title: "ממוצע", value: "\u{20AA}51k")
+                ],
+                graphValues: [168, 142, 131, 118, 104, 97, 88, 76, 64, 52, 41, 33],
+                breakdownRows: [
+                    BrainBreakdownRow(title: "#1 Dana", value: "\u{20AA}168k \u{00B7} 3,429 הזמנות"),
+                    BrainBreakdownRow(title: "#2 Yael", value: "\u{20AA}142k \u{00B7} 2,898 הזמנות"),
+                    BrainBreakdownRow(title: "#3 Omer", value: "\u{20AA}131k \u{00B7} 2,673 הזמנות")
+                ]
+            )
+        ]
+    )
+
+    static let hourlySalesMock = BrainCard(
+        id: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!,
+        queryKey: "hourly_sales:today",
+        title: "מכירות לפי שעה \u{00B7} היום",
+        subtitle: "הכנסות לפי שעה להיום",
+        primaryValue: "13:00",
+        primaryLabel: "peak hour",
+        metrics: [
+            BrainMetric(title: "שיא הכנסה", value: "\u{20AA}3,420"),
+            BrainMetric(title: "איטית", value: "08:00"),
+            BrainMetric(title: "עכשיו", value: "\u{20AA}1,240/hr")
+        ],
+        graphValues: [120, 220, 480, 890, 1620, 2810, 3420, 2900, 2100, 1800, 1620, 1240],
+        isPinned: false,
+        reportTitle: "Hourly Sales",
+        reportSubtitle: "דוח מודיעין שעתי",
+        periods: [
+            BrainReportPeriod(
+                id: "D", label: "D",
+                primaryValue: "13:00", primaryLabel: "peak hour",
+                metrics: [
+                    BrainMetric(title: "שיא הכנסה", value: "\u{20AA}3,420"),
+                    BrainMetric(title: "איטית", value: "08:00"),
+                    BrainMetric(title: "ממוצע/שעה", value: "\u{20AA}1,793")
+                ],
+                graphValues: [120, 220, 480, 890, 1620, 2810, 3420, 2900, 2100, 1800, 1620, 1240],
+                breakdownRows: [
+                    BrainBreakdownRow(title: "שעת שיא", value: "13:00 \u{00B7} \u{20AA}3,420"),
+                    BrainBreakdownRow(title: "שעה חלשה", value: "08:00 \u{00B7} \u{20AA}120"),
+                    BrainBreakdownRow(title: "שעת צהריים", value: "12:00\u{2013}14:00 \u{00B7} \u{20AA}9,130")
+                ]
+            ),
+            BrainReportPeriod(
+                id: "W", label: "W",
+                primaryValue: "13:00", primaryLabel: "avg peak hour",
+                metrics: [
+                    BrainMetric(title: "שיא הכנסה", value: "\u{20AA}4,100"),
+                    BrainMetric(title: "איטית", value: "07:00"),
+                    BrainMetric(title: "ממוצע/שעה", value: "\u{20AA}1,880")
+                ],
+                graphValues: [180, 310, 620, 1100, 1940, 3200, 4100, 3400, 2600, 2100, 1800, 1400],
+                breakdownRows: [
+                    BrainBreakdownRow(title: "שעת שיא", value: "13:00 \u{00B7} \u{20AA}4,100"),
+                    BrainBreakdownRow(title: "שעה חלשה", value: "07:00 \u{00B7} \u{20AA}180"),
+                    BrainBreakdownRow(title: "שעת צהריים", value: "12:00\u{2013}14:00 \u{00B7} \u{20AA}10,700")
+                ]
+            ),
+            BrainReportPeriod(
+                id: "M", label: "M",
+                primaryValue: "13:00", primaryLabel: "avg peak hour",
+                metrics: [
+                    BrainMetric(title: "שיא הכנסה", value: "\u{20AA}4,800"),
+                    BrainMetric(title: "איטית", value: "07:00"),
+                    BrainMetric(title: "ממוצע/שעה", value: "\u{20AA}2,040")
+                ],
+                graphValues: [240, 420, 810, 1400, 2200, 3600, 4800, 3900, 3000, 2400, 2000, 1600],
+                breakdownRows: [
+                    BrainBreakdownRow(title: "שעת שיא", value: "13:00 \u{00B7} \u{20AA}4,800"),
+                    BrainBreakdownRow(title: "שעה חלשה", value: "07:00 \u{00B7} \u{20AA}240"),
+                    BrainBreakdownRow(title: "שעת צהריים", value: "12:00\u{2013}14:00 \u{00B7} \u{20AA}12,300")
+                ]
+            )
+        ]
+    )
+}
+
+// MARK: - Brain API Contract
+
+struct BrainQueryRequest: Codable {
+    let miniAppId: Int
+    let question: String
+    let language: String
+    let timezone: String
+}
+
+struct BrainQueryResponse: Codable {
+    let card: BrainCard
+    let sql: String?
+    let rowCount: Int?
+    let executionMs: Int?
+}
+
+struct PinnedBrainCardState: Identifiable, Codable {
+    var id: String { queryKey }
+    let queryKey: String
+    let question: String
+    var card: BrainCard
+    var lastUpdatedAt: Date
+    var lastRefreshFailed: Bool
+
+    var timeAgoLabel: String {
+        let seconds = Date().timeIntervalSince(lastUpdatedAt)
+        if lastRefreshFailed { return "רענון נכשל" }
+        if seconds < 60 { return "עודכן עכשיו" }
+        let minutes = Int(seconds / 60)
+        if minutes < 60 { return "עודכן לפני \(minutes) דק׳" }
+        let hours = Int(minutes / 60)
+        return "עודכן לפני \(hours) ש׳"
+    }
+}
+
+enum BrainHealthStatus {
+    case unknown, checking, online, offline
+}
+
+enum BrainServiceError: Error {
+    case invalidURL
+    case badResponse(status: Int)
+    case decodingFailed(underlying: Error)
+}
+
+// MARK: - Brain Voice Manager
+
+final class BrainVoiceManager: ObservableObject {
+    @Published var transcript: String = ""
+    @Published var isRecording: Bool = false
+    @Published var permissionDenied: Bool = false
+
+    private let speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "he-IL"))
+    private let audioEngine = AVAudioEngine()
+    private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
+    private var recognitionTask: SFSpeechRecognitionTask?
+    private var silenceTimer: Timer?
+    private let silenceTimeout: TimeInterval = 1.5
+    private var tonePlayer: AVAudioPlayer?
+
+    private func makeToneData(frequency: Double, duration: Double) -> Data {
+        let sampleRate: Double = 44100
+        let count = Int(sampleRate * duration)
+        var bytes = Data()
+        // WAV header
+        let dataSize = UInt32(count * 2)
+        let fileSize = dataSize + 36
+        bytes.append(contentsOf: [0x52,0x49,0x46,0x46]) // RIFF
+        bytes.append(contentsOf: withUnsafeBytes(of: fileSize.littleEndian) { Array($0) })
+        bytes.append(contentsOf: [0x57,0x41,0x56,0x45]) // WAVE
+        bytes.append(contentsOf: [0x66,0x6D,0x74,0x20]) // fmt
+        bytes.append(contentsOf: withUnsafeBytes(of: UInt32(16).littleEndian) { Array($0) })
+        bytes.append(contentsOf: withUnsafeBytes(of: UInt16(1).littleEndian) { Array($0) })  // PCM
+        bytes.append(contentsOf: withUnsafeBytes(of: UInt16(1).littleEndian) { Array($0) })  // mono
+        bytes.append(contentsOf: withUnsafeBytes(of: UInt32(44100).littleEndian) { Array($0) })
+        bytes.append(contentsOf: withUnsafeBytes(of: UInt32(88200).littleEndian) { Array($0) })
+        bytes.append(contentsOf: withUnsafeBytes(of: UInt16(2).littleEndian) { Array($0) })
+        bytes.append(contentsOf: withUnsafeBytes(of: UInt16(16).littleEndian) { Array($0) })
+        bytes.append(contentsOf: [0x64,0x61,0x74,0x61]) // data
+        bytes.append(contentsOf: withUnsafeBytes(of: dataSize.littleEndian) { Array($0) })
+        // Sine wave with fade
+        for i in 0..<count {
+            let t = Double(i) / sampleRate
+            let fade = min(1.0, min(t / 0.005, (duration - t) / 0.005))
+            let sample = Int16(fade * 12000.0 * sin(2.0 * .pi * frequency * t))
+            bytes.append(contentsOf: withUnsafeBytes(of: sample.littleEndian) { Array($0) })
+        }
+        return bytes
+    }
+
+    private func playTone(frequency: Double, duration: Double = 0.08) {
+        let data = makeToneData(frequency: frequency, duration: duration)
+        tonePlayer = try? AVAudioPlayer(data: data)
+        tonePlayer?.volume = 0.4
+        tonePlayer?.play()
+    }
+
+    func requestPermissionAndStart() {
+        SFSpeechRecognizer.requestAuthorization { [weak self] speechStatus in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                switch speechStatus {
+                case .authorized:
+                    AVAudioSession.sharedInstance().requestRecordPermission { [weak self] granted in
+                        DispatchQueue.main.async {
+                            guard let self else { return }
+                            if granted {
+                                self.startRecording()
+                            } else {
+                                self.permissionDenied = true
+                            }
+                        }
+                    }
+                default:
+                    self.permissionDenied = true
+                }
+            }
+        }
+    }
+
+    func toggleRecording() {
+        if isRecording {
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            stopRecording()
+        } else {
+            UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
+            transcript = ""
+            requestPermissionAndStart()
+        }
+    }
+
+    private func startRecording() {
+        guard let speechRecognizer, speechRecognizer.isAvailable else { return }
+
+        recognitionTask?.cancel()
+        recognitionTask = nil
+
+        let audioSession = AVAudioSession.sharedInstance()
+        do {
+            try audioSession.setCategory(.playAndRecord, mode: .measurement, options: [.duckOthers, .defaultToSpeaker])
+            try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
+        } catch {
+            return
+        }
+
+        recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
+        guard let recognitionRequest else { return }
+        recognitionRequest.shouldReportPartialResults = true
+        if #available(iOS 13.0, *), speechRecognizer.supportsOnDeviceRecognition {
+
+            recognitionRequest.requiresOnDeviceRecognition = true
+
+        }
+
+        let inputNode = audioEngine.inputNode
+        let recordingFormat = inputNode.outputFormat(forBus: 0)
+
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { buffer, _ in
+            recognitionRequest.append(buffer)
+        }
+
+        recognitionTask = speechRecognizer.recognitionTask(with: recognitionRequest) { [weak self] result, error in
+            guard let self else { return }
+            if let result {
+                DispatchQueue.main.async {
+                    self.transcript = result.bestTranscription.formattedString
+                    self.resetSilenceTimer()
+                }
+            }
+            if error != nil || (result?.isFinal ?? false) {
+                DispatchQueue.main.async {
+                    self.silenceTimer?.invalidate()
+                    self.silenceTimer = nil
+                    self.cleanupAudio()
+                }
+            }
+        }
+
+        do {
+            audioEngine.prepare()
+            try audioEngine.start()
+            playTone(frequency: 1200, duration: 0.08)
+            DispatchQueue.main.async {
+                self.isRecording = true
+            }
+        } catch {
+            cleanupAudio()
+        }
+    }
+
+    func stopRecording() {
+        silenceTimer?.invalidate()
+        silenceTimer = nil
+        recognitionRequest?.endAudio()
+        cleanupAudio()
+    }
+
+    private func resetSilenceTimer() {
+        silenceTimer?.invalidate()
+        silenceTimer = Timer.scheduledTimer(withTimeInterval: silenceTimeout, repeats: false) { [weak self] _ in
+            guard let self, self.isRecording else { return }
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            self.stopRecording()
+        }
+    }
+
+    private func cleanupAudio() {
+        if audioEngine.isRunning {
+            audioEngine.stop()
+            audioEngine.inputNode.removeTap(onBus: 0)
+        }
+        recognitionRequest = nil
+        recognitionTask?.cancel()
+        recognitionTask = nil
+        isRecording = false
+    }
+}
+
+// MARK: - Brain Service
+
+final class BrainService {
+    static let shared = BrainService()
+    private init() {
+        UserDefaults.standard.register(defaults: [Self.mockKey: true])
+    }
+
+    private static let mockKey = "brain.useMockBackend"
+
+    static var useMockBackend: Bool {
+        UserDefaults.standard.bool(forKey: mockKey)
+    }
+
+    static func setUseMockBackend(_ value: Bool) {
+        UserDefaults.standard.set(value, forKey: mockKey)
+    }
+
+    private var useMock: Bool { Self.useMockBackend }
+
+    private let endpoint = URL(string: "https://staging-api.minis.studio/brain/query")!
+
+    private let session: URLSession = {
+        let cfg = URLSessionConfiguration.default
+        cfg.timeoutIntervalForRequest = 20
+        cfg.timeoutIntervalForResource = 30
+        return URLSession(configuration: cfg)
+    }()
+
+    private let healthURL = URL(string: "https://staging-api.minis.studio/brain/health")!
+    private let decoder = JSONDecoder()
+    private let encoder = JSONEncoder()
+
+    func healthCheck() async throws -> Bool {
+        let (_, response) = try await session.data(from: healthURL)
+        guard let http = response as? HTTPURLResponse else {
+            throw BrainServiceError.badResponse(status: -1)
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            throw BrainServiceError.badResponse(status: http.statusCode)
+        }
+        return true
+    }
+
+    // MARK: UI compatibility
+
+    /// Legacy entry point kept so existing call sites (and previews) keep compiling.
+    /// New code should prefer `query(_ request:)` and use the full `BrainQueryResponse`.
+    func query(_ question: String) async throws -> BrainCard {
+        let request = BrainQueryRequest(
+            miniAppId: 0,
+            question: question,
+            language: "en",
+            timezone: TimeZone.current.identifier
+        )
+        let response = try await query(request)
+        return response.card
+    }
+
+    // MARK: Backend-ready entry point
+
+    func query(_ request: BrainQueryRequest) async throws -> BrainQueryResponse {
+        if useMock {
+            return try await mockResponse(for: request)
+        }
+        return try await liveResponse(for: request)
+    }
+
+    // MARK: Mock routing (kept identical to previous behavior, wrapped in BrainQueryResponse)
+
+    private func mockResponse(for request: BrainQueryRequest) async throws -> BrainQueryResponse {
+        try await Task.sleep(nanoseconds: UInt64.random(in: 700_000_000...1_000_000_000))
+
+        let q = request.question.lowercased()
+        let card: BrainCard
+        if q.contains("cashier") || q.contains("staff") {
+            card = BrainCard.cashierPerformanceMock
+        } else if q.contains("hour") {
+            card = BrainCard.hourlySalesMock
+        } else if q.contains("wine") || q.contains("jordan") {
+            card = BrainCard.jordanWineMock
+        } else if q.contains("sale") || q.contains("revenue") || q.contains("best item") {
+            card = BrainCard.dailySalesMock
+        } else {
+            card = BrainCard.dailySalesMock
+        }
+
+        let mockSql = "SELECT product_name, SUM(quantity) AS total_qty,\n       SUM(line_total) AS revenue\nFROM order_items\nWHERE shop_id = \(request.miniAppId)\nGROUP BY product_name\nORDER BY total_qty DESC\nLIMIT 50;"
+        let mockRows = Int.random(in: 8...64)
+        let mockMs = Int.random(in: 80...280)
+
+        return BrainQueryResponse(
+            card: card,
+            sql: mockSql,
+            rowCount: mockRows,
+            executionMs: mockMs
+        )
+    }
+
+    // MARK: Live network call
+
+    private func liveResponse(for request: BrainQueryRequest) async throws -> BrainQueryResponse {
+        var urlRequest = URLRequest(url: endpoint)
+        urlRequest.httpMethod = "POST"
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Accept")
+        urlRequest.httpBody = try encoder.encode(request)
+
+        let (data, response): (Data, URLResponse)
+        do {
+            (data, response) = try await session.data(for: urlRequest)
+        } catch {
+            throw BrainServiceError.badResponse(status: -1)
+        }
+
+        guard let http = response as? HTTPURLResponse else {
+            throw BrainServiceError.badResponse(status: -1)
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            throw BrainServiceError.badResponse(status: http.statusCode)
+        }
+
+        do {
+            return try decoder.decode(BrainQueryResponse.self, from: data)
+        } catch {
+            throw BrainServiceError.decodingFailed(underlying: error)
+        }
+    }
+}
+
+// MARK: - Tesla3
 
 struct Tesla3: View {
 
     let embedded: Bool
     init(embedded: Bool = false) { self.embedded = embedded }
+
     @State private var showCreateShopFlow = false
     @State private var showAnalytics = false
-
-    // real flows
     @State private var showCashpoint = false
     @State private var showMenu = false
-
-    // module placeholders (to build later)
-    @State private var showSelfService = false
-    @State private var showMiniApp = false
-    @State private var showFullApp = false
-    @State private var showDevices = false
-    @State private var showTeam = false
 
     @Environment(\.dismiss) private var dismiss
 
@@ -52,42 +713,24 @@ struct Tesla3: View {
 
     private var content: some View {
         ZStack {
-
-            RestaurantControlCenterMock(
+            RestaurantAIHomeMock(
                 onOpenAnalytics: { showAnalytics = true },
-
                 onOpenMenu: { showMenu = true },
                 onOpenCashpoint: { showCashpoint = true },
-
-                onCreateShop: { showCreateShopFlow = true },   // ✅ ADD THIS
-
-                onOpenSelfService: { showSelfService = true },
-                onOpenMiniApp: { showMiniApp = true },
-                onOpenFullApp: { showFullApp = true },
-                onOpenDevices: { showDevices = true },
-                onOpenTeam: { showTeam = true },
-
+                onCreateShop: { showCreateShopFlow = true },
                 showSetupFromOnboarding: showSetupFromOnboarding,
                 onDismissSetup: { showSetupFromOnboarding = false }
             )
             .preferredColorScheme(.dark)
+            .environment(\.layoutDirection, .rightToLeft)
             .padding(.top, embedded ? 60 : 0)
 
-            // ✅ PUSH Analytics
             NavigationLink(
                 destination: AnalyticsV1View().preferredColorScheme(.dark),
                 isActive: $showAnalytics
             ) { EmptyView() }
             .hidden()
 
-            // ✅ PUSH CashPoint (real)
-            NavigationLink(
-                destination: CashPointPushWrapper().preferredColorScheme(.dark),
-                isActive: $showCashpoint
-            ) { EmptyView() }
-            .hidden()
-
-            // ✅ PUSH Menu (real)
             NavigationLink(
                 destination: menuView()
                     .preferredColorScheme(.dark)
@@ -95,9 +738,9 @@ struct Tesla3: View {
                 isActive: $showMenu
             ) { EmptyView() }
             .hidden()
+
             NavigationLink(
                 destination: FastlaneOnboardingMock {
-                    // ✅ onExitOnboarding: for now just go back
                     showCreateShopFlow = false
                 }
                 .preferredColorScheme(.dark)
@@ -106,14 +749,6 @@ struct Tesla3: View {
             ) { EmptyView() }
             .hidden()
 
-            // ✅ EMPTY MODULE VIEWS (to build later)
-            NavigationLink(destination: SelfServiceCashpointsView().preferredColorScheme(.dark), isActive: $showSelfService) { EmptyView() }
-            NavigationLink(destination: MiniAppModuleView().preferredColorScheme(.dark), isActive: $showMiniApp) { EmptyView() }.hidden()
-            NavigationLink(destination: FullAppModuleView().preferredColorScheme(.dark), isActive: $showFullApp) { EmptyView() }.hidden()
-            NavigationLink(destination: DevicesModuleView().preferredColorScheme(.dark), isActive: $showDevices) { EmptyView() }.hidden()
-            NavigationLink(destination: TeamModuleView().preferredColorScheme(.dark), isActive: $showTeam) { EmptyView() }.hidden()
-
-            // ✅ Back button only when embedded (coming from onboarding)
             if embedded {
                 VStack {
                     HStack {
@@ -140,2734 +775,1642 @@ struct Tesla3: View {
     }
 }
 
-// MARK: - Root Dashboard
+// MARK: - Root AI Home
 
-
-struct RestaurantControlCenterMock: View {
+struct RestaurantAIHomeMock: View {
 
     let onOpenAnalytics: () -> Void
-
-    // page 0 helpers
     let onOpenMenu: () -> Void
     let onOpenCashpoint: () -> Void
-    let onCreateShop: () -> Void   // ✅ move here
-
-    // page 1 (Live Control list)
-    let onOpenSelfService: () -> Void
-    let onOpenMiniApp: () -> Void
-    let onOpenFullApp: () -> Void
-    let onOpenDevices: () -> Void
-    let onOpenTeam: () -> Void
+    let onCreateShop: () -> Void
 
     let showSetupFromOnboarding: Bool
     let onDismissSetup: () -> Void
-    
 
-    @State private var page: Int = 0
-    @Namespace private var magic
     @StateObject private var vm = DashboardVM()
 
     @State private var shops: [ShopOption] = []
-    @State private var selectedShop: ShopOption = .init(id: 12, name: "My shop")
-    
+    @State private var selectedShop: ShopOption = .init(id: 12, name: "בית העם")
+
+    @State private var aiText: String = "יין ירדן במרץ?"
+    @State private var activeBrainCard: BrainCard?
+    @State private var pinnedStates: [PinnedBrainCardState] = []
+    @State private var selectedBrainCardForReport: BrainCard?
+    @State private var lastBrainQuestion: String = ""
+    @State private var pinnedRefreshTimer: Timer?
+    @State private var isBrainLoading: Bool = false
+    @State private var brainError: Bool = false
+    @State private var recentQuestions: [String] = []
+    @State private var lastBrainResponse: BrainQueryResponse?
+    @AppStorage("brain.useMockBackend") private var useMockBrain = true
+    @State private var brainHealthStatus: BrainHealthStatus = .unknown
+    @State private var brainHealthMessage: String = ""
+    @StateObject private var voice = BrainVoiceManager()
+
     var body: some View {
         ZStack {
             LinearGradient(
-                colors: page == 0
-                ? [Color.black.opacity(0.98), Color.black.opacity(0.92)]
-                : [Color.black.opacity(0.985), Color.black.opacity(0.88)],
+                colors: [
+                    Color.black.opacity(0.99),
+                    Color.black.opacity(0.93),
+                    Color.black.opacity(0.88)
+                ],
                 startPoint: .top,
                 endPoint: .bottom
             )
             .ignoresSafeArea()
 
             LinearGradient(
-                colors: [Color.black.opacity(0.45), .clear],
-                startPoint: .top,
+                colors: [
+                    Color.white.opacity(0.055),
+                    Color.clear
+                ],
+                startPoint: .topLeading,
                 endPoint: .center
             )
             .ignoresSafeArea()
             .allowsHitTesting(false)
-            .opacity(page == 0 ? 0.9 : 1.0)
-            .animation(.easeInOut(duration: 0.45), value: page)
 
-            TabView(selection: $page) {
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(spacing: 20) {
 
-                // ✅ PAGE 0: Executive Brief (no story list here)
-                ExecutiveBriefMock(
-                    onTapAnalytics: onOpenAnalytics,
-                    onTapMenu: onOpenMenu,
-                    onTapCashpoint: onOpenCashpoint,
-                    showSetupFromOnboarding: showSetupFromOnboarding,
-                    onDismissSetup: onDismissSetup,
-                    onCreateShop: onCreateShop,
-                    magic: magic,
-                    page: $page,
-                    turnover: vm.turnover,
-                    orders: vm.orders,
-                    aov: vm.aov,
-                    lastUpdatedAt: vm.lastUpdatedAt,
-                    selectedShop: $selectedShop,
-                    shops: shops
-                )
-                .tag(0)
+                    ShopTopBar(
+                        selectedShop: $selectedShop,
+                        shops: shops,
+                        onCreateShop: onCreateShop
+                    )
 
-                // ✅ PAGE 1: Live Control (Tesla story list lives here)
-                LiveControlMock(
-                    onTapAnalytics: onOpenAnalytics,
+                    if showSetupFromOnboarding {
+                        SetupMiniCard(
+                            onDismiss: onDismissSetup,
+                            onMenu: {
+                                onDismissSetup()
+                                onOpenMenu()
+                            },
+                            onCashpoint: {
+                                onDismissSetup()
+                                onOpenCashpoint()
+                            }
+                        )
+                    }
 
-                    onTapCashpoint: onOpenCashpoint,
-                    onTapSelfService: onOpenSelfService,
-                    onTapMiniApp: onOpenMiniApp,
-                    onTapFullApp: onOpenFullApp,
-                    onTapDevices: onOpenDevices,
-                    onTapTeam: onOpenTeam
-                )
-                .tag(1)
+                    LiveHeroHeader(
+                        turnover: vm.turnover,
+                        orders: vm.orders,
+                        aov: vm.aov,
+                        cashpointOrders: vm.cashpointOrders,
+                        selfOrders: vm.selfOrders
+                    )
+                    .padding(.top, 8)
+
+                    AskFastlaneCard(
+                        text: $aiText,
+                        showResult: .init(
+                            get: { activeBrainCard != nil },
+                            set: { if !$0 { activeBrainCard = nil } }
+                        ),
+                        recentQuestions: recentQuestions,
+                        isRecording: voice.isRecording,
+                        onMicTap: {
+                            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                            voice.toggleRecording()
+                        },
+                        onSubmit: { submitBrainQuery() }
+                    )
+                    .onChange(of: voice.isRecording) { recording in
+                        if recording {
+                            aiText = ""
+                        }
+                    }
+                    .onChange(of: voice.transcript) { newValue in
+                        if voice.isRecording {
+                            aiText = newValue
+                        }
+                    }
+                    .onChange(of: voice.isRecording) { recording in
+                        if !recording && !voice.transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            aiText = voice.transcript
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                                submitBrainQuery()
+                            }
+                        }
+                    }
+                    .alert("נדרשת גישה למיקרופון", isPresented: $voice.permissionDenied) {
+                        Button("הגדרות") {
+                            if let url = URL(string: UIApplication.openSettingsURLString) {
+                                UIApplication.shared.open(url)
+                            }
+                        }
+                        Button("ביטול", role: .cancel) {}
+                    } message: {
+                        Text("קלט קולי של Brain דורש גישה למיקרופון וזיהוי דיבור. הפעל בהגדרות.")
+                    }
+
+                    if isBrainLoading {
+                        BrainThinkingCard()
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+
+                    if brainError {
+                        BrainErrorCard(onRetry: { submitBrainQuery() })
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+
+                    if let card = activeBrainCard {
+                        BrainMetricGraphCard(
+                            card: card,
+                            response: lastBrainResponse,
+                            onPinToggle: {
+                                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                                withAnimation(.spring(response: 0.45, dampingFraction: 0.86)) {
+                                    togglePin(for: card)
+                                }
+                            },
+                            onOpenReport: {
+                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                selectedBrainCardForReport = card
+                            }
+                        )
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+
+                    if !pinnedStates.isEmpty {
+                        PinnedDashboardSection(
+                            states: pinnedStates,
+                            onUnpin: { state in
+                                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                                withAnimation(.spring(response: 0.45, dampingFraction: 0.86)) {
+                                    unpinCard(state.card)
+                                }
+                            },
+                            onOpenReport: { state in
+                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                selectedBrainCardForReport = state.card
+                            }
+                        )
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+
+                    QuickActionsRow(
+                        onMenu: onOpenMenu,
+                        onCashpoint: onOpenCashpoint,
+                        onAnalytics: onOpenAnalytics
+                    )
+                    .padding(.top, 2)
+
+                    OperationalPulseCard()
+                        .padding(.bottom, 28)
+                }
+                .padding(.horizontal, 18)
+                .padding(.top, 14)
             }
-            .tabViewStyle(.page(indexDisplayMode: .never))
-            .animation(.spring(response: 0.55, dampingFraction: 0.86), value: page)
+        }
+        .navigationDestination(isPresented: .init(
+            get: { selectedBrainCardForReport != nil },
+            set: { if !$0 { selectedBrainCardForReport = nil } }
+        )) {
+            if let card = selectedBrainCardForReport {
+                BrainReportView(card: card)
+                    .preferredColorScheme(.dark)
+                    .toolbar(.hidden, for: .navigationBar)
+            }
         }
         .onAppear {
-            let loadedOwner = OwnerShopsStore.load()
+            loadPinnedStates()
+            loadRecentQuestions()
+            checkBrainHealth()
+            refreshPinnedBrainCards()
+            pinnedRefreshTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { _ in
+                refreshPinnedBrainCards()
+            }
 
-            // convert OwnerShop -> ShopOption (keep stable IDs if you want)
+            let loadedOwner = OwnerShopsStore.load()
             let loaded: [ShopOption] = loadedOwner.enumerated().map { idx, s in
                 ShopOption(id: 12 + idx, name: s.name)
             }
 
             if loaded.isEmpty {
-                // create default only once
-                let created = OwnerShopsStore.addShop(name: "My shop")
+                let created = OwnerShopsStore.addShop(name: "בית העם")
                 shops = [ShopOption(id: 12, name: created.name)]
                 selectedShop = shops[0]
             } else {
                 shops = loaded
-                // keep current selection if still exists; otherwise pick first
-                if let match = loaded.first(where: { $0.name == selectedShop.name }) {
-                    selectedShop = match
-                } else {
-                    selectedShop = loaded[0]
-                }
+                selectedShop = loaded.first ?? .init(id: 12, name: "בית העם")
             }
 
             vm.startPolling(miniAppId: selectedShop.id)
         }
-       
-        .onDisappear { vm.stopPolling() }
+        .onDisappear {
+            vm.stopPolling()
+            pinnedRefreshTimer?.invalidate()
+            pinnedRefreshTimer = nil
+        }
+    }
+
+    private func togglePin(for card: BrainCard) {
+        if let idx = pinnedStates.firstIndex(where: { $0.queryKey == card.queryKey }) {
+            pinnedStates.remove(at: idx)
+            activeBrainCard?.isPinned = false
+        } else {
+            guard !pinnedStates.contains(where: { $0.queryKey == card.queryKey }) else { return }
+            var pinned = card
+            pinned.isPinned = true
+            let state = PinnedBrainCardState(
+                queryKey: card.queryKey,
+                question: lastBrainQuestion.isEmpty ? card.title : lastBrainQuestion,
+                card: pinned,
+                lastUpdatedAt: Date(),
+                lastRefreshFailed: false
+            )
+            pinnedStates.append(state)
+            activeBrainCard?.isPinned = true
+        }
+        savePinnedStates()
+    }
+
+    private func unpinCard(_ card: BrainCard) {
+        pinnedStates.removeAll { $0.queryKey == card.queryKey }
+        if activeBrainCard?.queryKey == card.queryKey {
+            activeBrainCard?.isPinned = false
+        }
+        savePinnedStates()
+    }
+
+    private static let pinnedStatesKey = "brain.pinned.states"
+    private static let legacyPinnedCardsKey = "brain.pinned.cards"
+
+    private func savePinnedStates() {
+        guard let data = try? JSONEncoder().encode(pinnedStates) else { return }
+        UserDefaults.standard.set(data, forKey: Self.pinnedStatesKey)
+    }
+
+    private func loadPinnedStates() {
+        if let data = UserDefaults.standard.data(forKey: Self.pinnedStatesKey),
+           let states = try? JSONDecoder().decode([PinnedBrainCardState].self, from: data) {
+            var seen = Set<String>()
+            pinnedStates = states.filter { seen.insert($0.queryKey).inserted }
+            return
+        }
+        // Migrate legacy [BrainCard] format
+        if let data = UserDefaults.standard.data(forKey: Self.legacyPinnedCardsKey),
+           let cards = try? JSONDecoder().decode([BrainCard].self, from: data) {
+            var seen = Set<String>()
+            pinnedStates = cards
+                .filter { seen.insert($0.queryKey).inserted }
+                .map { card in
+                    var c = card
+                    c.isPinned = true
+                    return PinnedBrainCardState(
+                        queryKey: c.queryKey,
+                        question: c.title,
+                        card: c,
+                        lastUpdatedAt: .distantPast,
+                        lastRefreshFailed: false
+                    )
+                }
+            savePinnedStates()
+            UserDefaults.standard.removeObject(forKey: Self.legacyPinnedCardsKey)
+        }
+    }
+
+    private func refreshPinnedBrainCards() {
+        guard !pinnedStates.isEmpty else { return }
+        let shopId = selectedShop.id
+        for i in pinnedStates.indices {
+            let state = pinnedStates[i]
+            Task {
+                let request = BrainQueryRequest(
+                    miniAppId: shopId,
+                    question: state.question,
+                    language: "en",
+                    timezone: TimeZone.current.identifier
+                )
+                do {
+                    let response = try await BrainService.shared.query(request)
+                    await MainActor.run {
+                        guard let idx = pinnedStates.firstIndex(where: { $0.queryKey == state.queryKey }) else { return }
+                        var updated = response.card
+                        updated.isPinned = true
+                        pinnedStates[idx].card = updated
+                        pinnedStates[idx].lastUpdatedAt = Date()
+                        pinnedStates[idx].lastRefreshFailed = false
+                        savePinnedStates()
+                    }
+                } catch {
+                    await MainActor.run {
+                        guard let idx = pinnedStates.firstIndex(where: { $0.queryKey == state.queryKey }) else { return }
+                        pinnedStates[idx].lastRefreshFailed = true
+                    }
+                }
+            }
+        }
+    }
+
+    private static let recentQuestionsKey = "brain.recent.questions"
+
+    private func saveRecentQuestion(_ question: String) {
+        let trimmed = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        var list = recentQuestions.filter {
+
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+
+                .caseInsensitiveCompare(trimmed) != .orderedSame
+
+        }
+        list.insert(trimmed, at: 0)
+        if list.count > 5 { list = Array(list.prefix(5)) }
+        recentQuestions = list
+        UserDefaults.standard.set(list, forKey: Self.recentQuestionsKey)
+    }
+
+    private func loadRecentQuestions() {
+        recentQuestions = (UserDefaults.standard.stringArray(forKey: Self.recentQuestionsKey) ?? [])
+            .prefix(5)
+            .map { $0 }
+    }
+
+    private func checkBrainHealth() {
+        if useMockBrain {
+            brainHealthStatus = .unknown
+            brainHealthMessage = "מצב דמו"
+            return
+        }
+        brainHealthStatus = .checking
+        brainHealthMessage = "בודק שרת\u{2026}"
+        Task {
+            do {
+                let _ = try await BrainService.shared.healthCheck()
+                await MainActor.run {
+                    brainHealthStatus = .online
+                    brainHealthMessage = "שרת מחובר"
+                }
+            } catch {
+                await MainActor.run {
+                    brainHealthStatus = .offline
+                    brainHealthMessage = "שרת מנותק"
+                }
+            }
+        }
+    }
+
+    private func submitBrainQuery() {
+        let question = aiText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !question.isEmpty, !isBrainLoading else { return }
+        lastBrainQuestion = question
+
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        lastBrainResponse = nil
+        withAnimation(.spring(response: 0.45, dampingFraction: 0.86)) {
+            activeBrainCard = nil
+            brainError = false
+            isBrainLoading = true
+        }
+
+        let request = BrainQueryRequest(
+            miniAppId: selectedShop.id,
+            question: question,
+            language: "en",
+            timezone: TimeZone.current.identifier
+        )
+
+        Task {
+            do {
+                let response = try await BrainService.shared.query(request)
+                var card = response.card
+                if let existing = pinnedStates.first(where: { $0.queryKey == card.queryKey }) {
+                    card = existing.card
+                }
+                await MainActor.run {
+                    saveRecentQuestion(question)
+                    lastBrainResponse = response
+                    withAnimation(.spring(response: 0.45, dampingFraction: 0.86)) {
+                        isBrainLoading = false
+                        activeBrainCard = card
+                    }
+                }
+            } catch {
+                // Any failure (invalid URL, bad response, decoding) surfaces the existing BrainErrorCard.
+                await MainActor.run {
+                    withAnimation(.spring(response: 0.45, dampingFraction: 0.86)) {
+                        isBrainLoading = false
+                        brainError = true
+                    }
+                }
+            }
+        }
     }
 }
 
-// MARK: - PAGE 0: Executive Brief (keep clean)
+// MARK: - Live Hero
 
-private struct ExecutiveBriefMock: View {
-
-    let onTapAnalytics: () -> Void
-    let onTapMenu: () -> Void
-    let onTapCashpoint: () -> Void
-
-    let showSetupFromOnboarding: Bool
-    let onDismissSetup: () -> Void
-    let onCreateShop: () -> Void   // ✅ move here (after onDismissSetup)
-
-    let magic: Namespace.ID
-    @Binding var page: Int
-
+private struct LiveHeroHeader: View {
     let turnover: Int
     let orders: Int
     let aov: Double
-    let lastUpdatedAt: Date?
+    let cashpointOrders: Int
+    let selfOrders: Int
 
-    @Binding var selectedShop: ShopOption
-    let shops: [ShopOption]
-
-    private let secondary = Color.white.opacity(0.86)
-
-    var metaLine: String {
+    private var metaLine: String {
         let aovInt = Int(aov.rounded(.toNearestOrAwayFromZero))
         let oph = ordersPerHourSince8amIsrael(orders: orders)
-        return "\(orders) orders · ₪\(aovInt) Avg  · \(String(format: "%.0f", oph))/hr"
+        return "\(orders) הזמנות \u{00B7} \u{20AA}\(aovInt) ממוצע \u{00B7} \(String(format: "%.0f", oph))/שעה"
     }
 
     var body: some View {
-        ScrollView(.vertical, showsIndicators: false) {
-            VStack(spacing: 18) {
+        VStack(alignment: .leading, spacing: 12) {
 
-                ShopTopBar(
-                    selectedShop: $selectedShop,
-                    shops: shops,
-                    onCreateShop: onCreateShop
-                )
+            HStack(spacing: 7) {
+                Circle()
+                    .fill(.green)
+                    .frame(width: 7, height: 7)
 
-                // ✅ One-time setup card (menu first)
-                if showSetupFromOnboarding {
-                    GlassCard(corner: 26) {
-                        VStack(alignment: .leading, spacing: 12) {
+                Text("לייב היום")
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .tracking(1.4)
+                    .foregroundStyle(.white.opacity(0.55))
+            }
 
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("Finish setup")
-                                        .font(.system(size: 16, weight: .semibold, design: .rounded))
-                                        .foregroundStyle(.white.opacity(0.92))
+            Text(turnover, format: .number)
+                .font(.system(size: 68, weight: .regular, design: .rounded))
+                .monospacedDigit()
+                .tracking(-1.1)
+                .foregroundStyle(.white)
+                .contentTransition(.numericText())
+                .animation(.easeInOut(duration: 0.25), value: turnover)
 
-                                    Text("Step 1 — Add your products")
-                                        .font(.system(size: 13, weight: .semibold, design: .rounded))
-                                        .foregroundStyle(.white.opacity(0.70))
-                                }
+            Text(metaLine)
+                .font(.system(size: 14, weight: .medium, design: .rounded))
+                .foregroundStyle(.white.opacity(0.82))
 
-                                Spacer()
+            if orders > 0 {
+                let selfPct = Int((Double(selfOrders) / Double(orders) * 100).rounded())
 
-                                Button {
-                                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                    onDismissSetup()
-                                } label: {
-                                    Image(systemName: "xmark")
-                                        .font(.system(size: 12, weight: .bold))
-                                        .foregroundStyle(.white.opacity(0.75))
-                                        .frame(width: 28, height: 28)
-                                        .background(.white.opacity(0.06))
-                                        .clipShape(Circle())
-                                }
-                                .buttonStyle(.plain)
-                            }
+                HStack(alignment: .bottom, spacing: 8) {
+                    Text("\(selfPct)%")
+                        .font(.system(size: 30, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(Color(red: 0.45, green: 0.95, blue: 0.72))
 
-                            Text("Add 3–5 items and your Mini App + kiosks become ready.")
-                                .font(.system(size: 13, weight: .medium, design: .rounded))
+                    Text("שירות עצמי")
+                        .font(.system(size: 14, weight: .medium, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.82))
+                        .padding(.bottom, 4)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+// MARK: - Ask Brain
+
+private struct AskFastlaneCard: View {
+    @Binding var text: String
+    @Binding var showResult: Bool
+
+    let recentQuestions: [String]
+    var isRecording: Bool = false
+    var onMicTap: () -> Void = {}
+    let onSubmit: () -> Void
+
+    @State private var micPulse = false
+
+    private let suggestions = [
+        "הפריט הכי טוב היום",
+        "מכירות לפי שעה",
+        "יין במרץ"
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+
+            HStack {
+                Text("שאל את בריין")
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .tracking(1.4)
+                    .foregroundStyle(.white.opacity(0.52))
+
+                Spacer()
+
+                if isRecording {
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(.red)
+                            .frame(width: 6, height: 6)
+                            .opacity(micPulse ? 0.4 : 1.0)
+                        Text("מקשיב")
+                            .font(.system(size: 10, weight: .bold, design: .rounded))
+                            .foregroundStyle(.red.opacity(0.9))
+                    }
+                } else {
+                    Text("BRAIN")
+                        .font(.system(size: 10, weight: .bold, design: .rounded))
+                        .foregroundStyle(.black.opacity(0.85))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(.white.opacity(0.88))
+                        .clipShape(Capsule())
+                }
+            }
+
+            HStack(spacing: 8) {
+
+                Button(action: onMicTap) {
+                    ZStack {
+                        if isRecording {
+                            Circle()
+                                .fill(.red.opacity(0.15))
+                                .frame(width: 58, height: 58)
+                                .scaleEffect(micPulse ? 1.2 : 1.0)
+                                .opacity(micPulse ? 0.0 : 0.5)
+
+                            Circle()
+                                .fill(.red.opacity(0.10))
+                                .frame(width: 52, height: 52)
+                                .scaleEffect(micPulse ? 1.1 : 1.0)
+                                .opacity(micPulse ? 0.0 : 0.4)
+                        }
+
+                        Circle()
+                            .fill(isRecording ? .red.opacity(0.25) : .white.opacity(0.10))
+
+                        Circle()
+                            .stroke(isRecording ? .red.opacity(0.5) : .white.opacity(0.16), lineWidth: 1)
+
+                        Image(systemName: isRecording ? "stop.fill" : "mic.fill")
+                            .font(.system(size: isRecording ? 14 : 17, weight: .semibold))
+                            .foregroundStyle(isRecording ? .red : .white.opacity(0.92))
+                    }
+                    .frame(width: 46, height: 46)
+                }
+                .buttonStyle(.plain)
+
+                TextField(isRecording ? "מקשיב\u{2026}" : "שאל את Brain כל דבר\u{2026}", text: $text)
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.92))
+                    .submitLabel(.search)
+                    .onSubmit(onSubmit)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                    .disabled(isRecording)
+                    .padding(.horizontal, 12)
+                    .frame(height: 46)
+                    .frame(maxWidth: .infinity)
+                    .background(.white.opacity(0.07))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .stroke(isRecording ? .red.opacity(0.25) : .white.opacity(0.10), lineWidth: 1)
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+                Button(action: onSubmit) {
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(.black)
+                        .frame(width: 44, height: 44)
+                        .background(.white)
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .disabled(isRecording)
+                .opacity(isRecording ? 0.4 : 1.0)
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(suggestions, id: \.self) { suggestion in
+                        Button {
+                            text = suggestion == "יין במרץ"
+                            ? "כמה יינות ג׳ורדן נמכרו במרץ?"
+                            : suggestion
+
+                            onSubmit()
+                        } label: {
+                            Text(suggestion)
+                                .font(.system(size: 12, weight: .semibold, design: .rounded))
                                 .foregroundStyle(.white.opacity(0.72))
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(.white.opacity(0.07))
+                                .overlay(
+                                    Capsule()
+                                        .stroke(.white.opacity(0.09), lineWidth: 1)
+                                )
+                                .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
 
-                            HStack(spacing: 12) {
+            if !recentQuestions.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.35))
 
+                        Text("אחרונים")
+                            .font(.system(size: 10, weight: .semibold, design: .rounded))
+                            .tracking(1.2)
+                            .foregroundStyle(.white.opacity(0.35))
+                    }
+
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(recentQuestions, id: \.self) { question in
                                 Button {
-                                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                                    onTapMenu()
-                                    onDismissSetup()
+                                    text = question
+                                    onSubmit()
                                 } label: {
-                                    HStack(spacing: 8) {
-                                        Image(systemName: "menucard.fill")
-                                            .font(.system(size: 14, weight: .bold))
-                                        Text("Create Menu")
-                                            .font(.system(size: 15, weight: .bold, design: .rounded))
-                                    }
-                                    .foregroundStyle(.black)
-                                    .frame(maxWidth: .infinity)
-                                    .frame(height: 48)
-                                    .background(.white)
-                                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                                }
-                                .buttonStyle(.plain)
-
-                                Button {
-                                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                                    onTapCashpoint()
-                                    onDismissSetup()
-                                } label: {
-                                    HStack(spacing: 8) {
-                                        Image(systemName: "hand.point.up.braille.fill")
-                                            .font(.system(size: 14, weight: .bold))
-                                        Text("Cashpoint")
-                                            .font(.system(size: 15, weight: .bold, design: .rounded))
-                                    }
-                                    .foregroundStyle(.white)
-                                    .frame(maxWidth: .infinity)
-                                    .frame(height: 48)
-                                    .background(.white.opacity(0.10))
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                            .stroke(.white.opacity(0.12), lineWidth: 1)
-                                    )
-                                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                    Text(question)
+                                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                                        .foregroundStyle(.white.opacity(0.52))
+                                        .lineLimit(1)
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 7)
+                                        .background(.white.opacity(0.045))
+                                        .overlay(
+                                            Capsule()
+                                                .stroke(.white.opacity(0.06), lineWidth: 1)
+                                        )
+                                        .clipShape(Capsule())
                                 }
                                 .buttonStyle(.plain)
                             }
                         }
                     }
                 }
-
-                // ✅ HERO stays here
-                FancyHeroHeader(
-                    magic: magic,
-                    turnover: turnover,
-                    meta: metaLine,
-                    monthlyText: "Projected 439k vs 372k",
-                    deltaText: "+18%"
-                )
-                .padding(.top, 8)
-
-                TeslaControlsRow(
-                    onMenu: onTapMenu,
-                    onCashpoint: onTapCashpoint,
-                    onAnalytics: onTapAnalytics   // ✅ ADD
-                )
-                .padding(.top, 6)
-                ManagerDailySummaryCard()
-                    .padding(.top, 20)
-                InsightsCard()
-                    .padding(.top, 20)
-                
-                // ✅ your Manager Summary / AI Insights remain here (not included)
-
-                Text("Swipe → Live Control")
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
-                    .foregroundStyle(secondary)
-                    .padding(.top, 6)
-                    .padding(.bottom, 18)
             }
-            .padding(.horizontal, 18)
-            .padding(.top, 14)
+        }
+        .padding(15)
+        .background(
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
+                .fill(.white.opacity(0.055))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 26, style: .continuous)
+                        .stroke(.white.opacity(0.09), lineWidth: 1)
+                )
+        )
+        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: isRecording)
+        .onChange(of: isRecording) { recording in
+            if recording {
+                withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
+                    micPulse = true
+                }
+            } else {
+                withAnimation(.easeOut(duration: 0.2)) {
+                    micPulse = false
+                }
+            }
         }
     }
 }
 
-// MARK: - PAGE 1: Live Control (Tesla list lives here)
+// MARK: - Brain Loading Card
 
-private struct LiveControlMock: View {
-    let onTapAnalytics: () -> Void
-
-    let onTapCashpoint: () -> Void
-    let onTapSelfService: () -> Void
-    let onTapMiniApp: () -> Void
-    let onTapFullApp: () -> Void
-    let onTapDevices: () -> Void
-    let onTapTeam: () -> Void
+private struct BrainThinkingCard: View {
+    @State private var pulse = false
 
     var body: some View {
-        ScrollView(.vertical, showsIndicators: false) {
-            VStack(spacing: 16) {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) {
+                Circle()
+                    .fill(.white.opacity(pulse ? 0.30 : 0.10))
+                    .frame(width: 10, height: 10)
 
-                MiniTopBar(title: "Live Control", onTapAnalytics: onTapAnalytics)
-
-                TeslaStoryList(
-                    onCashpoint: onTapCashpoint,
-                    onSelfService: onTapSelfService,
-                    onMiniApp: onTapMiniApp,
-                    onFullApp: onTapFullApp,
-                    onDevices: onTapDevices,
-                    onTeam: onTapTeam,
-                    cashpointSubtitle: "Ready • 2 iPads paired",
-                    selfServiceSubtitle: "3 kiosks • locked mode",
-                    miniAppSubtitle: "App Clip live • 1,240 opens",
-                    fullAppSubtitle: "85 installed users",
-                    devicesSubtitle: "3 devices • kiosk locked",
-                    teamSubtitle: "Owner • 2 managers • 4 cashiers"
-                )
-
-                Spacer(minLength: 20)
+                Text("Brain חושב\u{2026}")
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.72))
             }
-            .padding(.horizontal, 18)
-            .padding(.top, 10)
+
+            VStack(alignment: .leading, spacing: 14) {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(.white.opacity(pulse ? 0.10 : 0.05))
+                    .frame(height: 28)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                HStack(spacing: 16) {
+                    ForEach(0..<3, id: \.self) { _ in
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(.white.opacity(pulse ? 0.09 : 0.04))
+                            .frame(height: 36)
+                    }
+                }
+
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(.white.opacity(pulse ? 0.07 : 0.03))
+                    .frame(height: 100)
+            }
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .fill(.white.opacity(0.055))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 28, style: .continuous)
+                        .stroke(.white.opacity(0.09), lineWidth: 1)
+                )
+        )
+        .onAppear {
+            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+                pulse = true
+            }
         }
     }
 }
 
-// MARK: - Tesla Story List (conversion narrative + infrastructure)
+// MARK: - Brain Health Dot
 
-private struct TeslaStoryList: View {
-    let onCashpoint: () -> Void
-    let onSelfService: () -> Void
-    let onMiniApp: () -> Void
-    let onFullApp: () -> Void
-    let onDevices: () -> Void
-    let onTeam: () -> Void
+private struct BrainHealthDot: View {
+    let status: BrainHealthStatus
+    @State private var pulse = false
 
-    let cashpointSubtitle: String
-    let selfServiceSubtitle: String
-    let miniAppSubtitle: String
-    let fullAppSubtitle: String
-    let devicesSubtitle: String
-    let teamSubtitle: String
+    private var color: Color {
+        switch status {
+        case .unknown:  return .orange
+        case .checking: return .gray
+        case .online:   return .green
+        case .offline:  return .red
+        }
+    }
 
     var body: some View {
-        VStack(spacing: 10) {
-            ModuleRow(title: "Cashpoint", subtitle: cashpointSubtitle, icon: "hand.point.up.braille.fill", onTap: onCashpoint)
-            ModuleRow(title: "Self Service Cashpoints", subtitle: selfServiceSubtitle, icon: "rectangle.and.hand.point.up.left.fill", onTap: onSelfService)
-            ModuleRow(title: "Mini App", subtitle: miniAppSubtitle, icon: "qrcode", onTap: onMiniApp)
-            ModuleRow(title: "Full App", subtitle: fullAppSubtitle, icon: "person.crop.circle.fill", onTap: onFullApp)
+        Circle()
+            .fill(color)
+            .frame(width: 7, height: 7)
+            .opacity(status == .checking ? (pulse ? 0.3 : 1.0) : 1.0)
+            .animation(
+                status == .checking
+                    ? .easeInOut(duration: 0.7).repeatForever(autoreverses: true)
+                    : .default,
+                value: pulse
+            )
+            .onChange(of: status) { newValue in
+                pulse = newValue == .checking
+            }
+            .onAppear { pulse = status == .checking }
+    }
+}
 
-            Divider().background(Color.white.opacity(0.08)).padding(.vertical, 6)
+// MARK: - Brain Error Card
 
-            ModuleRow(title: "Devices", subtitle: devicesSubtitle, icon: "ipad.and.iphone", onTap: onDevices)
-            ModuleRow(title: "Team", subtitle: teamSubtitle, icon: "person.3.fill", onTap: onTeam)
+private struct BrainErrorCard: View {
+    let onRetry: () -> Void
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "sparkles")
+                .font(.system(size: 28, weight: .light))
+                .foregroundStyle(.white.opacity(0.35))
+
+            Text("Brain לא הצליח להשלים את השאילתה.")
+                .font(.system(size: 14, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.62))
+                .multilineTextAlignment(.center)
+
+            Button(action: onRetry) {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 12, weight: .semibold))
+
+                    Text("נסה שוב")
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                }
+                .foregroundStyle(.white.opacity(0.88))
+                .padding(.horizontal, 18)
+                .frame(height: 38)
+                .background(.white.opacity(0.10))
+                .overlay(
+                    Capsule()
+                        .stroke(.white.opacity(0.12), lineWidth: 1)
+                )
+                .clipShape(Capsule())
+            }
+            .buttonStyle(.plain)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 24)
+        .padding(.horizontal, 16)
+        .background(
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .fill(.white.opacity(0.045))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 28, style: .continuous)
+                        .stroke(.white.opacity(0.08), lineWidth: 1)
+                )
+        )
+    }
+}
+
+// MARK: - Brain Metric Graph Card (generic)
+
+private struct BrainMetricGraphCard: View {
+
+    let card: BrainCard
+    var response: BrainQueryResponse? = nil
+    let onPinToggle: () -> Void
+    let onOpenReport: () -> Void
+
+    @State private var showDebugSheet = false
+
+    private var metadataLine: String? {
+        guard let r = response else { return nil }
+        var parts: [String] = []
+        if let rows = r.rowCount { parts.append("\(rows) rows") }
+        if let ms = r.executionMs { parts.append("\(ms)ms") }
+        return parts.isEmpty ? nil : parts.joined(separator: " \u{00B7} ")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(card.title)
+                        .font(.system(size: 16, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.92))
+
+                    Text(card.subtitle)
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.50))
+                }
+
+                Spacer()
+
+                Button(action: onPinToggle) {
+                    Image(systemName: card.isPinned ? "pin.fill" : "pin")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(card.isPinned ? .black : .white.opacity(0.80))
+                        .frame(width: 38, height: 38)
+                        .background(card.isPinned ? Color.white.opacity(0.92) : Color.white.opacity(0.08))
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
+            }
+
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(card.primaryValue)
+                        .font(.system(size: 48, weight: .regular, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(.white)
+
+                    Text(card.primaryLabel)
+                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.62))
+                }
+
+                HStack(spacing: 16) {
+                    ForEach(card.metrics) { metric in
+                        ResultMiniMetric(title: metric.title, value: metric.value)
+                    }
+                }
+
+                MockLineGraph(values: card.graphValues.map { CGFloat($0) })
+                    .frame(height: 132)
+                    .padding(.top, 2)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                onOpenReport()
+            }
+
+            HStack(spacing: 10) {
+                ButtonChip(
+                    title: card.isPinned ? "מוצמד" : "הצמד",
+                    icon: card.isPinned ? "pin.fill" : "pin",
+                    action: onPinToggle
+                )
+
+                ButtonChip(
+                    title: "פתח דוח",
+                    icon: "chart.line.uptrend.xyaxis",
+                    action: onOpenReport
+                )
+
+                ButtonChip(
+                    title: "השווה",
+                    icon: "arrow.left.arrow.right",
+                    action: {}
+                )
+
+                if let sql = response?.sql, !sql.isEmpty {
+                    ButtonChip(
+                        title: "דיבאג",
+                        icon: "ladybug",
+                        action: { showDebugSheet = true }
+                    )
+                }
+            }
+
+            if let meta = metadataLine {
+                Text(meta)
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.35))
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .fill(.white.opacity(0.065))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 28, style: .continuous)
+                        .stroke(card.isPinned ? .white.opacity(0.22) : .white.opacity(0.10), lineWidth: 1)
+                )
+        )
+        .sheet(isPresented: $showDebugSheet) {
+            if let r = response {
+                BrainDebugSheet(response: r)
+            }
         }
     }
 }
-// MARK: - Dashboard Models
 
-private struct ManagerEntry {
-    let badge: RowBadge
+// MARK: - Brain Debug Sheet (dev only)
+
+private struct BrainDebugSheet: View {
+    let response: BrainQueryResponse
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.96).ignoresSafeArea()
+
+            VStack(alignment: .leading, spacing: 20) {
+                HStack {
+                    Text("דיבאג Brain")
+                        .font(.system(size: 18, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.88))
+
+                    Spacer()
+
+                    Button { dismiss() } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(.white.opacity(0.70))
+                            .frame(width: 32, height: 32)
+                            .background(.white.opacity(0.08))
+                            .clipShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                if let sql = response.sql {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("SQL")
+                            .font(.system(size: 11, weight: .semibold, design: .rounded))
+                            .tracking(1.2)
+                            .foregroundStyle(.white.opacity(0.40))
+
+                        ScrollView(.vertical, showsIndicators: true) {
+                            Text(sql)
+                                .font(.system(size: 13, weight: .regular, design: .monospaced))
+                                .foregroundStyle(.white.opacity(0.78))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .frame(maxHeight: 260)
+                        .padding(12)
+                        .background(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .fill(.white.opacity(0.04))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                        .stroke(.white.opacity(0.08), lineWidth: 1)
+                                )
+                        )
+                    }
+                }
+
+                HStack(spacing: 24) {
+                    if let rows = response.rowCount {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("שורות")
+                                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                                .tracking(1.0)
+                                .foregroundStyle(.white.opacity(0.40))
+
+                            Text("\(rows)")
+                                .font(.system(size: 22, weight: .regular, design: .monospaced))
+                                .foregroundStyle(.white.opacity(0.88))
+                        }
+                    }
+
+                    if let ms = response.executionMs {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("זמן ריצה")
+                                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                                .tracking(1.0)
+                                .foregroundStyle(.white.opacity(0.40))
+
+                            Text("\(ms)ms")
+                                .font(.system(size: 22, weight: .regular, design: .monospaced))
+                                .foregroundStyle(.white.opacity(0.88))
+                        }
+                    }
+                }
+
+                Spacer()
+            }
+            .padding(20)
+        }
+        .presentationDetents([.medium])
+        .presentationDragIndicator(.visible)
+    }
+}
+
+// MARK: - Brain Report View (generic)
+
+private struct BrainReportView: View {
+    let card: BrainCard
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var selectedPeriodId: String = ""
+
+    private var currentPeriod: BrainReportPeriod? {
+        card.periods.first { $0.id == selectedPeriodId }
+    }
+
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Color.black.opacity(0.99),
+                    Color.black.opacity(0.92),
+                    Color.black.opacity(0.86)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .ignoresSafeArea()
+
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(spacing: 18) {
+                    topBar
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(card.reportTitle.isEmpty ? card.title : card.reportTitle)
+                            .font(.system(size: 34, weight: .regular, design: .rounded))
+                            .foregroundStyle(.white)
+
+                        Text(card.reportSubtitle)
+                            .font(.system(size: 14, weight: .semibold, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.55))
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    if card.periods.isEmpty {
+                        emptyState
+                    } else {
+                        segmentPicker
+
+                        if let period = currentPeriod {
+                            VStack(alignment: .leading, spacing: 14) {
+                                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                    Text(period.primaryValue)
+                                        .font(.system(size: 54, weight: .regular, design: .rounded))
+                                        .monospacedDigit()
+                                        .foregroundStyle(.white)
+
+                                    Text(period.primaryLabel)
+                                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                                        .foregroundStyle(.white.opacity(0.62))
+                                }
+
+                                HStack(spacing: 16) {
+                                    ForEach(period.metrics) { metric in
+                                        ResultMiniMetric(title: metric.title, value: metric.value)
+                                    }
+                                }
+
+                                MockLineGraph(values: period.graphValues.map { CGFloat($0) })
+                                    .frame(height: 190)
+                                    .padding(.top, 8)
+                            }
+                            .padding(16)
+                            .background(
+                                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                                    .fill(.white.opacity(0.06))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 28, style: .continuous)
+                                            .stroke(.white.opacity(0.10), lineWidth: 1)
+                                    )
+                            )
+
+                            if !period.breakdownRows.isEmpty {
+                                reportBreakdown(rows: period.breakdownRows)
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, 18)
+                .padding(.top, 12)
+                .padding(.bottom, 28)
+            }
+        }
+        .onAppear {
+            if selectedPeriodId.isEmpty {
+                selectedPeriodId = card.periods.first(where: { $0.id == "M" })?.id
+                    ?? card.periods.first?.id
+                    ?? ""
+            }
+        }
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "chart.bar.xaxis")
+                .font(.system(size: 38, weight: .light))
+                .foregroundStyle(.white.opacity(0.30))
+
+            Text("אין נתוני דוח עדיין")
+                .font(.system(size: 16, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.50))
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 60)
+    }
+
+    private var topBar: some View {
+        HStack {
+            Button { dismiss() } label: {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.9))
+                    .frame(width: 44, height: 44)
+                    .background(.ultraThinMaterial)
+                    .clipShape(Circle())
+            }
+            .buttonStyle(.plain)
+
+            Spacer()
+
+            Text("דוח")
+                .font(.system(size: 17, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.82))
+
+            Spacer()
+
+            Image(systemName: "ellipsis")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.55))
+                .frame(width: 44, height: 44)
+        }
+    }
+
+    private var segmentPicker: some View {
+        HStack(spacing: 8) {
+            ForEach(card.periods) { period in
+                Button {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.86)) {
+                        selectedPeriodId = period.id
+                    }
+                } label: {
+                    Text(period.label)
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundStyle(selectedPeriodId == period.id ? .black : .white.opacity(0.75))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 38)
+                        .background(selectedPeriodId == period.id ? .white.opacity(0.92) : .white.opacity(0.07))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                                .stroke(.white.opacity(0.10), lineWidth: 1)
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private func reportBreakdown(rows: [BrainBreakdownRow]) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("פירוט")
+                .font(.system(size: 16, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.9))
+
+            ForEach(rows) { row in
+                ReportRow(title: row.title, value: row.value)
+            }
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
+                .fill(.white.opacity(0.045))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 26, style: .continuous)
+                        .stroke(.white.opacity(0.08), lineWidth: 1)
+                )
+        )
+    }
+}
+
+private struct ReportRow: View {
     let title: String
-    let message: String
+    let value: String
+
+    var body: some View {
+        HStack {
+            Text(title)
+                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.50))
+
+            Spacer()
+
+            Text(value)
+                .font(.system(size: 14, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.90))
+        }
+        .padding(.vertical, 7)
+    }
 }
-private struct ManagerDailySummaryCard: View {
 
-    private let secondary = Color.white.opacity(0.86)
-    private let titleColor = Color.white
+// MARK: - Pinned Dashboard (generic)
 
-    // 🔹 Replace this later with real data from backend
-    private let entries: [ManagerEntry] = []   // ← empty = show placeholder
+private struct PinnedDashboardSection: View {
+    let states: [PinnedBrainCardState]
+    let onUnpin: (PinnedBrainCardState) -> Void
+    let onOpenReport: (PinnedBrainCardState) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
 
             HStack {
-                Text("MANAGER SUMMARY")
-                    .font(.system(size: 15, weight: .semibold, design: .rounded))
-                    .foregroundStyle(titleColor)
+                Text("מוצמדים")
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .tracking(1.4)
+                    .foregroundStyle(.white.opacity(0.50))
 
                 Spacer()
 
-                Text("Last 3 days")
+                Text("רענון אוטומטי")
                     .font(.system(size: 12, weight: .semibold, design: .rounded))
-                    .foregroundStyle(secondary)
+                    .foregroundStyle(.white.opacity(0.45))
             }
 
-            if entries.isEmpty {
-
-                // ✅ Elegant empty state
-                VStack(alignment: .leading, spacing: 6) {
-
-                    Text("No summaries yet.")
-                        .font(.system(size: 14, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.75))
-
-                    Text("Daily manager insights will appear here automatically as your system runs.")
-                        .font(.system(size: 13, weight: .medium, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.55))
-                }
-                .padding(.vertical, 8)
-
-            } else {
-
-                VStack(spacing: 10) {
-                    ForEach(Array(entries.enumerated()), id: \.offset) { index, entry in
-                        BriefRow(
-                            badge: entry.badge,
-                            title: entry.title,
-                            message: entry.message,
-                            rightLabel: "Read more ›"
-                        )
-
-                        if index < entries.count - 1 {
-                            DividerHairline()
-                        }
-                    }
-                }
+            ForEach(states) { state in
+                PinnedMiniCard(
+                    state: state,
+                    onUnpin: { onUnpin(state) },
+                    onOpenReport: { onOpenReport(state) }
+                )
             }
         }
     }
 }
-private struct AIInsight {
-    let badge: RowBadge
-    let title: String
-    let message: String
-}
 
-private struct InsightsCard: View {
+private struct PinnedMiniCard: View {
+    let state: PinnedBrainCardState
+    let onUnpin: () -> Void
+    let onOpenReport: () -> Void
 
-    private let secondary = Color.white.opacity(0.86)
-    private let titleColor = Color.white
-
-    // 🔹 Replace with real backend data later
-    private let insights: [AIInsight] = []   // ← empty = show placeholder
+    private var card: BrainCard { state.card }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
 
             HStack {
-                Text("AI INSIGHTS")
-                    .font(.system(size: 15, weight: .semibold, design: .rounded))
-                    .foregroundStyle(titleColor)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(card.title)
+                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.92))
+
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(state.lastRefreshFailed ? .red : .green)
+                            .frame(width: 5, height: 5)
+
+                        Text(state.timeAgoLabel)
+                            .font(.system(size: 11, weight: .medium, design: .rounded))
+                            .foregroundStyle(.white.opacity(state.lastRefreshFailed ? 0.5 : 0.35))
+                    }
+                }
 
                 Spacer()
 
-                Text("Newest 3")
-                    .font(.system(size: 12, weight: .semibold, design: .rounded))
-                    .foregroundStyle(secondary)
+                Button(action: onUnpin) {
+                    Image(systemName: "pin.slash")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.75))
+                        .frame(width: 34, height: 34)
+                        .background(.white.opacity(0.075))
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
             }
 
-            if insights.isEmpty {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(card.primaryValue)
+                    .font(.system(size: 30, weight: .regular, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(.white)
 
-                // ✅ Premium empty state
-                VStack(alignment: .leading, spacing: 6) {
+                Text(card.primaryLabel)
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.55))
+            }
 
-                    Text("System learning in progress.")
-                        .font(.system(size: 14, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.75))
-
-                    Text("AI insights will appear once enough activity is detected.")
-                        .font(.system(size: 13, weight: .medium, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.55))
+            HStack(spacing: 14) {
+                ForEach(card.metrics) { metric in
+                    ResultMiniMetric(title: metric.title, value: metric.value)
                 }
-                .padding(.vertical, 8)
+            }
+        }
+        .padding(15)
+        .contentShape(Rectangle())
+        .onTapGesture { onOpenReport() }
+        .background(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(.white.opacity(0.055))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 24, style: .continuous)
+                        .stroke(.white.opacity(0.12), lineWidth: 1)
+                )
+        )
+    }
+}
 
-            } else {
+// MARK: - Graph
 
-                VStack(spacing: 10) {
-                    ForEach(Array(insights.enumerated()), id: \.offset) { index, insight in
-                        BriefRow(
-                            badge: insight.badge,
-                            title: insight.title,
-                            message: insight.message,
-                            rightLabel: "Read more ›"
-                        )
+private struct MockLineGraph: View {
+    let values: [CGFloat]
 
-                        if index < insights.count - 1 {
-                            DividerHairline()
+    var body: some View {
+        GeometryReader { geo in
+            let maxValue = values.max() ?? 1
+            let minValue = values.min() ?? 0
+            let range = max(maxValue - minValue, 1)
+            let step = geo.size.width / CGFloat(max(values.count - 1, 1))
+
+            ZStack {
+                VStack(spacing: geo.size.height / 3) {
+                    ForEach(0..<4, id: \.self) { _ in
+                        Rectangle()
+                            .fill(.white.opacity(0.07))
+                            .frame(height: 1)
+                    }
+                }
+
+                Path { path in
+                    for index in values.indices {
+                        let x = CGFloat(index) * step
+                        let normalized = (values[index] - minValue) / range
+                        let y = geo.size.height - (normalized * geo.size.height)
+
+                        if index == values.startIndex {
+                            path.move(to: CGPoint(x: x, y: y))
+                        } else {
+                            path.addLine(to: CGPoint(x: x, y: y))
                         }
                     }
                 }
+                .stroke(.white.opacity(0.88), style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
+
+                ForEach(values.indices, id: \.self) { index in
+                    let x = CGFloat(index) * step
+                    let normalized = (values[index] - minValue) / range
+                    let y = geo.size.height - (normalized * geo.size.height)
+
+                    Circle()
+                        .fill(.white)
+                        .frame(width: index == values.count - 1 ? 8 : 5, height: index == values.count - 1 ? 8 : 5)
+                        .position(x: x, y: y)
+                        .opacity(index == values.count - 1 ? 1 : 0.55)
+                }
             }
         }
     }
 }
 
-private enum RowBadge {
-    case neutral
-    case accent
-    case warning
+// MARK: - Shared Small Views
 
-    var color: Color {
-        switch self {
-        case .neutral: return .white.opacity(0.10)
-        case .accent:  return MiniTint.accent.opacity(0.22)
-        case .warning: return Color(red: 1.00, green: 0.75, blue: 0.30).opacity(0.22)
-        }
-    }
-
-    var stroke: Color {
-        switch self {
-        case .neutral: return .white.opacity(0.10)
-        case .accent:  return MiniTint.accent.opacity(0.30)
-        case .warning: return Color(red: 1.00, green: 0.75, blue: 0.30).opacity(0.30)
-        }
-    }
-}
-
-private struct BriefRow: View {
-    let badge: RowBadge
+private struct ResultMiniMetric: View {
     let title: String
-    let message: String
-    let rightLabel: String
-
-    private let secondary = Color.white.opacity(0.86)
-    private let bodyColor = Color.white.opacity(0.78)
+    let value: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.45))
 
-                // tiny tint indicator (jewelry touch)
-             
-                Text(title)
-                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                    .foregroundStyle(secondary)
-
-                Spacer()
-
-                Text(rightLabel)
-                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                    .foregroundStyle(secondary)
-            }
-
-            Text(message)
-                .font(.system(size: 13, weight: .regular, design: .rounded))
-                .foregroundStyle(bodyColor)
-                .lineLimit(3)
+            Text(value)
+                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.90))
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
-
-
-
-private struct ModuleRow: View {
+private struct ButtonChip: View {
     let title: String
-    let subtitle: String
     let icon: String
-    let onTap: () -> Void
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 12, weight: .semibold))
+
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+            }
+            .foregroundStyle(.white.opacity(0.82))
+            .padding(.horizontal, 10)
+            .frame(height: 34)
+            .background(.white.opacity(0.075))
+            .overlay(
+                Capsule()
+                    .stroke(.white.opacity(0.10), lineWidth: 1)
+            )
+            .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Quick Actions
+
+private struct QuickActionsRow: View {
+    let onMenu: () -> Void
+    let onCashpoint: () -> Void
+    let onAnalytics: () -> Void
+
+    var body: some View {
+        HStack(spacing: 28) {
+            TeslaControlButton(title: "תפריט", systemImage: "menucard.fill", action: onMenu)
+            TeslaControlButton(title: "קופה", systemImage: "hand.point.up.braille.fill", action: onCashpoint)
+            TeslaControlButton(title: "דוחות", systemImage: "chart.line.uptrend.xyaxis", action: onAnalytics)
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
+private struct TeslaControlButton: View {
+    let title: String
+    let systemImage: String
+    let action: () -> Void
 
     var body: some View {
         Button {
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            onTap()
+            action()
         } label: {
-            HStack(spacing: 12) {
-                Image(systemName: icon)
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.9))
-                    .frame(width: 34, height: 34)
-                    .background(.white.opacity(0.08))
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            VStack(spacing: 8) {
+                Text(title)
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.58))
+                    .tracking(1.0)
 
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .font(.system(size: 16, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.92))
+                ZStack {
+                    Circle()
+                        .fill(Color.white.opacity(0.055))
 
-                    Text(subtitle)
-                        .font(.system(size: 12, weight: .medium, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.55))
-                        .lineLimit(1)
+                    Circle()
+                        .stroke(Color.white.opacity(0.16), lineWidth: 1)
+
+                    Image(systemName: systemImage)
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.9))
                 }
-
-                Spacer()
-
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.30))
+                .frame(width: 56, height: 56)
             }
-            .padding(.vertical, 12)
-            .padding(.horizontal, 14)
-            .background(.white.opacity(0.06))
-            .overlay(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .stroke(.white.opacity(0.08), lineWidth: 1)
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         }
         .buttonStyle(.plain)
     }
 }
 
-private struct DividerHairline: View {
+// MARK: - Operational Pulse
+
+private struct OperationalPulseCard: View {
     var body: some View {
-        Rectangle()
-            .fill(.white.opacity(0.10))
-            .frame(height: 1)
-            .padding(.vertical, 2)
+        HStack(spacing: 12) {
+            PulseItem(icon: "checkmark.circle.fill", title: "תשלומים", value: "תקין")
+            PulseItem(icon: "printer.fill", title: "מדפסות", value: "2 מחוברות")
+            PulseItem(icon: "ipad.and.iphone", title: "מכשירים", value: "3 מחוברים")
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(.white.opacity(0.045))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 24, style: .continuous)
+                        .stroke(.white.opacity(0.075), lineWidth: 1)
+                )
+        )
     }
 }
 
-
-// MARK: - Empty module views (we will build later)
-
-
-struct SelfServiceCashpointsView: View {
-    @Environment(\.dismiss) private var dismiss
-
-    // ✅ The only important control
-    @State private var selfServiceEnabled: Bool = true
-
-    // Mock states
-    @State private var idleSeconds: Double = 30
-
-    @State private var kiosks: [KioskDevice] = [
-        .init(name: "Kiosk iPad 1",
-              location: "Front counter",
-              isOnline: true,
-              battery: 0.78,
-              lastSeen: Date(),
-              locked: true),
-
-        .init(name: "Kiosk iPad 2",
-              location: "Entrance",
-              isOnline: true,
-              battery: 0.54,
-              lastSeen: Date().addingTimeInterval(-120),
-              locked: true),
-
-        .init(name: "Kiosk iPad 3",
-              location: "Patio",
-              isOnline: false,
-              battery: 0.21,
-              lastSeen: Date().addingTimeInterval(-3600),
-              locked: false)
-    ]
+private struct PulseItem: View {
+    let icon: String
+    let title: String
+    let value: String
 
     var body: some View {
-        ZStack {
-            LinearGradient(
-                colors: [Color.black.opacity(0.98), Color.black.opacity(0.88)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .ignoresSafeArea()
+        VStack(spacing: 6) {
+            Image(systemName: icon)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.75))
 
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(spacing: 14) {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.42))
 
-                    topBar
-                    header
-                    statsGrid
-                    primaryControls
-                    deviceList
-
-                    Spacer(minLength: 24)
-                }
-                .padding(.horizontal, 18)
-                .padding(.top, 10)
-            }
+            Text(value)
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.82))
         }
-        
-        .toolbar(.hidden, for: .navigationBar)
+        .frame(maxWidth: .infinity)
     }
+}
 
-    // MARK: - Top bar
+// MARK: - Setup Card
 
-    private var topBar: some View {
-        HStack {
-            Button { dismiss() } label: {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.9))
-                    .frame(width: 44, height: 44)
-                    .background(.ultraThinMaterial)
-                    .clipShape(Circle())
-            }
-            .buttonStyle(.plain)
+private struct SetupMiniCard: View {
+    let onDismiss: () -> Void
+    let onMenu: () -> Void
+    let onCashpoint: () -> Void
 
-            Spacer()
-
-            Text("Self Service")
-                .font(.system(size: 18, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.88))
-
-            Spacer()
-
-            Image(systemName: "gearshape.fill")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.55))
-                .frame(width: 44, height: 44)
-                .opacity(0.9)
-        }
-    }
-
-    // MARK: - Header
-
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Self Service Cashpoints")
-                .font(.system(size: 26, weight: .heavy, design: .rounded))
-                .foregroundStyle(.white)
-
-            Text("Turn terminals on/off and manage kiosk iPads.")
-                .font(.system(size: 13, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.62))
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.top, 4)
-    }
-
-    // MARK: - Stats
-
-    private var statsGrid: some View {
-        let cols = [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)]
-        let active = kiosks.filter(\.isOnline).count
-
-        return LazyVGrid(columns: cols, spacing: 12) {
-            StatCard(title: "Status", value: selfServiceEnabled ? "LIVE" : "OFF", icon: selfServiceEnabled ? "bolt.fill" : "bolt.slash.fill")
-            StatCard(title: "Active kiosks", value: "\(active)/\(kiosks.count)", icon: "ipad.and.iphone")
-            StatCard(title: "Orders today", value: selfServiceEnabled ? "143" : "—", icon: "cart.fill")
-            StatCard(title: "Last activity", value: selfServiceEnabled ? "2m ago" : "—", icon: "clock.fill")
-        }
-    }
-
-    // MARK: - Controls
-
-    private var primaryControls: some View {
-        GlassCard(corner: 22) {
-            VStack(alignment: .leading, spacing: 14) {
-
-                HStack {
-                    Text("Controls")
-                        .font(.system(size: 16, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.92))
-                    Spacer()
-                }
-
-                // ✅ Main switch: Self Service ON/OFF
-                HStack {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("Self Service")
-                            .font(.system(size: 14, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.9))
-
-                        Text(selfServiceEnabled ? "Accepting orders on kiosks" : "Kiosks are disabled")
-                            .font(.system(size: 12, weight: .medium, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.55))
-                    }
-
-                    Spacer()
-
-                    Toggle("", isOn: $selfServiceEnabled)
-                        .labelsHidden()
-                        .tint(.blue)
-                        .onChange(of: selfServiceEnabled) { _ in
-                            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                        }
-                }
-
-                // Pair / Add kiosk (still allowed; or you can disable when OFF)
-                HStack(spacing: 12) {
-                    ControlButton(
-                        title: "Pair new kiosk",
-                        icon: "qrcode.viewfinder",
-                        style: .secondary
-                    ) {
-                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                        
-                        kiosks.insert(
-                            KioskDevice(
-                                name: "Kiosk iPad \(kiosks.count + 1)",
-                                location: "Unassigned",
-                                isOnline: true,
-                                battery: 0.66,
-                                lastSeen: Date(),
-                                locked: true
-                            ),
-                            at: 0
-                        )
-                    }
-                    // Idle timeout (only relevant when enabled)
-                 
-                }
-            }
-        }
-    }
-
-    // MARK: - Device list
-
-    private var deviceList: some View {
-        VStack(alignment: .leading, spacing: 10) {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Kiosks")
-                    .font(.system(size: 16, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.92))
-                Spacer()
-                Text("\(kiosks.count)")
-                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.55))
-            }
-
-            ForEach(kiosks) { d in
-                DeviceRow(device: d)
-            }
-        }
-        .padding(.top, 2)
-    }
-}
-
-
-// MARK: - Models
-
-struct KioskDevice: Identifiable {
-    let id = UUID()
-
-    var name: String
-    var location: String
-    var isOnline: Bool
-    var battery: Double
-    var lastSeen: Date
-
-    var locked: Bool   // ✅ ADD THIS
-}
-
-// MARK: - UI components
-
-private struct GlassCard<Content: View>: View {
-    var corner: CGFloat = 22
-    @ViewBuilder var content: Content
-
-    var body: some View {
-        content
-            .padding(14)
-            .frame(maxWidth: .infinity)
-            .background(
-                RoundedRectangle(cornerRadius: corner, style: .continuous)
-                    .fill(.white.opacity(0.06))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: corner, style: .continuous)
-                            .stroke(.white.opacity(0.08), lineWidth: 1)
-                    )
-            )
-    }
-}
-
-private struct StatCard: View {
-    let title: String
-    let value: String
-    let icon: String
-
-    var body: some View {
-        GlassCard(corner: 20) {
-            HStack(spacing: 12) {
-                Image(systemName: icon)
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.9))
-                    .frame(width: 34, height: 34)
-                    .background(.white.opacity(0.08))
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.55))
-                    Text(value)
-                        .font(.system(size: 18, weight: .heavy, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.92))
-                }
-
-                Spacer()
-            }
-        }
-    }
-}
-
-private enum ControlButtonStyle { case primary, secondary }
-
-private struct ControlButton: View {
-    let title: String
-    let icon: String
-    let style: ControlButtonStyle
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 10) {
-                Image(systemName: icon)
-                    .font(.system(size: 14, weight: .bold))
-                Text(title)
-                    .font(.system(size: 14, weight: .bold, design: .rounded))
-                Spacer()
-            }
-            .foregroundStyle(style == .primary ? .black : .white.opacity(0.9))
-            .padding(.horizontal, 12)
-            .frame(height: 44)
-            .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(style == .primary ? .white : .white.opacity(0.08))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(.white.opacity(style == .primary ? 0.0 : 0.10), lineWidth: 1)
-            )
-        }
-        .buttonStyle(.plain)
-        .frame(maxWidth: .infinity)
-    }
-}
-
-private struct DeviceRow: View {
-    let device: KioskDevice
-
-    private var statusText: String { device.isOnline ? "Online" : "Offline" }
-    private var statusColor: Color { device.isOnline ? .green : .white.opacity(0.35) }
-    private var batteryPct: Int { Int((device.battery * 100).rounded()) }
-
-    private func relativeTime(from date: Date) -> String {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .abbreviated   // "2m ago", "1h ago"
-        return formatter.localizedString(for: date, relativeTo: Date())
-    }
-    var body: some View {
-        GlassCard(corner: 20) {
-            HStack(spacing: 12) {
-
-                // status dot
-                Circle()
-                    .fill(statusColor)
-                    .frame(width: 10, height: 10)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 8) {
-                        Text(device.name)
-                            .font(.system(size: 15, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.92))
-
-                        Text(statusText)
-                            .font(.system(size: 12, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.white.opacity(device.isOnline ? 0.65 : 0.45))
-                    }
-
-                    Text("\(device.location) • last seen \(relativeTime(from: device.lastSeen))")
-                        .font(.system(size: 12, weight: .medium, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.55))
-                }
-
-                Spacer()
-
-                VStack(alignment: .trailing, spacing: 6) {
-                    HStack(spacing: 8) {
-                        Image(systemName: device.locked ? "lock.fill" : "lock.open")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.75))
-
-                        Text("\(batteryPct)%")
-                            .font(.system(size: 12, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.75))
-                    }
-
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.25))
-                }
-            }
-        }
-    }
-}
-
-
-
-struct MiniAppModuleView: View {
-    @Environment(\.dismiss) private var dismiss
-
-    @State private var isLive: Bool = true
-    @State private var installOverlayEnabled: Bool = true
-    @State private var link: String = "https://minis.studio/shop/12"
-
-    var body: some View {
-        ZStack {
-            LinearGradient(
-                colors: [Color.black.opacity(0.98), Color.black.opacity(0.88)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .ignoresSafeArea()
-
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(spacing: 14) {
-
-                    topBar
-                    header
-                    statsGrid
-                    controlsCard
-                    conversionCard
-                    linkCard
-
-                    Spacer(minLength: 24)
-                }
-                .padding(.horizontal, 18)
-                .padding(.top, 10)
-            }
-        }
-        .toolbar(.hidden, for: .navigationBar)
-    }
-
-    // MARK: - Top bar
-
-    private var topBar: some View {
-        HStack {
-            Button(action: { dismiss() }) {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.9))
-                    .frame(width: 44, height: 44)
-                    .background(.ultraThinMaterial)
-                    .clipShape(Circle())
-            }
-            .buttonStyle(.plain)
-
-            Spacer()
-
-            Text("Mini App")
-                .font(.system(size: 18, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.88))
-
-            Spacer()
-
-            Image(systemName: "qrcode")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.55))
-                .frame(width: 44, height: 44)
-        }
-    }
-
-    // MARK: - Header
-
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Customer Ordering Channel")
-                .font(.system(size: 26, weight: .heavy, design: .rounded))
-                .foregroundStyle(.white)
-
-            Text("App Clip / QR / link. Track opens → orders → installs.")
-                .font(.system(size: 13, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.62))
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.top, 4)
-    }
-
-    // MARK: - Stats
-
-    private var statsGrid: some View {
-        let cols = [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)]
-
-        // mock numbers
-        let opensToday = 1240
-        let ordersToday = 380
-        let conversion = Int((Double(ordersToday) / Double(max(opensToday, 1))) * 100)
-        let installsToday = 85
-
-        return LazyVGrid(columns: cols, spacing: 12) {
-            MiniAppStatCard(title: "Status", value: isLive ? "LIVE" : "PAUSED", icon: isLive ? "bolt.fill" : "bolt.slash.fill")
-            MiniAppStatCard(title: "Opens today", value: "\(opensToday)", icon: "eye.fill")
-            MiniAppStatCard(title: "Orders today", value: "\(ordersToday)", icon: "cart.fill")
-            MiniAppStatCard(title: "Conversion", value: "\(conversion)%", icon: "arrow.up.right.circle.fill")
-            MiniAppStatCard(title: "Installs", value: "\(installsToday)", icon: "square.and.arrow.down.fill")
-            MiniAppStatCard(title: "Top source", value: "QR", icon: "qrcode")
-        }
-    }
-
-    // MARK: - Controls
-
-    private var controlsCard: some View {
-        MiniAppGlassCard(corner: 22) {
-            VStack(alignment: .leading, spacing: 14) {
-
-                HStack {
-                    Text("Controls")
+                    Text("סיים הגדרה")
                         .font(.system(size: 16, weight: .semibold, design: .rounded))
                         .foregroundStyle(.white.opacity(0.92))
-                    Spacer()
+
+                    Text("שלב 1 \u{2014} הוסף את המוצרים שלך")
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.70))
                 }
 
-                // Publish / Pause
-                HStack {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("Mini App")
-                            .font(.system(size: 14, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.9))
-                        Text(isLive ? "Customers can order now" : "Ordering is paused")
-                            .font(.system(size: 12, weight: .medium, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.55))
-                    }
+                Spacer()
 
-                    Spacer()
-
-                    Toggle("", isOn: $isLive)
-                        .labelsHidden()
-                        .tint(.blue)
-                        .onChange(of: isLive) { _ in
-                            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                        }
+                Button(action: onDismiss) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.75))
+                        .frame(width: 28, height: 28)
+                        .background(.white.opacity(0.06))
+                        .clipShape(Circle())
                 }
-
-                // Primary actions
-               
-
-                // Full row action
-                MiniAppControlButton(title: "Share Mini App", icon: "square.and.arrow.up", style: MiniAppControlButtonStyle.secondary) {
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                }
+                .buttonStyle(.plain)
             }
-        }
-    }
 
-    // MARK: - Conversion
-
-    private var conversionCard: some View {
-        MiniAppGlassCard(corner: 22) {
-            VStack(alignment: .leading, spacing: 14) {
-
-                HStack {
-                    Text("Convert to Full App")
-                        .font(.system(size: 16, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.92))
-                    Spacer()
-                }
-
-                Text("Goal: move customers from Cashpoints & App Clip → installed app for loyalty & push.")
-                    .font(.system(size: 13, weight: .medium, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.65))
-
-               
-                MiniAppControlButton(title: "Set install incentive", icon: "gift.fill", style: MiniAppControlButtonStyle.secondary) {
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                }
-            }
-        }
-    }
-
-    // MARK: - Link card
-
-    private var linkCard: some View {
-        MiniAppGlassCard(corner: 22) {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Mini App link")
-                    .font(.system(size: 14, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.85))
-
-                Text(link)
-                    .font(.system(size: 13, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.65))
-                    .lineLimit(2)
-
-                Text("Tip: print QR on tables to multiply cashpoints across phones.")
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.55))
-            }
-        }
-    }
-}
-
-// MARK: - Mini App scoped components (no name collisions)
-
-private struct MiniAppGlassCard<Content: View>: View {
-    var corner: CGFloat = 22
-    @ViewBuilder var content: Content
-
-    var body: some View {
-        content
-            .padding(14)
-            .frame(maxWidth: .infinity)
-            .background(
-                RoundedRectangle(cornerRadius: corner, style: .continuous)
-                    .fill(.white.opacity(0.06))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: corner, style: .continuous)
-                            .stroke(.white.opacity(0.08), lineWidth: 1)
-                    )
-            )
-    }
-}
-
-private struct MiniAppStatCard: View {
-    let title: String
-    let value: String
-    let icon: String
-
-    var body: some View {
-        MiniAppGlassCard(corner: 20) {
             HStack(spacing: 12) {
-                Image(systemName: icon)
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.9))
-                    .frame(width: 34, height: 34)
-                    .background(.white.opacity(0.08))
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.55))
-                    Text(value)
-                        .font(.system(size: 18, weight: .heavy, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.92))
+                Button(action: onMenu) {
+                    Text("צור תפריט")
+                        .font(.system(size: 15, weight: .bold, design: .rounded))
+                        .foregroundStyle(.black)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 46)
+                        .background(.white)
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
-
-                Spacer()
-            }
-        }
-    }
-}
-
-private enum MiniAppControlButtonStyle { case primary, secondary }
-
-private struct MiniAppControlButton: View {
-    let title: String
-    let icon: String
-    let style: MiniAppControlButtonStyle
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 10) {
-                Image(systemName: icon)
-                    .font(.system(size: 14, weight: .bold))
-                Text(title)
-                    .font(.system(size: 14, weight: .bold, design: .rounded))
-                Spacer()
-            }
-            .foregroundStyle(style == .primary ? .black : .white.opacity(0.9))
-            .padding(.horizontal, 12)
-            .frame(height: 44)
-            .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(style == .primary ? .white : .white.opacity(0.08))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(.white.opacity(style == .primary ? 0.0 : 0.10), lineWidth: 1)
-            )
-        }
-        .buttonStyle(.plain)
-        .frame(maxWidth: .infinity)
-    }
-}
-
-
-
-struct FullAppModuleView: View {
-    @Environment(\.dismiss) private var dismiss
-
-    // Mock state
-    @State private var fullAppLive: Bool = true
-    @State private var loyaltyEnabled: Bool = true
-    @State private var pushEnabled: Bool = true
-    @State private var referralEnabled: Bool = false
-
-    var body: some View {
-        ZStack {
-            LinearGradient(
-                colors: [Color.black.opacity(0.98), Color.black.opacity(0.88)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .ignoresSafeArea()
-
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(spacing: 14) {
-                    topBar
-                    header
-                    statsGrid
-                    controlsCard
-                    loyaltyCard
-                  
-
-                    Spacer(minLength: 24)
-                }
-                .padding(.horizontal, 18)
-                .padding(.top, 10)
-            }
-        }
-        .toolbar(.hidden, for: .navigationBar)
-    }
-
-    // MARK: - Top bar
-
-    private var topBar: some View {
-        HStack {
-            Button(action: { dismiss() }) {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.9))
-                    .frame(width: 44, height: 44)
-                    .background(.ultraThinMaterial)
-                    .clipShape(Circle())
-            }
-            .buttonStyle(.plain)
-
-            Spacer()
-
-            Text("Full App")
-                .font(.system(size: 18, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.88))
-
-            Spacer()
-
-            Image(systemName: "person.crop.circle.fill")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.55))
-                .frame(width: 44, height: 44)
-        }
-    }
-
-    // MARK: - Header
-
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Installed Users & Retention")
-                .font(.system(size: 26, weight: .heavy, design: .rounded))
-                .foregroundStyle(.white)
-
-            Text("Loyalty, repeat orders, and push engagement.")
-                .font(.system(size: 13, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.62))
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.top, 4)
-    }
-
-    // MARK: - Stats
-
-    private var statsGrid: some View {
-        let cols = [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)]
-
-        // mock numbers
-        let installed = 85
-        let dau = 18
-        let repeatRate = 41
-        let pushOptIn = 58
-        let members = 62
-
-        return LazyVGrid(columns: cols, spacing: 12) {
-            FullAppStatCard(title: "Status", value: fullAppLive ? "LIVE" : "OFF", icon: fullAppLive ? "bolt.fill" : "bolt.slash.fill")
-            FullAppStatCard(title: "Installed users", value: "\(installed)", icon: "square.and.arrow.down.fill")
-            FullAppStatCard(title: "DAU", value: "\(dau)", icon: "waveform.path.ecg")
-            FullAppStatCard(title: "Members", value: "\(members)", icon: "person.2.fill")
-            FullAppStatCard(title: "Repeat rate", value: "\(repeatRate)%", icon: "arrow.triangle.2.circlepath")
-            FullAppStatCard(title: "Push opt-in", value: "\(pushOptIn)%", icon: "bell.badge.fill")
-        }
-    }
-
-    // MARK: - Controls
-
-    private var controlsCard: some View {
-        FullAppGlassCard(corner: 22) {
-            VStack(alignment: .leading, spacing: 14) {
-
-                HStack {
-                    Text("Controls")
-                        .font(.system(size: 16, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.92))
-                    Spacer()
-                }
-
-                // Full app live switch
-                HStack {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("Full App")
-                            .font(.system(size: 14, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.9))
-                        Text(fullAppLive ? "Installed app is active" : "Full app features disabled")
-                            .font(.system(size: 12, weight: .medium, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.55))
-                    }
-
-                    Spacer()
-
-                    Toggle("", isOn: $fullAppLive)
-                        .labelsHidden()
-                        .tint(.blue)
-                        .onChange(of: fullAppLive) { _ in
-                            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                        }
-                }
-
-                // Push toggle
-                FullAppControlButton(
-                    title: "Push notification",
-                    icon: "paperplane.fill",
-                    style: FullAppControlButtonStyle.secondary
-                ) {
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                }
-            }
-        }
-    }
-
-    // MARK: - Loyalty
-
-    private var loyaltyCard: some View {
-        FullAppGlassCard(corner: 22) {
-            VStack(alignment: .leading, spacing: 14) {
-
-                HStack {
-                    Text("Loyalty")
-                        .font(.system(size: 16, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.92))
-                    Spacer()
-                }
-
-                HStack {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("Members program")
-                            .font(.system(size: 14, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.9))
-                        Text(loyaltyEnabled ? "Stamps / vouchers active" : "Off")
-                            .font(.system(size: 12, weight: .medium, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.55))
-                    }
-
-                    Spacer()
-
-                    Toggle("", isOn: $loyaltyEnabled)
-                        .labelsHidden()
-                        .tint(.blue)
-                        .onChange(of: loyaltyEnabled) { _ in
-                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                        }
-                }
-
-                // Full row action
-                FullAppControlButton(
-                    title: "Configure rewards",
-                    icon: "gift.fill",
-                    style: FullAppControlButtonStyle.secondary
-                ) {
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                }
-            }
-        }
-    }
-
-    // MARK: - Retention / Growth
-
-   
-}
-
-// MARK: - Full App scoped components (no name collisions)
-
-private struct FullAppGlassCard<Content: View>: View {
-    var corner: CGFloat = 22
-    @ViewBuilder var content: Content
-
-    var body: some View {
-        content
-            .padding(14)
-            .frame(maxWidth: .infinity)
-            .background(
-                RoundedRectangle(cornerRadius: corner, style: .continuous)
-                    .fill(.white.opacity(0.06))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: corner, style: .continuous)
-                            .stroke(.white.opacity(0.08), lineWidth: 1)
-                    )
-            )
-    }
-}
-
-private struct FullAppStatCard: View {
-    let title: String
-    let value: String
-    let icon: String
-
-    var body: some View {
-        FullAppGlassCard(corner: 20) {
-            HStack(spacing: 12) {
-                Image(systemName: icon)
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.9))
-                    .frame(width: 34, height: 34)
-                    .background(.white.opacity(0.08))
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.55))
-                    Text(value)
-                        .font(.system(size: 18, weight: .heavy, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.92))
-                }
-
-                Spacer()
-            }
-        }
-    }
-}
-
-private enum FullAppControlButtonStyle { case primary, secondary }
-
-private struct FullAppControlButton: View {
-    let title: String
-    let icon: String
-    let style: FullAppControlButtonStyle
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 10) {
-                Image(systemName: icon)
-                    .font(.system(size: 14, weight: .bold))
-                Text(title)
-                    .font(.system(size: 14, weight: .bold, design: .rounded))
-                Spacer()
-            }
-            .foregroundStyle(style == .primary ? .black : .white.opacity(0.9))
-            .padding(.horizontal, 12)
-            .frame(height: 44)
-            .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(style == .primary ? .white : .white.opacity(0.08))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(.white.opacity(style == .primary ? 0.0 : 0.10), lineWidth: 1)
-            )
-        }
-        .buttonStyle(.plain)
-        .frame(maxWidth: .infinity)
-    }
-}
-
-
-
-private struct DevicesModuleView: View {
-    @Environment(\.dismiss) private var dismiss
-
-    @State private var devices: [PairedDevice] = [
-        .init(name: "iPad Front Counter", status: .online, lastSeen: Date().addingTimeInterval(-25), pairingCode: PairCode.make()),
-        .init(name: "iPad Entrance",      status: .online, lastSeen: Date().addingTimeInterval(-120), pairingCode: PairCode.make()),
-        .init(name: "iPad Patio",         status: .offline, lastSeen: Date().addingTimeInterval(-3600), pairingCode: PairCode.make())
-    ]
-
-    @State private var editingIndex: Int? = nil
-    @State private var showDeviceSheet = false
-
-    var body: some View {
-        ZStack {
-            LinearGradient(
-                colors: [Color.black.opacity(0.98), Color.black.opacity(0.88)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .ignoresSafeArea()
-
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(spacing: 14) {
-
-                    topBar
-                    header
-
-                    GlassCard(corner: 22) {
-                        VStack(alignment: .leading, spacing: 10) {
-
-                            HStack {
-                                Text("Devices")
-                                    .font(.system(size: 14, weight: .semibold, design: .rounded))
-                                    .foregroundStyle(.white.opacity(0.85))
-                                Spacer()
-                                Text("\(devices.count)")
-                                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                                    .foregroundStyle(.white.opacity(0.55))
-                            }
-
-                            ForEach(Array(devices.enumerated()), id: \.element.id) { idx, d in
-                                DevicesRow(device: d) {
-                                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                    editingIndex = idx
-                                    showDeviceSheet = true
-                                }
-                            }
-
-                            if devices.isEmpty {
-                                Text("No devices yet. Tap + to add one.")
-                                    .font(.system(size: 13, weight: .medium, design: .rounded))
-                                    .foregroundStyle(.white.opacity(0.55))
-                                    .padding(.vertical, 8)
-                            }
-                        }
-                    }
-
-                    Spacer(minLength: 24)
-                }
-                .padding(.horizontal, 18)
-                .padding(.top, 10)
-            }
-        }
-        .toolbar(.hidden, for: .navigationBar)
-        .sheet(isPresented: $showDeviceSheet) {
-            DeviceEditPairSheet(
-                // If editingIndex is nil => new device
-                initialName: editingIndex.map { devices[$0].name } ?? "",
-                initialCode: editingIndex.map { devices[$0].pairingCode } ?? PairCode.make(),
-                onSave: { name, code in
-                    let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !trimmed.isEmpty else { return }
-
-                    if let idx = editingIndex {
-                        devices[idx].name = trimmed
-                        devices[idx].pairingCode = code
-                    } else {
-                        devices.insert(
-                            PairedDevice(
-                                name: trimmed,
-                                status: .offline,
-                                lastSeen: Date(),
-                                pairingCode: code
-                            ),
-                            at: 0
-                        )
-                    }
-
-                    editingIndex = nil
-                    showDeviceSheet = false
-                },
-                onDelete: {
-                    if let idx = editingIndex {
-                        devices.remove(at: idx)
-                    }
-                    editingIndex = nil
-                    showDeviceSheet = false
-                }
-            )
-            .presentationDetents([.height(520), .large])
-            .presentationDragIndicator(.visible)
-            .onDisappear {
-                // reset draft context if user swipes down
-                editingIndex = nil
-            }
-        }
-    }
-
-    // MARK: - Top bar
-
-    private var topBar: some View {
-        HStack {
-            Button { dismiss() } label: {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.9))
-                    .frame(width: 44, height: 44)
-                    .background(.ultraThinMaterial)
-                    .clipShape(Circle())
-            }
-            .buttonStyle(.plain)
-
-            Spacer()
-
-            Text("Devices")
-                .font(.system(size: 18, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.88))
-
-            Spacer()
-
-            Button {
-                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                editingIndex = nil // ✅ new device
-                showDeviceSheet = true
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundStyle(.white.opacity(0.9))
-                    .frame(width: 44, height: 44)
-                    .background(.ultraThinMaterial)
-                    .clipShape(Circle())
-            }
-            .buttonStyle(.plain)
-        }
-    }
-
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Pair iPads")
-                .font(.system(size: 26, weight: .heavy, design: .rounded))
-                .foregroundStyle(.white)
-
-            Text("Any iPad can be Cashpoint or Self Service.")
-                .font(.system(size: 13, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.62))
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.top, 4)
-    }
-}
-
-// MARK: - Device row
-
-private struct DevicesRow: View {
-    let device: PairedDevice
-    let onTap: () -> Void
-
-    private func relativeTime(from date: Date) -> String {
-        let f = RelativeDateTimeFormatter()
-        f.unitsStyle = .abbreviated
-        return f.localizedString(for: date, relativeTo: Date())
-    }
-
-    private var dot: Color {
-        switch device.status {
-        case .online: return .green
-        case .offline: return .white.opacity(0.35)
-        }
-    }
-
-    var body: some View {
-        Button(action: onTap) {
-            HStack(spacing: 12) {
-                Circle().fill(dot).frame(width: 10, height: 10)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(device.name)
-                        .font(.system(size: 15, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.92))
-
-                    Text("Tap to pair • \(relativeTime(from: device.lastSeen))")
-                        .font(.system(size: 12, weight: .medium, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.55))
-                        .lineLimit(1)
-                }
-
-                Spacer()
-
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.25))
-            }
-            .padding(.vertical, 12)
-            .padding(.horizontal, 14)
-            .background(.white.opacity(0.06))
-            .overlay(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .stroke(.white.opacity(0.08), lineWidth: 1)
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-// MARK: - Edit + Pair sheet (ONE SHEET)
-
-private struct DeviceEditPairSheet: View {
-    @Environment(\.dismiss) private var dismiss
-
-    let initialName: String
-    let initialCode: String
-    let onSave: (String, String) -> Void
-    let onDelete: () -> Void
-
-    @State private var name: String = ""
-    @State private var code: String = ""
-    @State private var method: Method = .qr
-
-    @FocusState private var focusName: Bool
-
-    enum Method: String, CaseIterable, Identifiable {
-        case qr = "QR"
-        case code = "Code"
-        var id: String { rawValue }
-    }
-
-    private var isEditingExisting: Bool { !initialName.isEmpty }
-
-    var body: some View {
-        ZStack {
-            Color.black.opacity(0.94).ignoresSafeArea()
-
-            VStack(spacing: 14) {
-
-                // Top bar
-                HStack {
-                    Button { dismiss() } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 14, weight: .bold))
-                            .foregroundStyle(.white.opacity(0.85))
-                            .frame(width: 40, height: 40)
-                            .background(.ultraThinMaterial)
-                            .clipShape(Circle())
-                    }
-                    .buttonStyle(.plain)
-
-                    Spacer()
-
-                    Text(isEditingExisting ? "Device" : "Add device")
-                        .font(.system(size: 16, weight: .semibold, design: .rounded))
+                .buttonStyle(.plain)
+
+                Button(action: onCashpoint) {
+                    Text("קופה")
+                        .font(.system(size: 15, weight: .bold, design: .rounded))
                         .foregroundStyle(.white.opacity(0.9))
-
-                    Spacer()
-
-                    Button {
-                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                        onSave(name, code)
-                    } label: {
-                        Text("Save")
-                            .font(.system(size: 14, weight: .bold, design: .rounded))
-                            .foregroundStyle(.black)
-                            .padding(.horizontal, 14)
-                            .frame(height: 40)
-                            .background(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Color.white.opacity(0.25) : Color.white)
-                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 46)
+                        .background(.white.opacity(0.10))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .stroke(.white.opacity(0.12), lineWidth: 1)
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
-                .padding(.horizontal, 16)
-                .padding(.top, 10)
-
-                GlassCard(corner: 18) {
-                    VStack(alignment: .leading, spacing: 12) {
-
-                        Text("Name")
-                            .font(.system(size: 13, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.70))
-
-                        DevicesNameField(text: $name)
-                            .focused($focusName)
-
-                        Divider().background(Color.white.opacity(0.08)).padding(.vertical, 6)
-
-                        Text("Pairing")
-                            .font(.system(size: 13, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.70))
-
-                        PairingSegment(method: $method)
-
-                        if method == .qr {
-                            QRBox(code: code)
-                        } else {
-                            CodeBox(
-                                code: code,
-                                onCopy: {
-                                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                    UIPasteboard.general.string = code
-                                },
-                                onRegenerate: {
-                                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                    code = PairCode.make()
-                                }
-                            )
-                        }
-
-                        if isEditingExisting {
-                            Divider().background(Color.white.opacity(0.08)).padding(.vertical, 6)
-
-                            Button {
-                                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                                onDelete()
-                            } label: {
-                                Text("Remove device")
-                                    .font(.system(size: 14, weight: .bold, design: .rounded))
-                                    .foregroundStyle(.white)
-                                    .frame(maxWidth: .infinity)
-                                    .frame(height: 44)
-                                    .background(Color.red.opacity(0.25))
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                            .stroke(Color.red.opacity(0.35), lineWidth: 1)
-                                    )
-                                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                }
-                .padding(.horizontal, 16)
-
-                Spacer()
+                .buttonStyle(.plain)
             }
         }
-        .onAppear {
-            name = initialName.isEmpty ? "" : initialName
-            code = initialCode.isEmpty ? PairCode.make() : initialCode
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { focusName = !isEditingExisting }
-        }
-    }
-}
-
-// MARK: - Sheet UI bits (scoped names)
-
-private struct DevicesNameField: View {
-    @Binding var text: String
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "ipad")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.65))
-
-            TextField("Device name (e.g. iPad Front Counter)", text: $text)
-                .font(.system(size: 15, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.92))
-                .textInputAutocapitalization(.words)
-                .autocorrectionDisabled(true)
-        }
-        .padding(.horizontal, 12)
-        .frame(height: 44)
-        .background(.white.opacity(0.06))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(.white.opacity(0.10), lineWidth: 1)
+        .padding(15)
+        .background(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(.white.opacity(0.06))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 24, style: .continuous)
+                        .stroke(.white.opacity(0.08), lineWidth: 1)
+                )
         )
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 }
 
-private struct PairingSegment: View {
-    @Binding var method: DeviceEditPairSheet.Method
-
-    var body: some View {
-        HStack(spacing: 10) {
-            ForEach(DeviceEditPairSheet.Method.allCases) { m in
-                Button {
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                    method = m
-                } label: {
-                    Text(m.rawValue)
-                        .font(.system(size: 13, weight: .semibold, design: .rounded))
-                        .foregroundStyle(method == m ? .black : .white.opacity(0.85))
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 36)
-                        .background(method == m ? Color.white : Color.white.opacity(0.06))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .stroke(Color.white.opacity(0.10), lineWidth: 1)
-                        )
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                }
-                .buttonStyle(.plain)
-            }
-        }
-    }
-}
-
-private struct QRBox: View {
-    let code: String
-
-    var body: some View {
-        HStack(spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(.white.opacity(0.06))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .stroke(.white.opacity(0.10), lineWidth: 1)
-                    )
-
-                VStack(spacing: 10) {
-                    Image(systemName: "qrcode")
-                        .font(.system(size: 34, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.85))
-
-                    Text(code)
-                        .font(.system(size: 13, weight: .bold, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.65))
-                }
-            }
-            .frame(width: 150, height: 150)
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Scan to pair")
-                    .font(.system(size: 12, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.75))
-
-                Text("On the iPad: Fastlane → Pair Device → Scan.")
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.55))
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Text("If camera is blocked, use Code.")
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.55))
-            }
-
-            Spacer()
-        }
-        .padding(.top, 2)
-    }
-}
-
-private struct CodeBox: View {
-    let code: String
-    let onCopy: () -> Void
-    let onRegenerate: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-
-            HStack(spacing: 10) {
-                Text(code)
-                    .font(.system(size: 20, weight: .bold, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.92))
-                    .padding(.horizontal, 14)
-                    .frame(height: 44)
-                    .background(.white.opacity(0.06))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .stroke(.white.opacity(0.10), lineWidth: 1)
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-
-                Button(action: onCopy) {
-                    Image(systemName: "doc.on.doc")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(.white.opacity(0.9))
-                        .frame(width: 44, height: 44)
-                        .background(.white.opacity(0.06))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .stroke(.white.opacity(0.10), lineWidth: 1)
-                        )
-                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                }
-                .buttonStyle(.plain)
-
-                Button(action: onRegenerate) {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(.white.opacity(0.9))
-                        .frame(width: 44, height: 44)
-                        .background(.white.opacity(0.06))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .stroke(.white.opacity(0.10), lineWidth: 1)
-                        )
-                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                }
-                .buttonStyle(.plain)
-            }
-
-            Text("Enter this code on the iPad to pair.")
-                .font(.system(size: 12, weight: .medium, design: .rounded))
-                .foregroundStyle(.white.opacity(0.55))
-        }
-        .padding(.top, 2)
-    }
-}
-
-// MARK: - Model
-
-private struct PairedDevice: Identifiable {
-    let id = UUID()
-    var name: String
-    var status: PairedDeviceStatus
-    var lastSeen: Date
-    var pairingCode: String
-}
-
-private enum PairedDeviceStatus {
-    case online, offline
-}
-
-// MARK: - Pair code generator
-private enum PairCode {
-    static func make() -> String {
-        let chars = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
-        return String((0..<6).compactMap { _ in chars.randomElement() })
-    }
-}
-
-import SwiftUI
-import UIKit
-
-// MARK: - Team (Minimal + Pairing like Devices)
-
-private struct TeamModuleView: View {
-    @Environment(\.dismiss) private var dismiss
-
-    @State private var members: [TeamMember] = [
-        .init(name: "Omer", role: .admin, lastActive: Date().addingTimeInterval(-60), inviteCode: TeamInviteCode.make()),
-        .init(name: "Yael", role: .manager, lastActive: Date().addingTimeInterval(-600), inviteCode: TeamInviteCode.make()),
-        .init(name: "Noam", role: .teamMember, lastActive: Date().addingTimeInterval(-3600), inviteCode: TeamInviteCode.make())
-    ]
-
-    @State private var editingIndex: Int? = nil
-    @State private var showSheet = false
-
-    var body: some View {
-        ZStack {
-            LinearGradient(
-                colors: [Color.black.opacity(0.98), Color.black.opacity(0.88)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .ignoresSafeArea()
-
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(spacing: 14) {
-
-                    topBar
-                    header
-
-                    GlassCard(corner: 22) {
-                        VStack(alignment: .leading, spacing: 10) {
-
-                            HStack {
-                                Text("Team")
-                                    .font(.system(size: 14, weight: .semibold, design: .rounded))
-                                    .foregroundStyle(.white.opacity(0.85))
-                                Spacer()
-                                Text("\(members.count)")
-                                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                                    .foregroundStyle(.white.opacity(0.55))
-                            }
-
-                            ForEach(Array(members.enumerated()), id: \.element.id) { idx, m in
-                                TeamRow(member: m) {
-                                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                    editingIndex = idx
-                                    showSheet = true
-                                }
-                            }
-
-                            if members.isEmpty {
-                                Text("No team members yet. Tap + to add.")
-                                    .font(.system(size: 13, weight: .medium, design: .rounded))
-                                    .foregroundStyle(.white.opacity(0.55))
-                                    .padding(.vertical, 8)
-                            }
-                        }
-                    }
-
-                    Spacer(minLength: 24)
-                }
-                .padding(.horizontal, 18)
-                .padding(.top, 10)
-            }
-        }
-        .toolbar(.hidden, for: .navigationBar)
-        .sheet(isPresented: $showSheet) {
-            TeamEditPairSheet(
-                initialName: editingIndex.map { members[$0].name } ?? "",
-                initialRole: editingIndex.map { members[$0].role } ?? .teamMember,
-                initialCode: editingIndex.map { members[$0].inviteCode } ?? TeamInviteCode.make(),
-                isEditing: editingIndex != nil,
-                onSave: { name, role, code in
-                    let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !clean.isEmpty else { return }
-
-                    if let idx = editingIndex {
-                        members[idx].name = clean
-                        members[idx].role = role
-                        members[idx].inviteCode = code
-                        members[idx].lastActive = Date()
-                    } else {
-                        members.insert(
-                            TeamMember(name: clean, role: role, lastActive: Date(), inviteCode: code),
-                            at: 0
-                        )
-                    }
-
-                    editingIndex = nil
-                    showSheet = false
-                },
-                onDelete: {
-                    if let idx = editingIndex {
-                        members.remove(at: idx)
-                    }
-                    editingIndex = nil
-                    showSheet = false
-                }
-            )
-            .presentationDetents([.height(560), .large])
-            .presentationDragIndicator(.visible)
-            .onDisappear { editingIndex = nil }
-        }
-    }
-
-    // MARK: - Top bar
-
-    private var topBar: some View {
-        HStack {
-            Button { dismiss() } label: {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.9))
-                    .frame(width: 44, height: 44)
-                    .background(.ultraThinMaterial)
-                    .clipShape(Circle())
-            }
-            .buttonStyle(.plain)
-
-            Spacer()
-
-            Text("Team")
-                .font(.system(size: 18, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.88))
-
-            Spacer()
-
-            Button {
-                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                editingIndex = nil
-                showSheet = true
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundStyle(.white.opacity(0.9))
-                    .frame(width: 44, height: 44)
-                    .background(.ultraThinMaterial)
-                    .clipShape(Circle())
-            }
-            .buttonStyle(.plain)
-        }
-    }
-
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Roles & Pairing")
-                .font(.system(size: 26, weight: .heavy, design: .rounded))
-                .foregroundStyle(.white)
-
-            Text("Pair admins and staff with QR or code.")
-                .font(.system(size: 13, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.62))
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.top, 4)
-    }
-}
-
-// MARK: - Row
-
-private struct TeamRow: View {
-    let member: TeamMember
-    let onTap: () -> Void
-
-    private func relativeTime(from date: Date) -> String {
-        let f = RelativeDateTimeFormatter()
-        f.unitsStyle = .abbreviated
-        return f.localizedString(for: date, relativeTo: Date())
-    }
-
-    var body: some View {
-        Button(action: onTap) {
-            HStack(spacing: 12) {
-                Image(systemName: member.role.icon)
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.9))
-                    .frame(width: 34, height: 34)
-                    .background(.white.opacity(0.08))
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(member.name)
-                        .font(.system(size: 15, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.92))
-
-                    Text("\(member.role.title) • active \(relativeTime(from: member.lastActive))")
-                        .font(.system(size: 12, weight: .medium, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.55))
-                        .lineLimit(1)
-                }
-
-                Spacer()
-
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.25))
-            }
-            .padding(.vertical, 12)
-            .padding(.horizontal, 14)
-            .background(.white.opacity(0.06))
-            .overlay(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .stroke(.white.opacity(0.08), lineWidth: 1)
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-// MARK: - Sheet (Name + Role + Pairing)
-
-private struct TeamEditPairSheet: View {
-    let initialName: String
-    let initialRole: TeamRole
-    let initialCode: String
-    let isEditing: Bool
-    let onSave: (String, TeamRole, String) -> Void
-    let onDelete: () -> Void
-
-    @Environment(\.dismiss) private var dismiss
-    @State private var name: String = ""
-    @State private var role: TeamRole = .teamMember
-    @State private var code: String = ""
-    @State private var method: Method = .qr
-
-    @FocusState private var focusName: Bool
-
-    enum Method: String, CaseIterable, Identifiable {
-        case qr = "QR"
-        case code = "Code"
-        var id: String { rawValue }
-    }
-
-    private var canSave: Bool { !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-
-    var body: some View {
-        ZStack {
-            Color.black.opacity(0.94).ignoresSafeArea()
-
-            VStack(spacing: 14) {
-
-                // Top bar
-                HStack {
-                    Button { dismiss() } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 14, weight: .bold))
-                            .foregroundStyle(.white.opacity(0.85))
-                            .frame(width: 40, height: 40)
-                            .background(.ultraThinMaterial)
-                            .clipShape(Circle())
-                    }
-                    .buttonStyle(.plain)
-
-                    Spacer()
-
-                    Text(isEditing ? "Member" : "Add member")
-                        .font(.system(size: 16, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.9))
-
-                    Spacer()
-
-                    Button {
-                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                        onSave(name, role, code)
-                    } label: {
-                        Text("Save")
-                            .font(.system(size: 14, weight: .bold, design: .rounded))
-                            .foregroundStyle(.black)
-                            .padding(.horizontal, 14)
-                            .frame(height: 40)
-                            .background(canSave ? Color.white : Color.white.opacity(0.25))
-                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!canSave)
-                }
-                .padding(.horizontal, 16)
-                .padding(.top, 10)
-
-                GlassCard(corner: 18) {
-                    VStack(alignment: .leading, spacing: 12) {
-
-                        // Name
-                        Text("Name")
-                            .font(.system(size: 13, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.70))
-
-                        TeamNameField(text: $name)
-                            .focused($focusName)
-
-                        Divider().background(Color.white.opacity(0.08)).padding(.vertical, 6)
-
-                        // Role
-                        Text("Role")
-                            .font(.system(size: 13, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.70))
-
-                        RoleChips(selected: $role)
-
-                        Text(role.help)
-                            .font(.system(size: 12, weight: .medium, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.55))
-
-                        Divider().background(Color.white.opacity(0.08)).padding(.vertical, 6)
-
-                        // Pairing
-                        Text("Pairing")
-                            .font(.system(size: 13, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.70))
-
-                        PairingChips(method: $method)
-
-                        if method == .qr {
-                            TeamQRBox(code: code)
-                        } else {
-                            TeamCodeBox(
-                                code: code,
-                                onCopy: {
-                                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                    UIPasteboard.general.string = code
-                                },
-                                onRegenerate: {
-                                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                    code = TeamInviteCode.make()
-                                }
-                            )
-                        }
-
-                        if isEditing {
-                            Divider().background(Color.white.opacity(0.08)).padding(.vertical, 6)
-
-                            Button {
-                                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                                onDelete()
-                            } label: {
-                                Text("Remove member")
-                                    .font(.system(size: 14, weight: .bold, design: .rounded))
-                                    .foregroundStyle(.white)
-                                    .frame(maxWidth: .infinity)
-                                    .frame(height: 44)
-                                    .background(Color.red.opacity(0.25))
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                            .stroke(Color.red.opacity(0.35), lineWidth: 1)
-                                    )
-                                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                }
-                .padding(.horizontal, 16)
-
-                Spacer()
-            }
-        }
-        .onAppear {
-            name = initialName
-            role = initialRole
-            code = initialCode.isEmpty ? TeamInviteCode.make() : initialCode
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                focusName = !isEditing
-            }
-        }
-    }
-}
-
-// MARK: - Sheet components
-
-private struct TeamNameField: View {
-    @Binding var text: String
-    var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "person.fill")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.65))
-
-            TextField("Full name", text: $text)
-                .font(.system(size: 15, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.92))
-                .textInputAutocapitalization(.words)
-                .autocorrectionDisabled(true)
-        }
-        .padding(.horizontal, 12)
-        .frame(height: 44)
-        .background(.white.opacity(0.06))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(.white.opacity(0.10), lineWidth: 1)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-    }
-}
-
-private struct RoleChips: View {
-    @Binding var selected: TeamRole
-    var body: some View {
-        HStack(spacing: 10) {
-            ForEach(TeamRole.allCases) { r in
-                Button {
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                    selected = r
-                } label: {
-                    Text(r.short)
-                        .font(.system(size: 13, weight: .semibold, design: .rounded))
-                        .foregroundStyle(selected == r ? .black : .white.opacity(0.85))
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 36)
-                        .background(selected == r ? Color.white : Color.white.opacity(0.06))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .stroke(Color.white.opacity(0.10), lineWidth: 1)
-                        )
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                }
-                .buttonStyle(.plain)
-            }
-        }
-    }
-}
-
-private struct PairingChips: View {
-    @Binding var method: TeamEditPairSheet.Method
-    var body: some View {
-        HStack(spacing: 10) {
-            ForEach(TeamEditPairSheet.Method.allCases) { m in
-                Button {
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                    method = m
-                } label: {
-                    Text(m.rawValue)
-                        .font(.system(size: 13, weight: .semibold, design: .rounded))
-                        .foregroundStyle(method == m ? .black : .white.opacity(0.85))
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 36)
-                        .background(method == m ? Color.white : Color.white.opacity(0.06))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .stroke(Color.white.opacity(0.10), lineWidth: 1)
-                        )
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                }
-                .buttonStyle(.plain)
-            }
-        }
-    }
-}
-
-private struct TeamQRBox: View {
-    let code: String
-    var body: some View {
-        HStack(spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(.white.opacity(0.06))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .stroke(.white.opacity(0.10), lineWidth: 1)
-                    )
-
-                VStack(spacing: 10) {
-                    Image(systemName: "qrcode")
-                        .font(.system(size: 34, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.85))
-
-                    Text(code)
-                        .font(.system(size: 13, weight: .bold, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.65))
-                }
-            }
-            .frame(width: 150, height: 150)
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Scan to join")
-                    .font(.system(size: 12, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.75))
-
-                Text("On the iPhone: open Fastlane → Join Team → Scan.")
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.55))
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Text("If camera blocked, use Code.")
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.55))
-            }
-
-            Spacer()
-        }
-        .padding(.top, 2)
-    }
-}
-
-private struct TeamCodeBox: View {
-    let code: String
-    let onCopy: () -> Void
-    let onRegenerate: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 10) {
-                Text(code)
-                    .font(.system(size: 20, weight: .bold, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.92))
-                    .padding(.horizontal, 14)
-                    .frame(height: 44)
-                    .background(.white.opacity(0.06))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .stroke(.white.opacity(0.10), lineWidth: 1)
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-
-                Button(action: onCopy) {
-                    Image(systemName: "doc.on.doc")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(.white.opacity(0.9))
-                        .frame(width: 44, height: 44)
-                        .background(.white.opacity(0.06))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .stroke(.white.opacity(0.10), lineWidth: 1)
-                        )
-                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                }
-                .buttonStyle(.plain)
-
-                Button(action: onRegenerate) {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(.white.opacity(0.9))
-                        .frame(width: 44, height: 44)
-                        .background(.white.opacity(0.06))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .stroke(.white.opacity(0.10), lineWidth: 1)
-                        )
-                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                }
-                .buttonStyle(.plain)
-            }
-
-            Text("Enter this code to join as \(codeRoleHint).")
-                .font(.system(size: 12, weight: .medium, design: .rounded))
-                .foregroundStyle(.white.opacity(0.55))
-        }
-        .padding(.top, 2)
-    }
-
-    private var codeRoleHint: String { "team" }
-}
-
-// MARK: - Models
-
-private struct TeamMember: Identifiable {
-    let id = UUID()
-    var name: String
-    var role: TeamRole
-    var lastActive: Date
-    var inviteCode: String
-}
-
-private enum TeamRole: String, CaseIterable, Identifiable {
-    case admin
-    case manager
-    case teamMember
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .admin: return "Admin"
-        case .manager: return "Manager"
-        case .teamMember: return "Team member"
-        }
-    }
-
-    var short: String {
-        switch self {
-        case .admin: return "Admin"
-        case .manager: return "Manager"
-        case .teamMember: return "Team"
-        }
-    }
-
-    var icon: String {
-        switch self {
-        case .admin: return "sparkles"
-        case .manager: return "briefcase.fill"
-        case .teamMember: return "person.fill"
-        }
-    }
-
-    var help: String {
-        switch self {
-        case .admin: return "Can change settings, pair devices, and manage permissions."
-        case .manager: return "Can run shifts and operate Cashpoint."
-        case .teamMember: return "Can take orders on Cashpoint (limited access)."
-        }
-    }
-}
-
-// MARK: - Invite code generator
-private enum TeamInviteCode {
-    static func make() -> String {
-        let chars = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
-        return String((0..<6).compactMap { _ in chars.randomElement() })
-    }
-}
-
-// MARK: - CashPoint wrapper (your existing)
-struct CashPointPushWrapper: View {
-    @Environment(\.dismiss) private var dismiss
-    @AppStorage("cashpoint.pushMode") private var cashpointPushMode: Bool = false
-
-    var body: some View {
-        ZStack {
-            CashPointView()
-                .preferredColorScheme(.dark)
-
-            VStack {
-                HStack {
-                    Button(action: {
-                        cashpointPushMode = false
-                        dismiss()
-                    }) {
-                        Image(systemName: "chevron.left")
-                            .font(.system(size: 18, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.86))
-                            .frame(width: 44, height: 44)
-                            .contentShape(Rectangle())
-                    }
-                    Spacer()
-                }
-                Spacer()
-            }
-            .padding(.horizontal, 12)
-            .padding(.top, 10)
-        }
-        .onAppear { cashpointPushMode = true }
-        .onDisappear { cashpointPushMode = false }
-    }
-}
-
-// MARK: - Top bars + hero + shared card
+// MARK: - Shop Top Bar
 
 private struct ShopTopBar: View {
     @Binding var selectedShop: ShopOption
     let shops: [ShopOption]
-    let onCreateShop: () -> Void   // ✅ ADD
-
-    private let secondary = Color.white.opacity(0.86)
+    let onCreateShop: () -> Void
 
     var body: some View {
         HStack(alignment: .center) {
-
             Menu {
                 ForEach(shops) { shop in
                     Button {
@@ -2883,13 +2426,13 @@ private struct ShopTopBar: View {
                     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                     onCreateShop()
                 } label: {
-                    Label("Create a shop", systemImage: "plus")
+                    Label("צור חנות", systemImage: "plus")
                 }
             } label: {
                 HStack(spacing: 6) {
-                    Text("\(selectedShop.name) today")
+                    Text("בית העם היום")
                         .font(.system(size: 20, weight: .semibold, design: .rounded))
-                        .foregroundStyle(secondary)
+                        .foregroundStyle(.white.opacity(0.86))
 
                     Image(systemName: "chevron.down")
                         .font(.system(size: 14, weight: .semibold))
@@ -2903,166 +2446,3 @@ private struct ShopTopBar: View {
         .padding(.top, 6)
     }
 }
-
-private struct MiniTopBar: View {
-    let title: String
-    let onTapAnalytics: () -> Void
-
-    private let secondary = Color.white.opacity(0.86)
-
-    var body: some View {
-        HStack {
-            Text(title)
-                .font(.system(size: 20, weight: .semibold, design: .rounded))
-                .foregroundStyle(secondary)
-
-            Spacer()
-
-            Button { onTapAnalytics() } label: {
-                Image(systemName: "chart.line.uptrend.xyaxis")
-                    .font(.system(size: 20, weight: .semibold))
-                    .foregroundStyle(secondary)
-                    .frame(width: 38, height: 38)
-            }
-            .buttonStyle(.plain)
-        }
-        .padding(.top, 6)
-    }
-}
-
-private struct FancyHeroHeader: View {
-    let magic: Namespace.ID
-    let turnover: Int
-    let meta: String
-    let monthlyText: String
-    let deltaText: String
-
-    private let secondary = Color.white.opacity(0.86)
-    private let bodySoft  = Color.white.opacity(0.74)
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(turnover, format: .number)
-                .font(.system(size: 66, weight: .regular, design: .rounded))
-                .monospacedDigit()
-                .tracking(-0.9)
-                .foregroundStyle(.white)
-                .contentTransition(.numericText())
-                .animation(.easeInOut(duration: 0.25), value: turnover)
-
-            Text(meta)
-                .font(.system(size: 14, weight: .medium, design: .rounded))
-                .foregroundStyle(secondary)
-
-            Text(deltaText)
-                .font(.system(size: 30, weight: .semibold, design: .rounded))
-                .foregroundStyle(MiniTint.delta(deltaText))
-                .padding(.top, 10)
-
-            HStack(spacing: 20) { Text(monthlyText) }
-                .font(.system(size: 13, weight: .semibold, design: .rounded))
-                .foregroundStyle(bodySoft)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-private struct PlaceholderModuleView: View {
-    let title: String
-    let subtitle: String
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
-
-            VStack(spacing: 14) {
-                HStack {
-                    Button { dismiss() } label: {
-                        Image(systemName: "chevron.left")
-                            .font(.system(size: 18, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.9))
-                            .frame(width: 44, height: 44)
-                            .background(.ultraThinMaterial)
-                            .clipShape(Circle())
-                    }
-                    .buttonStyle(.plain)
-
-                    Spacer()
-                }
-                .padding(.horizontal, 14)
-                .padding(.top, 10)
-
-                Spacer()
-
-                Text(title)
-                    .font(.system(size: 30, weight: .heavy, design: .rounded))
-                    .foregroundStyle(.white)
-
-                Text(subtitle)
-                    .font(.system(size: 15, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.6))
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 24)
-
-                Spacer()
-            }
-        }
-        .toolbar(.hidden, for: .navigationBar)
-    }
-}
-
-private struct TeslaControlsRow: View {
-    let onMenu: () -> Void
-    let onCashpoint: () -> Void
-    let onAnalytics: () -> Void   // ✅ ADD
-
-    var body: some View {
-        HStack(spacing: 34) {
-            TeslaControlButton(title: "MENU", systemImage: "menucard.fill", action: onMenu)
-            TeslaControlButton(title: "CASHPOINT", systemImage: "hand.point.up.braille.fill", action: onCashpoint)
-            TeslaControlButton(title: "ANALYTICS", systemImage: "chart.line.uptrend.xyaxis", action: onAnalytics) // ✅ ADD
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 4)
-    }
-}
-
-private struct TeslaControlButton: View {
-    let title: String
-    let systemImage: String
-    let action: () -> Void
-
-    var body: some View {
-        Button {
-            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            action()
-        } label: {
-            VStack(spacing: 8) {
-
-                // TEXT ABOVE (smaller)
-                Text(title)
-                    .font(.system(size: 11, weight: .medium, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.65))
-                    .tracking(1.0)
-
-                // TESLA-STYLE CIRCLE
-                ZStack {
-                    Circle()
-                        .fill(Color.white.opacity(0.05))
-
-                    Circle()
-                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
-
-                    Image(systemName: systemImage)
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.9))
-                }
-                .frame(width: 56, height: 56)
-            }
-        }
-        .buttonStyle(.plain)
-    }
-}
-

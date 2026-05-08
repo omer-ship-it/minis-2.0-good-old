@@ -2739,30 +2739,24 @@ final class ZCreditPaymentHandler {
         // republish the shop JSON with `payments.useChargeV2: true` (or false) and
         // every iPad picks up the change on the next JSON refresh (cache TTL ~ minutes).
         //
-        // 🟢 TEMPORARY CANARY HARDCODE — added 2026-05-05 to bypass the JSON flag
-        //    while testing /charge in isolation. Set to `true` to FORCE /charge for
-        //    txType==01 regardless of the server-driven flag. Set to `false` to use
-        //    the server-driven flag normally. REMOVE this hardcode once canary
-        //    validation is complete and the server JSON is the single source of truth.
-        let HARDCODE_FORCE_CHARGE_V2 = true   // ⚠️ TEMP — flip to false to restore JSON-driven control
-
+        // 🆕 (2026-05-08): canary HARDCODE removed — server JSON's
+        //    `mini.settings.payments.useChargeV2` is now the single source of
+        //    truth for /charge↔/start routing per shop. Republish the shop JSON
+        //    to flip; every iPad picks up on its next poll.
         let useChargeV2Flag = UserDefaults.standard.bool(forKey: "payments.useChargeV2")
-        let effectiveFlag = HARDCODE_FORCE_CHARGE_V2 || useChargeV2Flag
         let endpoint: String
         let endpointReason: String
         if transactionType != "01" {
             endpoint = "/payments/zcredit/start"
             endpointReason = "LEGACY_NON_01_TXTYPE_\(transactionType)"
-        } else if effectiveFlag {
+        } else if useChargeV2Flag {
             endpoint = "/payments/zcredit/charge"
-            endpointReason = HARDCODE_FORCE_CHARGE_V2
-                ? "HARDCODE_FORCE_CHARGE_V2"
-                : "FLAG_USECHARGEV2_ON"
+            endpointReason = "FLAG_USECHARGEV2_ON"
         } else {
             endpoint = "/payments/zcredit/start"
             endpointReason = "FLAG_USECHARGEV2_OFF"
         }
-        print("[ZCredit] 🚦 endpoint=\(endpoint) reason=\(endpointReason) flag=\(useChargeV2Flag) hardcode=\(HARDCODE_FORCE_CHARGE_V2) txType=\(transactionType) amount=\(safeAmount) pinpadId=\(pinpadId) miniAppId=\(mid) idempotency=\(idempotencyKey?.prefix(8) ?? "-")")
+        print("[ZCredit] 🚦 endpoint=\(endpoint) reason=\(endpointReason) flag=\(useChargeV2Flag) txType=\(transactionType) amount=\(safeAmount) pinpadId=\(pinpadId) miniAppId=\(mid) idempotency=\(idempotencyKey?.prefix(8) ?? "-")")
         guard let startURL = URL(string: endpoint, relativeTo: baseURL) else {
             DispatchQueue.main.async { completion(self.legacyBadURLResult()) }
             return

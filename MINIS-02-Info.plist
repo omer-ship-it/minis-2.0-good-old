@@ -10,6 +10,10 @@
 		<string>Oswald-VariableFont_wght.ttf</string>
 		<string>primaries-demibold-aaa.otf</string>
 	</array>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Brain uses speech recognition to convert your voice into a query.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Brain needs microphone access for voice input.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>remote-notification</string>

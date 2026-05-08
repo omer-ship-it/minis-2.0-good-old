@@ -154,7 +154,7 @@ struct MINIS_02App: App {
             Group {
                 // ✅ 1) Admin always goes Tesla3
                 if isAdmin {
-                    Tesla3()
+                    menuView()
                         .tint(.primary)
                         .environment(\.layoutDirection, .leftToRight)
 

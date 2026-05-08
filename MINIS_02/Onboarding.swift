@@ -540,7 +540,7 @@ enum OwnerShopsStore {
     /// ✅ The important part: append without wiping existing shops
     static func addShop(name: String) -> OwnerShop {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let newShop = OwnerShop(name: trimmed.isEmpty ? "My shop" : trimmed)
+        let newShop = OwnerShop(name: trimmed.isEmpty ? "בית העם" : trimmed)
 
         var existing = load()
 

@@ -2751,6 +2751,23 @@ struct OrderFlowView: View {
                                     }
                                 }
 
+                                // 🆕 (2026-05-08): Try Again button for self-cashpoint declined path.
+                                //    Cashpoint mode has its own retry CTA (the Card button at
+                                //    line ~2774 swaps to "נסה שוב" when cardPaymentState is
+                                //    .declined / .failed). Self-cashpoint never sees that block,
+                                //    so without this we have no retry path for the customer.
+                                if !cashPointMode &&
+                                   (cardPaymentState == .declined || cardPaymentState == .failed) {
+                                    Button { retryPayment() } label: {
+                                        Text(isRtl ? "נסה שוב" : "Try again")
+                                            .font(kioskFont(18, weight: .bold))
+                                            .foregroundColor(.white)
+                                            .frame(width: 240, height: 50)
+                                            .background(MenuTheme.buttonBackground)
+                                            .clipShape(RoundedRectangle(cornerRadius: 18))
+                                    }
+                                }
+
                                 // 🗑️ Removed brand-green "נסה שוב" duplicate (2026-05-03):
                                 // The white "תשלום באשראי" button below (line ~2733) already
                                 // swaps its label to "נסה שוב" when cardPaymentState is .declined

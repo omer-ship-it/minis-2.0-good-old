@@ -28,6 +28,13 @@ struct TodayDashboardDTO: Decodable {
     let turnover: Double
     let orders: Int
     let aov: Double
+    let channels: Channels?
+    let selfOrderingPct: Double?
+
+    struct Channels: Decodable {
+        let cashpoint: Int
+        let selfOrders: Int
+    }
 }
 
 @MainActor
@@ -35,6 +42,9 @@ final class DashboardVM: ObservableObject {
     @Published var turnover: Int = 0
     @Published var orders: Int = 0
     @Published var aov: Double = 0
+    @Published var cashpointOrders: Int = 0
+    @Published var selfOrders: Int = 0
+    @Published var selfOrderingPct: Double = 0
 
     @Published var lastUpdatedAt: Date? = nil
     @Published var isLoading: Bool = false
@@ -99,6 +109,9 @@ final class DashboardVM: ObservableObject {
                 turnover = Int(decoded.turnover.rounded(.toNearestOrAwayFromZero))
                 orders = decoded.orders
                 aov = decoded.aov
+                cashpointOrders = decoded.channels?.cashpoint ?? 0
+                selfOrders = decoded.channels?.selfOrders ?? 0
+                selfOrderingPct = decoded.selfOrderingPct ?? 0
             }
             lastUpdatedAt = Date()
         } catch {

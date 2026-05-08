@@ -115,6 +115,14 @@ fileprivate struct HugBasketSheet<Content: View>: View {
         let minH: CGFloat = 320
         let targetH = min(max(measuredH, minH), maxH) + 12
 
+        // 🆕 (2026-05-08): when the measured basket content would overflow maxH
+        //    (too many items), the ViewThatFits inside BasketSheetPrototype
+        //    cannot choose a layout under the dynamic .height(targetH) detent
+        //    — it renders BLANK. Switch to the .large detent in that case so
+        //    the user gets a full-height sheet with normal scroll behavior.
+        let preferredDetent: PresentationDetent =
+            measuredH > maxH ? .large : .height(targetH)
+
         ZStack {
             content
 
@@ -127,8 +135,8 @@ fileprivate struct HugBasketSheet<Content: View>: View {
                 .opacity(0.001)
                 .allowsHitTesting(false)
         }
-        .onAppear { selectedDetent = .height(targetH) }
-        .onChange(of: measuredH) { _ in selectedDetent = .height(targetH) }
+        .onAppear { selectedDetent = preferredDetent }
+        .onChange(of: measuredH) { _ in selectedDetent = preferredDetent }
         .presentationDetents([.height(targetH), .large], selection: $selectedDetent)
         .presentationDragIndicator(.visible)
     }
