@@ -146,7 +146,6 @@ struct PrinterNetworkConfig {
 // MARK: - Banner
 
 struct PrinterOfflineBanner: View {
-    @ObservedObject var monitor: PrinterReachabilityMonitor
     let isRtl: Bool
     let config: PrinterNetworkConfig
     let currentSSID: String?
@@ -273,7 +272,6 @@ struct PrinterNetworkAlertsModifier: ViewModifier {
 
             if shouldShowBanner {
                 PrinterOfflineBanner(
-                    monitor: monitor,
                     isRtl: isRtl,
                     config: config,
                     currentSSID: currentSSID

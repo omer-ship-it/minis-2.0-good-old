@@ -177,7 +177,7 @@ struct MINIS_02App: App {
                     environment(\.locale, appLocale)
                         .environment(\.isRtl, appIsRtl)
                 } else {
-                    Tesla3()
+                    menuView()
                                .environment(\.layoutDirection, .leftToRight)
                                .environment(\.locale, appLocale)
                                   .environment(\.isRtl, appIsRtl)   // your custom env key

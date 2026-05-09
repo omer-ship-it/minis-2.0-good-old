@@ -396,8 +396,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "
-";
+			shellScript = "\ncd /Users/minis/Documents/Github/Minis-02 || exit 0\n\nif [ -n \"$(git status --porcelain 2>/dev/null)\" ]; then\n  git add . || exit 0\n  git commit -m \"WIP\" || true\n  git pull --rebase || true\n  git push || true\nelse\n  echo \"No changes to commit\"\nfi\n\nexit 0\n";
 		};
 		1CCDD13B2F98D911001CBD14 /* ShellScript */ = {
 			isa = PBXShellScriptBuildPhase;

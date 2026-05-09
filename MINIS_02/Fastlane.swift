@@ -5710,7 +5710,7 @@ struct BasketSheet: View {
                     @AppStorage("checkout.intent")  var checkoutIntentRaw: String = "ta"
 
 
-                    UserDefaults.standard.set(false, forKey: "debugSkipApplePay")
+                    UserDefaults.standard.set(true, forKey: "debugSkipApplePay")
 
                     // ✅ always derive diningMode from the shared intent
                     syncDiningModeFromIntent()
@@ -6490,7 +6490,7 @@ struct BasketSheet: View {
 
         if skipApplePay {
             Haptics.light()
-            startSubmitOrder(zcreditMeta: ["debugSkipApplePay": false, "debugBuild": true])
+            startSubmitOrder(zcreditMeta: ["debugSkipApplePay": true, "debugBuild": true])
             return
         }
         

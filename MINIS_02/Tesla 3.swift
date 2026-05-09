@@ -3,6 +3,23 @@ import UIKit
 import Speech
 import AVFoundation
 
+// MARK: - Adaptive Color Palette
+
+private enum BrainColors {
+    static let pageBg        = Color("BrainPageBg",     bundle: nil)
+    static let cardFill      = Color("BrainCardFill",   bundle: nil)
+    static let cardStroke    = Color("BrainCardStroke",  bundle: nil)
+    static let textPrimary   = Color("BrainTextPrimary", bundle: nil)
+    static let textSecondary = Color("BrainTextSecondary", bundle: nil)
+    static let textTertiary  = Color("BrainTextTertiary", bundle: nil)
+    static let textQuaternary = Color("BrainTextQuaternary", bundle: nil)
+    static let subtleFill    = Color("BrainSubtleFill",  bundle: nil)
+    static let subtleStroke  = Color("BrainSubtleStroke", bundle: nil)
+    static let invertedText  = Color("BrainInvertedText", bundle: nil)
+    static let invertedBg    = Color("BrainInvertedBg",  bundle: nil)
+    static let accent        = Color(red: 0.45, green: 0.95, blue: 0.72)
+}
+
 // MARK: - Brain Models
 
 struct BrainMetric: Identifiable, Hashable, Codable {
@@ -347,6 +364,70 @@ struct BrainQueryResponse: Codable {
     let executionMs: Int?
 }
 
+// MARK: - Brain Debug Log
+//
+// Persists a rolling history of every Brain query response so we can inspect
+// the exact SQL, row counts, and execution time after the fact without
+// touching server logs. Stored in UserDefaults — fine for dev/debug use.
+
+struct BrainDebugEntry: Codable, Identifiable {
+    let id: UUID
+    let timestamp: Date
+    let question: String
+    let queryKey: String
+    let sql: String?
+    let rowCount: Int?
+    let executionMs: Int?
+}
+
+enum BrainDebugLog {
+    private static let storageKey = "brain.debug.log"
+    private static let maxEntries = 50
+
+    /// Append the latest response to the front of the rolling log (newest first).
+    static func append(question: String, response: BrainQueryResponse) {
+        var entries = load()
+        let entry = BrainDebugEntry(
+            id: UUID(),
+            timestamp: Date(),
+            question: question,
+            queryKey: response.card.queryKey,
+            sql: response.sql,
+            rowCount: response.rowCount,
+            executionMs: response.executionMs
+        )
+        entries.insert(entry, at: 0)
+        if entries.count > maxEntries {
+            entries = Array(entries.prefix(maxEntries))
+        }
+        if let data = try? JSONEncoder().encode(entries) {
+            UserDefaults.standard.set(data, forKey: storageKey)
+        }
+
+        // Also dump to Xcode console so debugging is immediate.
+        let preview = (response.sql ?? "<mock — no sql>")
+            .split(separator: "\n").prefix(3).joined(separator: " ⏎ ")
+        print("""
+        🧠 Brain ▶︎ \(entry.queryKey)
+           q: \(question)
+           rows: \(response.rowCount.map(String.init) ?? "—") · \(response.executionMs.map { "\($0)ms" } ?? "—")
+           sql: \(preview)
+        """)
+    }
+
+    /// Returns the rolling log, newest first.
+    static func load() -> [BrainDebugEntry] {
+        guard let data = UserDefaults.standard.data(forKey: storageKey),
+              let entries = try? JSONDecoder().decode([BrainDebugEntry].self, from: data)
+        else { return [] }
+        return entries
+    }
+
+    static func clear() {
+        UserDefaults.standard.removeObject(forKey: storageKey)
+    }
+}
+
 struct PinnedBrainCardState: Identifiable, Codable {
     var id: String { queryKey }
     let queryKey: String
@@ -554,10 +635,15 @@ final class BrainVoiceManager: ObservableObject {
 final class BrainService {
     static let shared = BrainService()
     private init() {
-        UserDefaults.standard.register(defaults: [Self.mockKey: true])
+        // Register `false` as the fallback for the mock key so unset devices
+        // hit the live API by default. The in-app toggle can still flip it on.
+        UserDefaults.standard.register(defaults: [Self.mockKey: false])
     }
 
-    private static let mockKey = "brain.useMockBackend"
+    // v2 key forces the new default (false → live API) on devices that previously
+    // saved `true` under the old "brain.useMockBackend" key. Bumping the suffix
+    // is cheaper than writing a one-off migration.
+    private static let mockKey = "brain.useMockBackend.v2"
 
     static var useMockBackend: Bool {
         UserDefaults.standard.bool(forKey: mockKey)
@@ -569,7 +655,7 @@ final class BrainService {
 
     private var useMock: Bool { Self.useMockBackend }
 
-    private let endpoint = URL(string: "https://staging-api.minis.studio/brain/query")!
+    private let endpoint = URL(string: "https://minis.studio/brain/query")!
 
     private let session: URLSession = {
         let cfg = URLSessionConfiguration.default
@@ -578,7 +664,7 @@ final class BrainService {
         return URLSession(configuration: cfg)
     }()
 
-    private let healthURL = URL(string: "https://staging-api.minis.studio/brain/health")!
+    private let healthURL = URL(string: "https://minis.studio/brain/health")!
     private let decoder = JSONDecoder()
     private let encoder = JSONEncoder()
 
@@ -721,7 +807,6 @@ struct Tesla3: View {
                 showSetupFromOnboarding: showSetupFromOnboarding,
                 onDismissSetup: { showSetupFromOnboarding = false }
             )
-            .preferredColorScheme(.dark)
             .environment(\.layoutDirection, .rightToLeft)
             .padding(.top, embedded ? 60 : 0)
 
@@ -733,8 +818,7 @@ struct Tesla3: View {
 
             NavigationLink(
                 destination: menuView()
-                    .preferredColorScheme(.dark)
-                    .toolbar(.hidden, for: .navigationBar),
+                            .toolbar(.hidden, for: .navigationBar),
                 isActive: $showMenu
             ) { EmptyView() }
             .hidden()
@@ -743,8 +827,7 @@ struct Tesla3: View {
                 destination: FastlaneOnboardingMock {
                     showCreateShopFlow = false
                 }
-                .preferredColorScheme(.dark)
-                .toolbar(.hidden, for: .navigationBar),
+                    .toolbar(.hidden, for: .navigationBar),
                 isActive: $showCreateShopFlow
             ) { EmptyView() }
             .hidden()
@@ -755,7 +838,7 @@ struct Tesla3: View {
                         Button { dismiss() } label: {
                             Image(systemName: "chevron.left")
                                 .font(.system(size: 18, weight: .semibold))
-                                .foregroundStyle(.white.opacity(0.9))
+                                .foregroundStyle(BrainColors.textPrimary)
                                 .frame(width: 44, height: 44)
                                 .background(.ultraThinMaterial)
                                 .clipShape(Circle())
@@ -802,34 +885,68 @@ struct RestaurantAIHomeMock: View {
     @State private var brainError: Bool = false
     @State private var recentQuestions: [String] = []
     @State private var lastBrainResponse: BrainQueryResponse?
-    @AppStorage("brain.useMockBackend") private var useMockBrain = true
+    @AppStorage("brain.useMockBackend.v2") private var useMockBrain = false
+    @AppStorage("brain.suggestions.dismissed") private var dismissedChipsRaw: String = ""
     @State private var brainHealthStatus: BrainHealthStatus = .unknown
     @State private var brainHealthMessage: String = ""
     @StateObject private var voice = BrainVoiceManager()
 
+    // Starter suggestion chips — the four reports business owners ask about most.
+    // `id` matches the queryKey the API returns so the chip auto-hides once pinned.
+    private let starterChips: [BrainSuggestionChip] = [
+        BrainSuggestionChip(
+            id: "daily_sales:yesterday",
+            label: "💰 מכירות אתמול",
+            question: "מכירות אתמול"
+        ),
+        BrainSuggestionChip(
+            id: "top_items:yesterday",
+            label: "📦 פריטים מאתמול",
+            question: "פריטים מאתמול"
+        ),
+        BrainSuggestionChip(
+            id: "top_items:today",
+            label: "⭐️ הפריט הכי טוב היום",
+            question: "הפריט הכי טוב היום"
+        ),
+        BrainSuggestionChip(
+            id: "hourly_sales:today",
+            label: "⏱ מכירות לפי שעה",
+            question: "מכירות לפי שעה"
+        )
+    ]
+
+    private var dismissedChipIds: Set<String> {
+        Set(dismissedChipsRaw
+            .split(separator: ",")
+            .map { String($0).trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty })
+    }
+
+    private var visibleStarterChips: [BrainSuggestionChip] {
+        let pinnedKeys = Set(pinnedStates.map { $0.queryKey })
+        let dismissed = dismissedChipIds
+        return starterChips.filter { chip in
+            !pinnedKeys.contains(chip.id) && !dismissed.contains(chip.id)
+        }
+    }
+
+    private func dismissChip(_ chip: BrainSuggestionChip) {
+        var ids = dismissedChipIds
+        ids.insert(chip.id)
+        dismissedChipsRaw = ids.sorted().joined(separator: ",")
+    }
+
+    private func tapChip(_ chip: BrainSuggestionChip) {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        aiText = chip.question
+        submitBrainQuery()
+    }
+
     var body: some View {
         ZStack {
-            LinearGradient(
-                colors: [
-                    Color.black.opacity(0.99),
-                    Color.black.opacity(0.93),
-                    Color.black.opacity(0.88)
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .ignoresSafeArea()
-
-            LinearGradient(
-                colors: [
-                    Color.white.opacity(0.055),
-                    Color.clear
-                ],
-                startPoint: .topLeading,
-                endPoint: .center
-            )
-            .ignoresSafeArea()
-            .allowsHitTesting(false)
+            BrainColors.pageBg
+                .ignoresSafeArea()
 
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(spacing: 20) {
@@ -906,6 +1023,25 @@ struct RestaurantAIHomeMock: View {
                         Text("קלט קולי של Brain דורש גישה למיקרופון וזיהוי דיבור. הפעל בהגדרות.")
                     }
 
+                    // Starter suggestion chips — discovery for first-time users.
+                    // Auto-hide per chip when pinned or dismissed; whole row hides
+                    // while a query is loading or a card is on screen.
+                    if !visibleStarterChips.isEmpty
+                        && activeBrainCard == nil
+                        && !isBrainLoading
+                        && !brainError {
+                        BrainSuggestionsRow(
+                            chips: visibleStarterChips,
+                            onTap: { tapChip($0) },
+                            onDismiss: { chip in
+                                withAnimation(.easeOut(duration: 0.2)) {
+                                    dismissChip(chip)
+                                }
+                            }
+                        )
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+
                     if isBrainLoading {
                         BrainThinkingCard()
                             .transition(.move(edge: .top).combined(with: .opacity))
@@ -971,7 +1107,7 @@ struct RestaurantAIHomeMock: View {
         )) {
             if let card = selectedBrainCardForReport {
                 BrainReportView(card: card)
-                    .preferredColorScheme(.dark)
+                    .environment(\.layoutDirection, .rightToLeft)
                     .toolbar(.hidden, for: .navigationBar)
             }
         }
@@ -1087,6 +1223,7 @@ struct RestaurantAIHomeMock: View {
                 )
                 do {
                     let response = try await BrainService.shared.query(request)
+                    BrainDebugLog.append(question: state.question, response: response)
                     await MainActor.run {
                         guard let idx = pinnedStates.firstIndex(where: { $0.queryKey == state.queryKey }) else { return }
                         var updated = response.card
@@ -1129,6 +1266,7 @@ struct RestaurantAIHomeMock: View {
             .prefix(5)
             .map { $0 }
     }
+    
 
     private func checkBrainHealth() {
         if useMockBrain {
@@ -1177,13 +1315,26 @@ struct RestaurantAIHomeMock: View {
         Task {
             do {
                 let response = try await BrainService.shared.query(request)
+                BrainDebugLog.append(question: question, response: response)
+
+                // Always show the live response. Preserve only the user's pin flag,
+                // and refresh the pinned cache with the fresh data so future reloads
+                // don't fall back to stale numbers.
                 var card = response.card
-                if let existing = pinnedStates.first(where: { $0.queryKey == card.queryKey }) {
-                    card = existing.card
+                let pinnedIdx = pinnedStates.firstIndex(where: { $0.queryKey == card.queryKey })
+                if pinnedIdx != nil {
+                    card.isPinned = true
                 }
+
                 await MainActor.run {
                     saveRecentQuestion(question)
                     lastBrainResponse = response
+                    if let idx = pinnedIdx {
+                        pinnedStates[idx].card = card
+                        pinnedStates[idx].lastUpdatedAt = Date()
+                        pinnedStates[idx].lastRefreshFailed = false
+                        savePinnedStates()
+                    }
                     withAnimation(.spring(response: 0.45, dampingFraction: 0.86)) {
                         isBrainLoading = false
                         activeBrainCard = card
@@ -1228,20 +1379,20 @@ private struct LiveHeroHeader: View {
                 Text("לייב היום")
                     .font(.system(size: 11, weight: .semibold, design: .rounded))
                     .tracking(1.4)
-                    .foregroundStyle(.white.opacity(0.55))
+                    .foregroundStyle(BrainColors.textTertiary)
             }
 
             Text(turnover, format: .number)
                 .font(.system(size: 68, weight: .regular, design: .rounded))
                 .monospacedDigit()
                 .tracking(-1.1)
-                .foregroundStyle(.white)
+                .foregroundStyle(BrainColors.textPrimary)
                 .contentTransition(.numericText())
                 .animation(.easeInOut(duration: 0.25), value: turnover)
 
             Text(metaLine)
                 .font(.system(size: 14, weight: .medium, design: .rounded))
-                .foregroundStyle(.white.opacity(0.82))
+                .foregroundStyle(BrainColors.textSecondary)
 
             if orders > 0 {
                 let selfPct = Int((Double(selfOrders) / Double(orders) * 100).rounded())
@@ -1250,11 +1401,11 @@ private struct LiveHeroHeader: View {
                     Text("\(selfPct)%")
                         .font(.system(size: 30, weight: .semibold, design: .rounded))
                         .monospacedDigit()
-                        .foregroundStyle(Color(red: 0.45, green: 0.95, blue: 0.72))
+                        .foregroundStyle(BrainColors.accent)
 
                     Text("שירות עצמי")
                         .font(.system(size: 14, weight: .medium, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.82))
+                        .foregroundStyle(BrainColors.textSecondary)
                         .padding(.bottom, 4)
                 }
             }
@@ -1289,7 +1440,7 @@ private struct AskFastlaneCard: View {
                 Text("שאל את בריין")
                     .font(.system(size: 12, weight: .semibold, design: .rounded))
                     .tracking(1.4)
-                    .foregroundStyle(.white.opacity(0.52))
+                    .foregroundStyle(BrainColors.textTertiary)
 
                 Spacer()
 
@@ -1306,10 +1457,10 @@ private struct AskFastlaneCard: View {
                 } else {
                     Text("BRAIN")
                         .font(.system(size: 10, weight: .bold, design: .rounded))
-                        .foregroundStyle(.black.opacity(0.85))
+                        .foregroundStyle(BrainColors.invertedText)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
-                        .background(.white.opacity(0.88))
+                        .background(BrainColors.invertedBg)
                         .clipShape(Capsule())
                 }
             }
@@ -1333,14 +1484,14 @@ private struct AskFastlaneCard: View {
                         }
 
                         Circle()
-                            .fill(isRecording ? .red.opacity(0.25) : .white.opacity(0.10))
+                            .fill(isRecording ? .red.opacity(0.25) : BrainColors.subtleFill)
 
                         Circle()
-                            .stroke(isRecording ? .red.opacity(0.5) : .white.opacity(0.16), lineWidth: 1)
+                            .stroke(isRecording ? .red.opacity(0.5) : BrainColors.subtleStroke, lineWidth: 1)
 
                         Image(systemName: isRecording ? "stop.fill" : "mic.fill")
                             .font(.system(size: isRecording ? 14 : 17, weight: .semibold))
-                            .foregroundStyle(isRecording ? .red : .white.opacity(0.92))
+                            .foregroundStyle(isRecording ? .red : BrainColors.textPrimary)
                     }
                     .frame(width: 46, height: 46)
                 }
@@ -1348,7 +1499,7 @@ private struct AskFastlaneCard: View {
 
                 TextField(isRecording ? "מקשיב\u{2026}" : "שאל את Brain כל דבר\u{2026}", text: $text)
                     .font(.system(size: 14, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.92))
+                    .foregroundStyle(BrainColors.textPrimary)
                     .submitLabel(.search)
                     .onSubmit(onSubmit)
                     .lineLimit(1)
@@ -1357,19 +1508,19 @@ private struct AskFastlaneCard: View {
                     .padding(.horizontal, 12)
                     .frame(height: 46)
                     .frame(maxWidth: .infinity)
-                    .background(.white.opacity(0.07))
+                    .background(BrainColors.subtleFill)
                     .overlay(
                         RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .stroke(isRecording ? .red.opacity(0.25) : .white.opacity(0.10), lineWidth: 1)
+                            .stroke(isRecording ? .red.opacity(0.25) : BrainColors.subtleStroke, lineWidth: 1)
                     )
                     .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
 
                 Button(action: onSubmit) {
                     Image(systemName: "arrow.up")
                         .font(.system(size: 15, weight: .bold))
-                        .foregroundStyle(.black)
+                        .foregroundStyle(BrainColors.invertedText)
                         .frame(width: 44, height: 44)
-                        .background(.white)
+                        .background(BrainColors.invertedBg)
                         .clipShape(Circle())
                 }
                 .buttonStyle(.plain)
@@ -1389,13 +1540,13 @@ private struct AskFastlaneCard: View {
                         } label: {
                             Text(suggestion)
                                 .font(.system(size: 12, weight: .semibold, design: .rounded))
-                                .foregroundStyle(.white.opacity(0.72))
+                                .foregroundStyle(BrainColors.textSecondary)
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 8)
-                                .background(.white.opacity(0.07))
+                                .background(BrainColors.subtleFill)
                                 .overlay(
                                     Capsule()
-                                        .stroke(.white.opacity(0.09), lineWidth: 1)
+                                        .stroke(BrainColors.cardStroke, lineWidth: 1)
                                 )
                                 .clipShape(Capsule())
                         }
@@ -1409,12 +1560,12 @@ private struct AskFastlaneCard: View {
                     HStack(spacing: 5) {
                         Image(systemName: "clock.arrow.circlepath")
                             .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.35))
+                            .foregroundStyle(BrainColors.textQuaternary)
 
                         Text("אחרונים")
                             .font(.system(size: 10, weight: .semibold, design: .rounded))
                             .tracking(1.2)
-                            .foregroundStyle(.white.opacity(0.35))
+                            .foregroundStyle(BrainColors.textQuaternary)
                     }
 
                     ScrollView(.horizontal, showsIndicators: false) {
@@ -1426,14 +1577,14 @@ private struct AskFastlaneCard: View {
                                 } label: {
                                     Text(question)
                                         .font(.system(size: 12, weight: .medium, design: .rounded))
-                                        .foregroundStyle(.white.opacity(0.52))
+                                        .foregroundStyle(BrainColors.textTertiary)
                                         .lineLimit(1)
                                         .padding(.horizontal, 12)
                                         .padding(.vertical, 7)
-                                        .background(.white.opacity(0.045))
+                                        .background(BrainColors.subtleFill)
                                         .overlay(
                                             Capsule()
-                                                .stroke(.white.opacity(0.06), lineWidth: 1)
+                                                .stroke(BrainColors.subtleStroke, lineWidth: 1)
                                         )
                                         .clipShape(Capsule())
                                 }
@@ -1447,10 +1598,10 @@ private struct AskFastlaneCard: View {
         .padding(15)
         .background(
             RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .fill(.white.opacity(0.055))
+                .fill(BrainColors.cardFill)
                 .overlay(
                     RoundedRectangle(cornerRadius: 26, style: .continuous)
-                        .stroke(.white.opacity(0.09), lineWidth: 1)
+                        .stroke(BrainColors.cardStroke, lineWidth: 1)
                 )
         )
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: isRecording)
@@ -1477,40 +1628,40 @@ private struct BrainThinkingCard: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 10) {
                 Circle()
-                    .fill(.white.opacity(pulse ? 0.30 : 0.10))
+                    .fill(BrainColors.textPrimary.opacity(pulse ? 0.30 : 0.10))
                     .frame(width: 10, height: 10)
 
                 Text("Brain חושב\u{2026}")
                     .font(.system(size: 15, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.72))
+                    .foregroundStyle(BrainColors.textSecondary)
             }
 
             VStack(alignment: .leading, spacing: 14) {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(.white.opacity(pulse ? 0.10 : 0.05))
+                    .fill(BrainColors.textPrimary.opacity(pulse ? 0.10 : 0.05))
                     .frame(height: 28)
                     .frame(maxWidth: .infinity, alignment: .leading)
 
                 HStack(spacing: 16) {
                     ForEach(0..<3, id: \.self) { _ in
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(.white.opacity(pulse ? 0.09 : 0.04))
+                            .fill(BrainColors.textPrimary.opacity(pulse ? 0.09 : 0.04))
                             .frame(height: 36)
                     }
                 }
 
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(.white.opacity(pulse ? 0.07 : 0.03))
+                    .fill(BrainColors.textPrimary.opacity(pulse ? 0.07 : 0.03))
                     .frame(height: 100)
             }
         }
         .padding(16)
         .background(
             RoundedRectangle(cornerRadius: 28, style: .continuous)
-                .fill(.white.opacity(0.055))
+                .fill(BrainColors.cardFill)
                 .overlay(
                     RoundedRectangle(cornerRadius: 28, style: .continuous)
-                        .stroke(.white.opacity(0.09), lineWidth: 1)
+                        .stroke(BrainColors.cardStroke, lineWidth: 1)
                 )
         )
         .onAppear {
@@ -1554,6 +1705,207 @@ private struct BrainHealthDot: View {
     }
 }
 
+// MARK: - Brain Suggestion Chips
+//
+// Starter prompts shown above the active card on first-time / empty state.
+// Tap to populate the input and submit. Each chip auto-hides once its
+// queryKey is pinned (so we don't suggest what's already on the dashboard)
+// or when the user explicitly dismisses it via the "×".
+
+private struct BrainSuggestionChip: Identifiable, Hashable {
+    let id: String          // matches the queryKey returned by the API
+    let label: String       // visible chip text (with emoji)
+    let question: String    // the question text that gets submitted
+}
+
+private struct BrainSuggestionsRow: View {
+    let chips: [BrainSuggestionChip]
+    let onTap: (BrainSuggestionChip) -> Void
+    let onDismiss: (BrainSuggestionChip) -> Void
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 8) {
+            HStack(spacing: 6) {
+                Spacer()
+                Text("נסה לשאול")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(BrainColors.textQuaternary)
+                    .padding(.trailing, 4)
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(chips) { chip in
+                        BrainSuggestionChipView(
+                            chip: chip,
+                            onTap: { onTap(chip) },
+                            onDismiss: { onDismiss(chip) }
+                        )
+                    }
+                }
+                .padding(.horizontal, 2)
+            }
+            .environment(\.layoutDirection, .rightToLeft)
+        }
+    }
+}
+
+private struct BrainSuggestionChipView: View {
+    let chip: BrainSuggestionChip
+    let onTap: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Button(action: onTap) {
+                Text(chip.label)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(BrainColors.textPrimary)
+                    .padding(.leading, 14)
+                    .padding(.vertical, 9)
+                    .padding(.trailing, 10)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(BrainColors.textQuaternary)
+                    .padding(.leading, 4)
+                    .padding(.trailing, 12)
+                    .padding(.vertical, 9)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 999, style: .continuous)
+                .fill(BrainColors.subtleFill)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 999, style: .continuous)
+                .stroke(BrainColors.cardStroke, lineWidth: 0.5)
+        )
+    }
+}
+
+
+// MARK: - Brain Card Breakdown
+//
+// Compact list of breakdown rows shown inline on the active card. Reveals up
+// to 5 rows; if more exist we tail with "+N נוספים" so the user knows the full
+// list lives in the report view.
+
+private struct BrainCardBreakdown: View {
+    let rows: [BrainBreakdownRow]
+    var tableLayout: Bool = false        // top-items => 4-column aligned table
+    private let visibleLimit = 5
+
+    private var visibleRows: ArraySlice<BrainBreakdownRow> {
+        rows.prefix(visibleLimit)
+    }
+    private var overflowCount: Int {
+        max(0, rows.count - visibleLimit)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Rectangle()
+                .fill(.white.opacity(0.07))
+                .frame(height: 1)
+                .padding(.bottom, 8)
+
+            if tableLayout {
+                // Column header strip
+                HStack(spacing: 8) {
+                    Text("פריט")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Text("כמות")
+                        .frame(width: 56, alignment: .trailing)
+                    Text("הכנסה")
+                        .frame(width: 76, alignment: .trailing)
+                    Text("חלק")
+                        .frame(width: 40, alignment: .trailing)
+                }
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .foregroundStyle(BrainColors.textQuaternary)
+                .padding(.bottom, 4)
+            }
+
+            ForEach(Array(visibleRows.enumerated()), id: \.offset) { _, row in
+                if tableLayout {
+                    let cells = parseTableRow(row.value)
+                    HStack(spacing: 8) {
+                        Text(row.title)
+                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            .foregroundStyle(BrainColors.textPrimary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                        Text(cells.qty)
+                            .frame(width: 56, alignment: .trailing)
+                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundStyle(BrainColors.textSecondary)
+
+                        Text(cells.revenue)
+                            .frame(width: 76, alignment: .trailing)
+                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundStyle(BrainColors.textPrimary)
+
+                        Text(cells.share)
+                            .frame(width: 40, alignment: .trailing)
+                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundStyle(BrainColors.textTertiary)
+                    }
+                    .padding(.vertical, 4)
+                } else {
+                    HStack(spacing: 10) {
+                        Text(row.title)
+                            .font(.system(size: 13, weight: .medium, design: .rounded))
+                            .foregroundStyle(BrainColors.textSecondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+
+                        Spacer(minLength: 8)
+
+                        Text(row.value)
+                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundStyle(BrainColors.textPrimary)
+                            .lineLimit(1)
+                    }
+                    .padding(.vertical, 5)
+                }
+            }
+
+            if overflowCount > 0 {
+                HStack {
+                    Text("+\(overflowCount) נוספים")
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .foregroundStyle(BrainColors.textTertiary)
+                    Spacer()
+                }
+                .padding(.top, 4)
+            }
+        }
+    }
+
+    /// Splits "215 יח׳ · ₪3,239 · 22%" into the three columns. Falls back
+    /// gracefully if separators aren\'t present.
+    private func parseTableRow(_ value: String) -> (qty: String, revenue: String, share: String) {
+        let parts = value.components(separatedBy: " · ")
+        if parts.count == 3 {
+            return (qty: parts[0], revenue: parts[1], share: parts[2])
+        }
+        return (qty: value, revenue: "", share: "")
+    }
+}
+
 // MARK: - Brain Error Card
 
 private struct BrainErrorCard: View {
@@ -1563,11 +1915,11 @@ private struct BrainErrorCard: View {
         VStack(spacing: 14) {
             Image(systemName: "sparkles")
                 .font(.system(size: 28, weight: .light))
-                .foregroundStyle(.white.opacity(0.35))
+                .foregroundStyle(BrainColors.textQuaternary)
 
             Text("Brain לא הצליח להשלים את השאילתה.")
                 .font(.system(size: 14, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.62))
+                .foregroundStyle(BrainColors.textTertiary)
                 .multilineTextAlignment(.center)
 
             Button(action: onRetry) {
@@ -1578,13 +1930,13 @@ private struct BrainErrorCard: View {
                     Text("נסה שוב")
                         .font(.system(size: 13, weight: .semibold, design: .rounded))
                 }
-                .foregroundStyle(.white.opacity(0.88))
+                .foregroundStyle(BrainColors.textPrimary)
                 .padding(.horizontal, 18)
                 .frame(height: 38)
-                .background(.white.opacity(0.10))
+                .background(BrainColors.subtleFill)
                 .overlay(
                     Capsule()
-                        .stroke(.white.opacity(0.12), lineWidth: 1)
+                        .stroke(BrainColors.cardStroke, lineWidth: 1)
                 )
                 .clipShape(Capsule())
             }
@@ -1595,10 +1947,10 @@ private struct BrainErrorCard: View {
         .padding(.horizontal, 16)
         .background(
             RoundedRectangle(cornerRadius: 28, style: .continuous)
-                .fill(.white.opacity(0.045))
+                .fill(BrainColors.cardFill)
                 .overlay(
                     RoundedRectangle(cornerRadius: 28, style: .continuous)
-                        .stroke(.white.opacity(0.08), lineWidth: 1)
+                        .stroke(BrainColors.cardStroke, lineWidth: 1)
                 )
         )
     }
@@ -1613,112 +1965,129 @@ private struct BrainMetricGraphCard: View {
     let onPinToggle: () -> Void
     let onOpenReport: () -> Void
 
+    // Card stays minimal (header + primary + metrics). Tap anywhere on the body
+    // pushes to BrainReportView (the D/W/M tab view with breakdown rows).
+    // Pin button + small debug button sit in the header — they have their own
+    // Button hit areas and don't trigger the navigation tap.
     @State private var showDebugSheet = false
 
-    private var metadataLine: String? {
-        guard let r = response else { return nil }
-        var parts: [String] = []
-        if let rows = r.rowCount { parts.append("\(rows) rows") }
-        if let ms = r.executionMs { parts.append("\(ms)ms") }
-        return parts.isEmpty ? nil : parts.joined(separator: " \u{00B7} ")
+    private var isTopItemsReport: Bool {
+        card.queryKey.hasPrefix("top_items")
+    }
+
+    /// Top-items cards show "פריטים · <period>" instead of "פריט מוביל · <period>".
+    /// We extract the period from the server-provided title rather than hardcode it,
+    /// so any future range labels (week / month / specific weekday / Hebrew month
+    /// names) flow through automatically.
+    private var displayTitle: String {
+        if isTopItemsReport,
+           let separator = card.title.range(of: " · ") {
+            let period = card.title[separator.upperBound...]
+            return "פריטים · \(period)"
+        }
+        return card.title
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 14) {
 
             HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(card.title)
-                        .font(.system(size: 16, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.92))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(displayTitle)
+                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        .foregroundStyle(BrainColors.textPrimary)
 
-                    Text(card.subtitle)
-                        .font(.system(size: 12, weight: .medium, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.50))
+                    if !isTopItemsReport {
+                        Text(card.subtitle)
+                            .font(.system(size: 11, weight: .medium, design: .rounded))
+                            .foregroundStyle(BrainColors.textTertiary)
+                            .lineLimit(1)
+                    }
                 }
 
                 Spacer()
 
+                if let sql = response?.sql, !sql.isEmpty {
+                    Button { showDebugSheet = true } label: {
+                        Image(systemName: "ladybug")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(BrainColors.textTertiary)
+                            .frame(width: 30, height: 30)
+                            .background(BrainColors.subtleFill)
+                            .clipShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                }
+
                 Button(action: onPinToggle) {
                     Image(systemName: card.isPinned ? "pin.fill" : "pin")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(card.isPinned ? .black : .white.opacity(0.80))
-                        .frame(width: 38, height: 38)
-                        .background(card.isPinned ? Color.white.opacity(0.92) : Color.white.opacity(0.08))
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(card.isPinned ? BrainColors.invertedText : BrainColors.textSecondary)
+                        .frame(width: 34, height: 34)
+                        .background(card.isPinned ? BrainColors.invertedBg : BrainColors.subtleFill)
                         .clipShape(Circle())
                 }
                 .buttonStyle(.plain)
             }
 
-            VStack(alignment: .leading, spacing: 16) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
+            // Hide the giant primary value when this is a top-items card —
+            // row #1 of the table below already shows the leader.
+            if !isTopItemsReport {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(card.primaryValue)
-                        .font(.system(size: 48, weight: .regular, design: .rounded))
+                        .font(.system(size: 30, weight: .regular, design: .rounded))
                         .monospacedDigit()
-                        .foregroundStyle(.white)
+                        .foregroundStyle(BrainColors.textPrimary)
 
                     Text(card.primaryLabel)
-                        .font(.system(size: 15, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.62))
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundStyle(BrainColors.textTertiary)
                 }
+            }
 
-                HStack(spacing: 16) {
+            if !isTopItemsReport {
+                HStack(spacing: 14) {
                     ForEach(card.metrics) { metric in
                         ResultMiniMetric(title: metric.title, value: metric.value)
                     }
                 }
-
-                MockLineGraph(values: card.graphValues.map { CGFloat($0) })
-                    .frame(height: 132)
-                    .padding(.top, 2)
-            }
-            .contentShape(Rectangle())
-            .onTapGesture {
-                onOpenReport()
             }
 
-            HStack(spacing: 10) {
-                ButtonChip(
-                    title: card.isPinned ? "מוצמד" : "הצמד",
-                    icon: card.isPinned ? "pin.fill" : "pin",
-                    action: onPinToggle
+            // Inline breakdown — only when the API returned 2+ breakdown rows
+            // (aggregate product query, top items, hourly distribution, etc.).
+            // Single-product cards have empty breakdownRows so this is hidden.
+            if let firstPeriod = card.periods.first,
+               firstPeriod.breakdownRows.count >= 2 {
+                BrainCardBreakdown(
+                    rows: firstPeriod.breakdownRows,
+                    tableLayout: isTopItemsReport
                 )
-
-                ButtonChip(
-                    title: "פתח דוח",
-                    icon: "chart.line.uptrend.xyaxis",
-                    action: onOpenReport
-                )
-
-                ButtonChip(
-                    title: "השווה",
-                    icon: "arrow.left.arrow.right",
-                    action: {}
-                )
-
-                if let sql = response?.sql, !sql.isEmpty {
-                    ButtonChip(
-                        title: "דיבאג",
-                        icon: "ladybug",
-                        action: { showDebugSheet = true }
-                    )
-                }
+                .padding(.top, 4)
             }
 
-            if let meta = metadataLine {
-                Text(meta)
-                    .font(.system(size: 11, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.35))
-                    .frame(maxWidth: .infinity, alignment: .trailing)
+            HStack(spacing: 6) {
+                Spacer()
+                Text("פתח דוח מלא")
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundStyle(BrainColors.textQuaternary)
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(BrainColors.textQuaternary)
             }
+            .padding(.top, 2)
         }
-        .padding(16)
+        .padding(15)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            onOpenReport()
+        }
         .background(
-            RoundedRectangle(cornerRadius: 28, style: .continuous)
-                .fill(.white.opacity(0.065))
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(BrainColors.cardFill)
                 .overlay(
-                    RoundedRectangle(cornerRadius: 28, style: .continuous)
-                        .stroke(card.isPinned ? .white.opacity(0.22) : .white.opacity(0.10), lineWidth: 1)
+                    RoundedRectangle(cornerRadius: 24, style: .continuous)
+                        .stroke(BrainColors.cardStroke, lineWidth: 1)
                 )
         )
         .sheet(isPresented: $showDebugSheet) {
@@ -1737,22 +2106,22 @@ private struct BrainDebugSheet: View {
 
     var body: some View {
         ZStack {
-            Color.black.opacity(0.96).ignoresSafeArea()
+            BrainColors.pageBg.ignoresSafeArea()
 
             VStack(alignment: .leading, spacing: 20) {
                 HStack {
                     Text("דיבאג Brain")
                         .font(.system(size: 18, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.88))
+                        .foregroundStyle(BrainColors.textPrimary)
 
                     Spacer()
 
                     Button { dismiss() } label: {
                         Image(systemName: "xmark")
                             .font(.system(size: 13, weight: .bold))
-                            .foregroundStyle(.white.opacity(0.70))
+                            .foregroundStyle(BrainColors.textSecondary)
                             .frame(width: 32, height: 32)
-                            .background(.white.opacity(0.08))
+                            .background(BrainColors.subtleFill)
                             .clipShape(Circle())
                     }
                     .buttonStyle(.plain)
@@ -1763,12 +2132,12 @@ private struct BrainDebugSheet: View {
                         Text("SQL")
                             .font(.system(size: 11, weight: .semibold, design: .rounded))
                             .tracking(1.2)
-                            .foregroundStyle(.white.opacity(0.40))
+                            .foregroundStyle(BrainColors.textQuaternary)
 
                         ScrollView(.vertical, showsIndicators: true) {
                             Text(sql)
                                 .font(.system(size: 13, weight: .regular, design: .monospaced))
-                                .foregroundStyle(.white.opacity(0.78))
+                                .foregroundStyle(BrainColors.textSecondary)
                                 .textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
@@ -1776,10 +2145,10 @@ private struct BrainDebugSheet: View {
                         .padding(12)
                         .background(
                             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .fill(.white.opacity(0.04))
+                                .fill(BrainColors.cardFill)
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                        .stroke(.white.opacity(0.08), lineWidth: 1)
+                                        .stroke(BrainColors.cardStroke, lineWidth: 1)
                                 )
                         )
                     }
@@ -1791,11 +2160,11 @@ private struct BrainDebugSheet: View {
                             Text("שורות")
                                 .font(.system(size: 10, weight: .semibold, design: .rounded))
                                 .tracking(1.0)
-                                .foregroundStyle(.white.opacity(0.40))
+                                .foregroundStyle(BrainColors.textQuaternary)
 
                             Text("\(rows)")
                                 .font(.system(size: 22, weight: .regular, design: .monospaced))
-                                .foregroundStyle(.white.opacity(0.88))
+                                .foregroundStyle(BrainColors.textPrimary)
                         }
                     }
 
@@ -1804,11 +2173,11 @@ private struct BrainDebugSheet: View {
                             Text("זמן ריצה")
                                 .font(.system(size: 10, weight: .semibold, design: .rounded))
                                 .tracking(1.0)
-                                .foregroundStyle(.white.opacity(0.40))
+                                .foregroundStyle(BrainColors.textQuaternary)
 
                             Text("\(ms)ms")
                                 .font(.system(size: 22, weight: .regular, design: .monospaced))
-                                .foregroundStyle(.white.opacity(0.88))
+                                .foregroundStyle(BrainColors.textPrimary)
                         }
                     }
                 }
@@ -1823,86 +2192,81 @@ private struct BrainDebugSheet: View {
 }
 
 // MARK: - Brain Report View (generic)
+//
+// Mockup-first design: D / W / M / Y type picker + period navigator (← label →)
+// + calendar icon for custom range. Mock data is generated on the fly for any
+// period that's not the card's real current "D" data. When we wire to the API
+// in Phase 2, only the data source changes — the UI stays the same.
+
+private enum BrainPeriodType: String, CaseIterable, Identifiable {
+    case D, W, M, Y
+    var id: String { rawValue }
+
+    var hebrewShort: String {
+        switch self {
+        case .D: return "יום"
+        case .W: return "שבוע"
+        case .M: return "חודש"
+        case .Y: return "שנה"
+        }
+    }
+}
 
 private struct BrainReportView: View {
     let card: BrainCard
 
     @Environment(\.dismiss) private var dismiss
-    @State private var selectedPeriodId: String = ""
+    @State private var periodType: BrainPeriodType = .D
+    @State private var periodOffset: Int = 0  // 0 = current, -1 = previous, etc.
+    @State private var showCustomRange = false
+    @State private var breakdownExpanded = false   // top-10 by default; "הצג עוד" reveals all
 
-    private var currentPeriod: BrainReportPeriod? {
-        card.periods.first { $0.id == selectedPeriodId }
+    private var isTopItemsReport: Bool {
+        let result = card.queryKey.hasPrefix("top_items")
+        // Debug: confirm what queryKey + isTopItemsReport actually evaluate to
+        // when the report view opens. Remove this print once verified.
+        print("🧠 BrainReport ▶︎ queryKey='\(card.queryKey)' isTopItemsReport=\(result)")
+        return result
+    }
+    @State private var customStart: Date? = nil
+    @State private var customEnd: Date? = nil
+    @State private var isCustomActive = false
+
+    private var displayPeriod: BrainReportPeriod {
+        BrainPeriodMockGenerator.generate(card: card, type: periodType, offset: periodOffset)
+    }
+
+    private var periodLabel: String {
+        if isCustomActive, let s = customStart, let e = customEnd {
+            let f = DateFormatter()
+            f.locale = Locale(identifier: "he")
+            f.dateFormat = "d MMM"
+            return "\(f.string(from: s)) – \(f.string(from: e))"
+        }
+        return BrainPeriodLabels.label(type: periodType, offset: periodOffset)
     }
 
     var body: some View {
         ZStack {
-            LinearGradient(
-                colors: [
-                    Color.black.opacity(0.99),
-                    Color.black.opacity(0.92),
-                    Color.black.opacity(0.86)
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .ignoresSafeArea()
+            BrainColors.pageBg
+                .ignoresSafeArea()
+
+            // Invisible UIKit bridge — re-enables interactivePopGestureRecognizer
+            // so edge-swipe-back works even with the toolbar hidden.
+            EnableSwipeBack()
+                .frame(width: 0, height: 0)
 
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(spacing: 18) {
                     topBar
-
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(card.reportTitle.isEmpty ? card.title : card.reportTitle)
-                            .font(.system(size: 34, weight: .regular, design: .rounded))
-                            .foregroundStyle(.white)
-
-                        Text(card.reportSubtitle)
-                            .font(.system(size: 14, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.55))
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
-                    if card.periods.isEmpty {
-                        emptyState
-                    } else {
-                        segmentPicker
-
-                        if let period = currentPeriod {
-                            VStack(alignment: .leading, spacing: 14) {
-                                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                    Text(period.primaryValue)
-                                        .font(.system(size: 54, weight: .regular, design: .rounded))
-                                        .monospacedDigit()
-                                        .foregroundStyle(.white)
-
-                                    Text(period.primaryLabel)
-                                        .font(.system(size: 15, weight: .semibold, design: .rounded))
-                                        .foregroundStyle(.white.opacity(0.62))
-                                }
-
-                                HStack(spacing: 16) {
-                                    ForEach(period.metrics) { metric in
-                                        ResultMiniMetric(title: metric.title, value: metric.value)
-                                    }
-                                }
-
-                                MockLineGraph(values: period.graphValues.map { CGFloat($0) })
-                                    .frame(height: 190)
-                                    .padding(.top, 8)
-                            }
-                            .padding(16)
-                            .background(
-                                RoundedRectangle(cornerRadius: 28, style: .continuous)
-                                    .fill(.white.opacity(0.06))
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 28, style: .continuous)
-                                            .stroke(.white.opacity(0.10), lineWidth: 1)
-                                    )
-                            )
-
-                            if !period.breakdownRows.isEmpty {
-                                reportBreakdown(rows: period.breakdownRows)
-                            }
+                    periodTypePicker
+                    periodNavigator
+                    periodCard(period: displayPeriod)
+                    if !displayPeriod.breakdownRows.isEmpty {
+                        if isTopItemsReport {
+                            topItemsBreakdown(rows: displayPeriod.breakdownRows)
+                        } else {
+                            reportBreakdown(rows: displayPeriod.breakdownRows)
                         }
                     }
                 }
@@ -1911,35 +2275,27 @@ private struct BrainReportView: View {
                 .padding(.bottom, 28)
             }
         }
-        .onAppear {
-            if selectedPeriodId.isEmpty {
-                selectedPeriodId = card.periods.first(where: { $0.id == "M" })?.id
-                    ?? card.periods.first?.id
-                    ?? ""
+        .sheet(isPresented: $showCustomRange) {
+            DateRangePickerSheet(
+                initialStart: customStart,
+                initialEnd: customEnd
+            ) { start, end in
+                customStart = start
+                customEnd = end
+                isCustomActive = true
             }
+            .environment(\.layoutDirection, .rightToLeft)
         }
     }
 
-    private var emptyState: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "chart.bar.xaxis")
-                .font(.system(size: 38, weight: .light))
-                .foregroundStyle(.white.opacity(0.30))
-
-            Text("אין נתוני דוח עדיין")
-                .font(.system(size: 16, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.50))
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 60)
-    }
+    // MARK: Subviews
 
     private var topBar: some View {
         HStack {
             Button { dismiss() } label: {
-                Image(systemName: "chevron.left")
+                Image(systemName: "chevron.right")
                     .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.9))
+                    .foregroundStyle(BrainColors.textPrimary)
                     .frame(width: 44, height: 44)
                     .background(.ultraThinMaterial)
                     .clipShape(Circle())
@@ -1948,64 +2304,861 @@ private struct BrainReportView: View {
 
             Spacer()
 
-            Text("דוח")
+            Text(card.reportTitle.isEmpty ? card.title : card.reportTitle)
                 .font(.system(size: 17, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.82))
+                .foregroundStyle(BrainColors.textPrimary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
 
             Spacer()
 
             Image(systemName: "ellipsis")
                 .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.55))
+                .foregroundStyle(BrainColors.textTertiary)
                 .frame(width: 44, height: 44)
         }
     }
 
-    private var segmentPicker: some View {
-        HStack(spacing: 8) {
-            ForEach(card.periods) { period in
+    private var periodTypePicker: some View {
+        HStack(spacing: 6) {
+            ForEach(BrainPeriodType.allCases) { type in
                 Button {
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
                     withAnimation(.spring(response: 0.35, dampingFraction: 0.86)) {
-                        selectedPeriodId = period.id
+                        periodType = type
+                        periodOffset = 0
+                        isCustomActive = false
                     }
                 } label: {
-                    Text(period.label)
+                    let isActive = !isCustomActive && periodType == type
+                    Text(type.hebrewShort)
                         .font(.system(size: 13, weight: .semibold, design: .rounded))
-                        .foregroundStyle(selectedPeriodId == period.id ? .black : .white.opacity(0.75))
+                        .foregroundStyle(isActive ? BrainColors.invertedText : BrainColors.textSecondary)
                         .frame(maxWidth: .infinity)
-                        .frame(height: 38)
-                        .background(selectedPeriodId == period.id ? .white.opacity(0.92) : .white.opacity(0.07))
+                        .frame(height: 36)
+                        .background(isActive ? BrainColors.invertedBg : BrainColors.subtleFill)
                         .overlay(
-                            RoundedRectangle(cornerRadius: 13, style: .continuous)
-                                .stroke(.white.opacity(0.10), lineWidth: 1)
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .stroke(BrainColors.cardStroke, lineWidth: 1)
                         )
-                        .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 }
                 .buttonStyle(.plain)
             }
+
+            Button {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                showCustomRange = true
+            } label: {
+                Image(systemName: "calendar")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(isCustomActive ? BrainColors.invertedText : BrainColors.textSecondary)
+                    .frame(width: 44, height: 36)
+                    .background(isCustomActive ? BrainColors.invertedBg : BrainColors.subtleFill)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(BrainColors.cardStroke, lineWidth: 1)
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+            .buttonStyle(.plain)
         }
     }
 
-    private func reportBreakdown(rows: [BrainBreakdownRow]) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("פירוט")
-                .font(.system(size: 16, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.9))
+    private var periodNavigator: some View {
+        HStack(spacing: 12) {
+            // → back in time (older). In Hebrew RTL, the "back" arrow visually
+            // points right; in our LTR Image space we use chevron.right to feel natural.
+            Button {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.86)) {
+                    periodOffset -= 1
+                }
+            } label: {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(BrainColors.textSecondary)
+                    .frame(width: 36, height: 36)
+                    .background(BrainColors.subtleFill)
+                    .clipShape(Circle())
+            }
+            .buttonStyle(.plain)
 
-            ForEach(rows) { row in
+            Spacer()
+
+            Text(periodLabel)
+                .font(.system(size: 14, weight: .semibold, design: .rounded))
+                .foregroundStyle(BrainColors.textPrimary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
+
+            Spacer()
+
+            // ← forward in time (newer, capped at offset 0)
+            Button {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.86)) {
+                    periodOffset = min(periodOffset + 1, 0)
+                }
+            } label: {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(periodOffset < 0 ? BrainColors.textSecondary : BrainColors.textQuaternary)
+                    .frame(width: 36, height: 36)
+                    .background(BrainColors.subtleFill)
+                    .clipShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .disabled(periodOffset >= 0)
+            .opacity(periodOffset >= 0 ? 0.45 : 1)
+        }
+    }
+
+    private func periodCard(period: BrainReportPeriod) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            // Top-items reports don't need the giant headline — row #1 of the
+            // table below already shows the leader. Hide it for that intent.
+            if !isTopItemsReport {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(period.primaryValue)
+                        .font(.system(size: 54, weight: .regular, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(BrainColors.textPrimary)
+
+                    Text(period.primaryLabel)
+                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        .foregroundStyle(BrainColors.textTertiary)
+                }
+            }
+
+            HStack(spacing: 16) {
+                ForEach(period.metrics) { metric in
+                    ResultMiniMetric(title: metric.title, value: metric.value)
+                }
+            }
+
+            MockLineGraph(values: period.graphValues.map { CGFloat($0) })
+                .frame(height: 190)
+                .padding(.top, 8)
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .fill(BrainColors.cardFill)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 28, style: .continuous)
+                        .stroke(BrainColors.cardStroke, lineWidth: 1)
+                )
+        )
+        // Swipe to navigate periods. RIGHT = back in time, LEFT = forward (capped).
+        .gesture(
+            DragGesture(minimumDistance: 24)
+                .onEnded { gesture in
+                    let threshold: CGFloat = 50
+                    if gesture.translation.width > threshold {
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.86)) {
+                            periodOffset -= 1
+                        }
+                    } else if gesture.translation.width < -threshold {
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.86)) {
+                            periodOffset = min(periodOffset + 1, 0)
+                        }
+                    }
+                }
+        )
+    }
+
+    private func reportBreakdown(rows: [BrainBreakdownRow]) -> some View {
+        // Top 10 visible by default; "הצג עוד" reveals all (server returns up to 30).
+        let visibleLimit = 10
+        let showAll = breakdownExpanded || rows.count <= visibleLimit
+        let visible = showAll ? Array(rows) : Array(rows.prefix(visibleLimit))
+        let overflow = max(0, rows.count - visibleLimit)
+
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("פירוט")
+                    .font(.system(size: 16, weight: .semibold, design: .rounded))
+                    .foregroundStyle(BrainColors.textPrimary)
+
+                Spacer()
+
+                Text("\(rows.count) פריטים")
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(BrainColors.textTertiary)
+            }
+
+            ForEach(visible) { row in
                 ReportRow(title: row.title, value: row.value)
+            }
+
+            if !showAll && overflow > 0 {
+                Button {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    withAnimation(.spring(response: 0.4, dampingFraction: 0.86)) {
+                        breakdownExpanded = true
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Spacer()
+                        Text("הצג עוד \(overflow) נוספים")
+                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            .foregroundStyle(BrainColors.textSecondary)
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(BrainColors.textSecondary)
+                        Spacer()
+                    }
+                    .padding(.vertical, 8)
+                    .background(BrainColors.subtleFill)
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 4)
+            } else if showAll && rows.count > visibleLimit {
+                Button {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    withAnimation(.spring(response: 0.4, dampingFraction: 0.86)) {
+                        breakdownExpanded = false
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Spacer()
+                        Text("הצג פחות")
+                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            .foregroundStyle(BrainColors.textTertiary)
+                        Image(systemName: "chevron.up")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(BrainColors.textTertiary)
+                        Spacer()
+                    }
+                    .padding(.vertical, 8)
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 4)
             }
         }
         .padding(16)
         .background(
             RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .fill(.white.opacity(0.045))
+                .fill(BrainColors.cardFill)
                 .overlay(
                     RoundedRectangle(cornerRadius: 26, style: .continuous)
-                        .stroke(.white.opacity(0.08), lineWidth: 1)
+                        .stroke(BrainColors.cardStroke, lineWidth: 1)
                 )
         )
+    }
+
+    // ---- Top-items table layout ----
+    //
+    // The server packs three values into BrainBreakdownRow.value with " · " as
+    // a separator: "<qty> יח׳ · ₪<revenue> · <share>%". We split that here and
+    // render each cell into its own right-aligned column so values line up
+    // visually when the eye scans down the list.
+
+    private func topItemsBreakdown(rows: [BrainBreakdownRow]) -> some View {
+        let visibleLimit = 10
+        let showAll = breakdownExpanded || rows.count <= visibleLimit
+        let visible = showAll ? Array(rows) : Array(rows.prefix(visibleLimit))
+        let overflow = max(0, rows.count - visibleLimit)
+
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("פריטים מובילים")
+                    .font(.system(size: 16, weight: .semibold, design: .rounded))
+                    .foregroundStyle(BrainColors.textPrimary)
+                Spacer()
+                Text("\(rows.count) פריטים")
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(BrainColors.textTertiary)
+            }
+
+            // Column headers
+            HStack(spacing: 8) {
+                Text("פריט")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text("כמות")
+                    .frame(width: 64, alignment: .trailing)
+                Text("הכנסה")
+                    .frame(width: 84, alignment: .trailing)
+                Text("חלק")
+                    .frame(width: 48, alignment: .trailing)
+            }
+            .font(.system(size: 11, weight: .semibold, design: .rounded))
+            .foregroundStyle(BrainColors.textTertiary)
+            .padding(.top, 2)
+
+            // Subtle divider
+            Rectangle()
+                .fill(.white.opacity(0.07))
+                .frame(height: 1)
+
+            // Data rows
+            ForEach(Array(visible.enumerated()), id: \.offset) { _, row in
+                let cells = parseTopItemsRow(row.value)
+                HStack(spacing: 8) {
+                    Text(row.title)
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundStyle(BrainColors.textPrimary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                    Text(cells.qty)
+                        .frame(width: 64, alignment: .trailing)
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(BrainColors.textSecondary)
+
+                    Text(cells.revenue)
+                        .frame(width: 84, alignment: .trailing)
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(BrainColors.textPrimary)
+
+                    Text(cells.share)
+                        .frame(width: 48, alignment: .trailing)
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(BrainColors.textTertiary)
+                }
+                .padding(.vertical, 4)
+            }
+
+            if !showAll && overflow > 0 {
+                Button {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    withAnimation(.spring(response: 0.4, dampingFraction: 0.86)) {
+                        breakdownExpanded = true
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Spacer()
+                        Text("הצג עוד \(overflow) נוספים")
+                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            .foregroundStyle(BrainColors.textSecondary)
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(BrainColors.textSecondary)
+                        Spacer()
+                    }
+                    .padding(.vertical, 8)
+                    .background(BrainColors.subtleFill)
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 4)
+            } else if showAll && rows.count > visibleLimit {
+                Button {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    withAnimation(.spring(response: 0.4, dampingFraction: 0.86)) {
+                        breakdownExpanded = false
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Spacer()
+                        Text("הצג פחות")
+                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            .foregroundStyle(BrainColors.textTertiary)
+                        Image(systemName: "chevron.up")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(BrainColors.textTertiary)
+                        Spacer()
+                    }
+                    .padding(.vertical, 8)
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 4)
+            }
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
+                .fill(BrainColors.cardFill)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 26, style: .continuous)
+                        .stroke(BrainColors.cardStroke, lineWidth: 1)
+                )
+        )
+    }
+
+    /// Splits "215 יח׳ · ₪3,239 · 22%" into the three columns. Falls back to
+    /// the whole string in the qty column if the separator isn't present.
+    private func parseTopItemsRow(_ value: String) -> (qty: String, revenue: String, share: String) {
+        let parts = value.components(separatedBy: " · ")
+        if parts.count == 3 {
+            return (qty: parts[0], revenue: parts[1], share: parts[2])
+        }
+        return (qty: value, revenue: "", share: "")
+    }
+}
+
+// MARK: - Period mock data + labels
+
+private enum BrainPeriodMockGenerator {
+    /// Build a period for the requested type/offset based on the card's headline data.
+    /// For (.D, offset 0) we re-use the card's real "D" period from the API if present.
+    static func generate(card: BrainCard, type: BrainPeriodType, offset: Int) -> BrainReportPeriod {
+        if type == .D, offset == 0,
+           let real = card.periods.first(where: { $0.id == "D" }) {
+            return real
+        }
+
+        let baseValue = parsePrimaryNumber(card.primaryValue)
+        let scale = scaleFactor(type: type, offset: offset)
+        let mockValue = max(Int(Double(baseValue) * scale), 0)
+
+        return BrainReportPeriod(
+            id: type.rawValue,
+            label: type.hebrewShort,
+            primaryValue: formatLikeOriginal(mockValue, original: card.primaryValue),
+            primaryLabel: card.primaryLabel,
+            metrics: scaleMetrics(card.metrics, scale: scale),
+            graphValues: generateGraph(type: type, peak: max(Double(mockValue), 1)),
+            breakdownRows: generateBreakdown(type: type)
+        )
+    }
+
+    // ---- helpers ----
+
+    private static func scaleFactor(type: BrainPeriodType, offset: Int) -> Double {
+        let typeMultiplier: Double = {
+            switch type {
+            case .D: return 1.0
+            case .W: return 6.4
+            case .M: return 27.3
+            case .Y: return 312.0
+            }
+        }()
+        let drift = pow(0.93, Double(abs(offset)))   // older periods slightly less
+        return typeMultiplier * drift
+    }
+
+    private static func parsePrimaryNumber(_ s: String) -> Int {
+        let digits = s.compactMap { $0.isNumber ? $0 : nil }
+        return Int(String(digits)) ?? 0
+    }
+
+    private static func formatLikeOriginal(_ value: Int, original: String) -> String {
+        if original.contains("₪") {
+            return "₪" + value.formatted(.number)
+        }
+        // For things like "13:00" (peak hour) we don't scale — keep as-is.
+        if original.contains(":") {
+            return original
+        }
+        return value.formatted(.number)
+    }
+
+    private static func scaleMetrics(_ metrics: [BrainMetric], scale: Double) -> [BrainMetric] {
+        metrics.map { metric in
+            let digits = metric.value.compactMap { $0.isNumber ? $0 : nil }
+            guard let n = Int(String(digits)) else { return metric }
+            let scaled = max(Int(Double(n) * scale), 0)
+
+            if metric.value.contains("₪") {
+                return BrainMetric(title: metric.title, value: "₪" + scaled.formatted(.number))
+            }
+            if metric.value.contains(":") {
+                return metric
+            }
+            return BrainMetric(title: metric.title, value: scaled.formatted(.number))
+        }
+    }
+
+    private static func generateGraph(type: BrainPeriodType, peak: Double) -> [Double] {
+        let count: Int = {
+            switch type {
+            case .D: return 24
+            case .W: return 7
+            case .M: return 30
+            case .Y: return 12
+            }
+        }()
+
+        let center = Double(count) / 2.0
+        return (0..<count).map { i in
+            let dx = (Double(i) - center) / center
+            let bell = max(1.0 - dx * dx, 0.0)
+            let noise = Double.random(in: 0.75...1.15)
+            return peak * bell * noise / Double(count) * 4.0
+        }
+    }
+
+    private static func generateBreakdown(type: BrainPeriodType) -> [BrainBreakdownRow] {
+        switch type {
+        case .D:
+            return [
+                BrainBreakdownRow(title: "שעה הכי טובה", value: "13:00"),
+                BrainBreakdownRow(title: "פריט מוביל", value: "הפוך"),
+                BrainBreakdownRow(title: "קופאי מוביל", value: "דנה")
+            ]
+        case .W:
+            return [
+                BrainBreakdownRow(title: "יום הכי טוב", value: "שישי"),
+                BrainBreakdownRow(title: "שעה הכי טובה", value: "13:00"),
+                BrainBreakdownRow(title: "פריט מוביל", value: "הפוך")
+            ]
+        case .M:
+            return [
+                BrainBreakdownRow(title: "שבוע הכי טוב", value: "שבוע 3"),
+                BrainBreakdownRow(title: "יום הכי טוב", value: "שישי 21"),
+                BrainBreakdownRow(title: "פריט מוביל", value: "הפוך")
+            ]
+        case .Y:
+            return [
+                BrainBreakdownRow(title: "חודש הכי טוב", value: "אוגוסט"),
+                BrainBreakdownRow(title: "רבעון הכי טוב", value: "Q3"),
+                BrainBreakdownRow(title: "פריט מוביל", value: "הפוך")
+            ]
+        }
+    }
+}
+
+private enum BrainPeriodLabels {
+    static func label(type: BrainPeriodType, offset: Int) -> String {
+        let calendar = Calendar(identifier: .gregorian)
+        let now = Date()
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "he_IL")
+
+        switch type {
+        case .D:
+            switch offset {
+            case 0: return "היום"
+            case -1: return "אתמול"
+            case -2: return "שלשום"
+            default:
+                let date = calendar.date(byAdding: .day, value: offset, to: now) ?? now
+                formatter.dateFormat = "EEEE, d MMMM"
+                return formatter.string(from: date)
+            }
+        case .W:
+            switch offset {
+            case 0: return "השבוע"
+            case -1: return "שבוע שעבר"
+            default: return "לפני \(-offset) שבועות"
+            }
+        case .M:
+            let date = calendar.date(byAdding: .month, value: offset, to: now) ?? now
+            formatter.dateFormat = "MMMM yyyy"
+            return formatter.string(from: date)
+        case .Y:
+            let date = calendar.date(byAdding: .year, value: offset, to: now) ?? now
+            formatter.dateFormat = "yyyy"
+            return formatter.string(from: date)
+        }
+    }
+}
+
+// MARK: - Date Range Picker Sheet (Airbnb-style)
+
+private struct DateRangePickerSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let initialStart: Date?
+    let initialEnd: Date?
+    let onApply: (Date, Date) -> Void
+
+    @State private var startDate: Date? = nil
+    @State private var endDate: Date? = nil
+    @State private var displayedMonth: Date = Date()
+
+    private let calendar: Calendar = {
+        var c = Calendar(identifier: .gregorian)
+        c.locale = Locale(identifier: "he")
+        c.timeZone = TimeZone(identifier: "Asia/Jerusalem") ?? .current
+        return c
+    }()
+
+    private let headerFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "he")
+        f.dateFormat = "MMMM yyyy"
+        return f
+    }()
+
+    private let chipFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "he")
+        f.dateFormat = "d MMM"
+        return f
+    }()
+
+    private var canApply: Bool {
+        startDate != nil && endDate != nil
+    }
+
+    var body: some View {
+        ZStack {
+            BrainColors.pageBg.ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                header
+                selectedChips
+                    .padding(.top, 12)
+                monthNavigator
+                    .padding(.top, 16)
+                weekdayHeaders
+                    .padding(.top, 8)
+                calendarGrid
+                    .padding(.top, 4)
+                Spacer()
+                applyButton
+                    .padding(.bottom, 8)
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 20)
+        }
+        .presentationDetents([.large])
+        .presentationDragIndicator(.visible)
+        .onAppear {
+            startDate = initialStart
+            endDate = initialEnd
+        }
+    }
+
+    // MARK: - Header
+
+    private var header: some View {
+        HStack {
+            Text("בחר טווח תאריכים")
+                .font(.system(size: 20, weight: .bold, design: .rounded))
+                .foregroundStyle(BrainColors.textPrimary)
+
+            Spacer()
+
+            Button { dismiss() } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(BrainColors.textSecondary)
+                    .frame(width: 32, height: 32)
+                    .background(BrainColors.subtleFill)
+                    .clipShape(Circle())
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    // MARK: - Selected Dates Chips
+
+    private var selectedChips: some View {
+        HStack(spacing: 12) {
+            dateChip(label: "מתאריך", date: startDate)
+            Image(systemName: "arrow.left")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(BrainColors.textQuaternary)
+            dateChip(label: "עד תאריך", date: endDate)
+        }
+    }
+
+    private func dateChip(label: String, date: Date?) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(label)
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .foregroundStyle(BrainColors.textQuaternary)
+            Text(date.map { chipFormatter.string(from: $0) } ?? "—")
+                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                .foregroundStyle(date != nil ? BrainColors.textPrimary : BrainColors.textQuaternary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(BrainColors.cardFill)
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(BrainColors.cardStroke, lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    // MARK: - Month Navigator
+
+    private var monthNavigator: some View {
+        HStack {
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    displayedMonth = calendar.date(byAdding: .month, value: -1, to: displayedMonth) ?? displayedMonth
+                }
+            } label: {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(BrainColors.textSecondary)
+                    .frame(width: 36, height: 36)
+                    .background(BrainColors.subtleFill)
+                    .clipShape(Circle())
+            }
+            .buttonStyle(.plain)
+
+            Spacer()
+
+            Text(headerFormatter.string(from: displayedMonth))
+                .font(.system(size: 16, weight: .bold, design: .rounded))
+                .foregroundStyle(BrainColors.textPrimary)
+
+            Spacer()
+
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    displayedMonth = calendar.date(byAdding: .month, value: 1, to: displayedMonth) ?? displayedMonth
+                }
+            } label: {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(BrainColors.textSecondary)
+                    .frame(width: 36, height: 36)
+                    .background(BrainColors.subtleFill)
+                    .clipShape(Circle())
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    // MARK: - Weekday Headers
+
+    private var weekdayHeaders: some View {
+        let symbols = calendar.veryShortWeekdaySymbols
+        return HStack(spacing: 0) {
+            ForEach(symbols, id: \.self) { day in
+                Text(day)
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundStyle(BrainColors.textQuaternary)
+                    .frame(maxWidth: .infinity)
+            }
+        }
+    }
+
+    // MARK: - Calendar Grid
+
+    private var calendarGrid: some View {
+        let days = daysInMonth()
+        let columns = Array(repeating: GridItem(.flexible(), spacing: 0), count: 7)
+
+        return LazyVGrid(columns: columns, spacing: 4) {
+            ForEach(days, id: \.self) { day in
+                if let day {
+                    let isStart = isSameDay(day, startDate)
+                    let isEnd = isSameDay(day, endDate)
+                    let isInRange = isInSelectedRange(day)
+                    let isToday = calendar.isDateInToday(day)
+                    let isFuture = day > Date()
+
+                    Button {
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        handleDayTap(day)
+                    } label: {
+                        Text("\(calendar.component(.day, from: day))")
+                            .font(.system(size: 15, weight: (isStart || isEnd) ? .bold : .regular, design: .rounded))
+                            .foregroundStyle(
+                                isFuture ? BrainColors.textQuaternary :
+                                (isStart || isEnd) ? BrainColors.invertedText :
+                                isToday ? BrainColors.accent :
+                                BrainColors.textPrimary
+                            )
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 42)
+                            .background(
+                                Group {
+                                    if isStart || isEnd {
+                                        Circle().fill(BrainColors.accent)
+                                    } else if isInRange {
+                                        Rectangle().fill(BrainColors.accent.opacity(0.12))
+                                    }
+                                }
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isFuture)
+                } else {
+                    Color.clear.frame(height: 42)
+                }
+            }
+        }
+    }
+
+    // MARK: - Apply Button
+
+    private var applyButton: some View {
+        Button {
+            guard let s = startDate, let e = endDate else { return }
+            onApply(s, e)
+            dismiss()
+        } label: {
+            Text("החל טווח")
+                .font(.system(size: 16, weight: .bold, design: .rounded))
+                .foregroundStyle(canApply ? BrainColors.invertedText : BrainColors.textQuaternary)
+                .frame(maxWidth: .infinity)
+                .frame(height: 50)
+                .background(canApply ? BrainColors.invertedBg : BrainColors.subtleFill)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(!canApply)
+    }
+
+    // MARK: - Logic
+
+    private func handleDayTap(_ day: Date) {
+        if startDate == nil || (startDate != nil && endDate != nil) {
+            startDate = day
+            endDate = nil
+        } else if let start = startDate {
+            if day < start {
+                startDate = day
+            } else {
+                endDate = day
+            }
+        }
+    }
+
+    private func isSameDay(_ a: Date, _ b: Date?) -> Bool {
+        guard let b else { return false }
+        return calendar.isDate(a, inSameDayAs: b)
+    }
+
+    private func isInSelectedRange(_ day: Date) -> Bool {
+        guard let s = startDate, let e = endDate else { return false }
+        return day > s && day < e
+    }
+
+    private func daysInMonth() -> [Date?] {
+        let comps = calendar.dateComponents([.year, .month], from: displayedMonth)
+        guard let firstOfMonth = calendar.date(from: comps),
+              let range = calendar.range(of: .day, in: .month, for: firstOfMonth)
+        else { return [] }
+
+        let weekday = calendar.component(.weekday, from: firstOfMonth)
+        let leadingBlanks = (weekday - calendar.firstWeekday + 7) % 7
+
+        var days: [Date?] = Array(repeating: nil, count: leadingBlanks)
+        for day in range {
+            var dc = comps
+            dc.day = day
+            days.append(calendar.date(from: dc))
+        }
+        return days
+    }
+}
+
+
+// MARK: - Edge-swipe back enabler
+//
+// SwiftUI's `.toolbar(.hidden, for: .navigationBar)` also disables the system's
+// `interactivePopGestureRecognizer`. This invisible host view walks up to the
+// `UINavigationController` and re-enables it so users can still swipe-from-edge
+// to dismiss BrainReportView.
+
+private struct EnableSwipeBack: UIViewControllerRepresentable {
+    func makeUIViewController(context: Context) -> UIViewController { UIViewController() }
+    func updateUIViewController(_ uiViewController: UIViewController, context: Context) {
+        DispatchQueue.main.async {
+            guard let nav = uiViewController.navigationController
+                ?? uiViewController.parent?.navigationController else { return }
+            nav.interactivePopGestureRecognizer?.delegate = nil
+            nav.interactivePopGestureRecognizer?.isEnabled = true
+        }
     }
 }
 
@@ -2017,13 +3170,13 @@ private struct ReportRow: View {
         HStack {
             Text(title)
                 .font(.system(size: 13, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.50))
+                .foregroundStyle(BrainColors.textTertiary)
 
             Spacer()
 
             Text(value)
                 .font(.system(size: 14, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.90))
+                .foregroundStyle(BrainColors.textPrimary)
         }
         .padding(.vertical, 7)
     }
@@ -2043,13 +3196,13 @@ private struct PinnedDashboardSection: View {
                 Text("מוצמדים")
                     .font(.system(size: 12, weight: .semibold, design: .rounded))
                     .tracking(1.4)
-                    .foregroundStyle(.white.opacity(0.50))
+                    .foregroundStyle(BrainColors.textTertiary)
 
                 Spacer()
 
                 Text("רענון אוטומטי")
                     .font(.system(size: 12, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.45))
+                    .foregroundStyle(BrainColors.textQuaternary)
             }
 
             ForEach(states) { state in
@@ -2077,7 +3230,7 @@ private struct PinnedMiniCard: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(card.title)
                         .font(.system(size: 15, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.92))
+                        .foregroundStyle(BrainColors.textPrimary)
 
                     HStack(spacing: 5) {
                         Circle()
@@ -2086,7 +3239,7 @@ private struct PinnedMiniCard: View {
 
                         Text(state.timeAgoLabel)
                             .font(.system(size: 11, weight: .medium, design: .rounded))
-                            .foregroundStyle(.white.opacity(state.lastRefreshFailed ? 0.5 : 0.35))
+                            .foregroundStyle(state.lastRefreshFailed ? BrainColors.textTertiary : BrainColors.textQuaternary)
                     }
                 }
 
@@ -2095,9 +3248,9 @@ private struct PinnedMiniCard: View {
                 Button(action: onUnpin) {
                     Image(systemName: "pin.slash")
                         .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.75))
+                        .foregroundStyle(BrainColors.textSecondary)
                         .frame(width: 34, height: 34)
-                        .background(.white.opacity(0.075))
+                        .background(BrainColors.subtleFill)
                         .clipShape(Circle())
                 }
                 .buttonStyle(.plain)
@@ -2107,11 +3260,11 @@ private struct PinnedMiniCard: View {
                 Text(card.primaryValue)
                     .font(.system(size: 30, weight: .regular, design: .rounded))
                     .monospacedDigit()
-                    .foregroundStyle(.white)
+                    .foregroundStyle(BrainColors.textPrimary)
 
                 Text(card.primaryLabel)
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.55))
+                    .foregroundStyle(BrainColors.textTertiary)
             }
 
             HStack(spacing: 14) {
@@ -2125,10 +3278,10 @@ private struct PinnedMiniCard: View {
         .onTapGesture { onOpenReport() }
         .background(
             RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .fill(.white.opacity(0.055))
+                .fill(BrainColors.cardFill)
                 .overlay(
                     RoundedRectangle(cornerRadius: 24, style: .continuous)
-                        .stroke(.white.opacity(0.12), lineWidth: 1)
+                        .stroke(BrainColors.cardStroke, lineWidth: 1)
                 )
         )
     }
@@ -2150,7 +3303,7 @@ private struct MockLineGraph: View {
                 VStack(spacing: geo.size.height / 3) {
                     ForEach(0..<4, id: \.self) { _ in
                         Rectangle()
-                            .fill(.white.opacity(0.07))
+                            .fill(BrainColors.subtleFill)
                             .frame(height: 1)
                     }
                 }
@@ -2168,7 +3321,7 @@ private struct MockLineGraph: View {
                         }
                     }
                 }
-                .stroke(.white.opacity(0.88), style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
+                .stroke(BrainColors.textPrimary, style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
 
                 ForEach(values.indices, id: \.self) { index in
                     let x = CGFloat(index) * step
@@ -2176,7 +3329,7 @@ private struct MockLineGraph: View {
                     let y = geo.size.height - (normalized * geo.size.height)
 
                     Circle()
-                        .fill(.white)
+                        .fill(BrainColors.textPrimary)
                         .frame(width: index == values.count - 1 ? 8 : 5, height: index == values.count - 1 ? 8 : 5)
                         .position(x: x, y: y)
                         .opacity(index == values.count - 1 ? 1 : 0.55)
@@ -2196,11 +3349,11 @@ private struct ResultMiniMetric: View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title)
                 .font(.system(size: 11, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.45))
+                .foregroundStyle(BrainColors.textQuaternary)
 
             Text(value)
                 .font(.system(size: 15, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.90))
+                .foregroundStyle(BrainColors.textPrimary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -2220,13 +3373,13 @@ private struct ButtonChip: View {
                 Text(title)
                     .font(.system(size: 12, weight: .semibold, design: .rounded))
             }
-            .foregroundStyle(.white.opacity(0.82))
+            .foregroundStyle(BrainColors.textSecondary)
             .padding(.horizontal, 10)
             .frame(height: 34)
-            .background(.white.opacity(0.075))
+            .background(BrainColors.subtleFill)
             .overlay(
                 Capsule()
-                    .stroke(.white.opacity(0.10), lineWidth: 1)
+                    .stroke(BrainColors.cardStroke, lineWidth: 1)
             )
             .clipShape(Capsule())
         }
@@ -2264,19 +3417,19 @@ private struct TeslaControlButton: View {
             VStack(spacing: 8) {
                 Text(title)
                     .font(.system(size: 11, weight: .medium, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.58))
+                    .foregroundStyle(BrainColors.textTertiary)
                     .tracking(1.0)
 
                 ZStack {
                     Circle()
-                        .fill(Color.white.opacity(0.055))
+                        .fill(BrainColors.cardFill)
 
                     Circle()
-                        .stroke(Color.white.opacity(0.16), lineWidth: 1)
+                        .stroke(BrainColors.cardStroke, lineWidth: 1)
 
                     Image(systemName: systemImage)
                         .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.9))
+                        .foregroundStyle(BrainColors.textPrimary)
                 }
                 .frame(width: 56, height: 56)
             }
@@ -2297,10 +3450,10 @@ private struct OperationalPulseCard: View {
         .padding(14)
         .background(
             RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .fill(.white.opacity(0.045))
+                .fill(BrainColors.cardFill)
                 .overlay(
                     RoundedRectangle(cornerRadius: 24, style: .continuous)
-                        .stroke(.white.opacity(0.075), lineWidth: 1)
+                        .stroke(BrainColors.subtleStroke, lineWidth: 1)
                 )
         )
     }
@@ -2315,15 +3468,15 @@ private struct PulseItem: View {
         VStack(spacing: 6) {
             Image(systemName: icon)
                 .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.75))
+                .foregroundStyle(BrainColors.textSecondary)
 
             Text(title)
                 .font(.system(size: 11, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.42))
+                .foregroundStyle(BrainColors.textQuaternary)
 
             Text(value)
                 .font(.system(size: 12, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.82))
+                .foregroundStyle(BrainColors.textSecondary)
         }
         .frame(maxWidth: .infinity)
     }
@@ -2342,11 +3495,11 @@ private struct SetupMiniCard: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("סיים הגדרה")
                         .font(.system(size: 16, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.92))
+                        .foregroundStyle(BrainColors.textPrimary)
 
                     Text("שלב 1 \u{2014} הוסף את המוצרים שלך")
                         .font(.system(size: 13, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.70))
+                        .foregroundStyle(BrainColors.textSecondary)
                 }
 
                 Spacer()
@@ -2354,9 +3507,9 @@ private struct SetupMiniCard: View {
                 Button(action: onDismiss) {
                     Image(systemName: "xmark")
                         .font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(.white.opacity(0.75))
+                        .foregroundStyle(BrainColors.textSecondary)
                         .frame(width: 28, height: 28)
-                        .background(.white.opacity(0.06))
+                        .background(BrainColors.subtleFill)
                         .clipShape(Circle())
                 }
                 .buttonStyle(.plain)
@@ -2366,10 +3519,10 @@ private struct SetupMiniCard: View {
                 Button(action: onMenu) {
                     Text("צור תפריט")
                         .font(.system(size: 15, weight: .bold, design: .rounded))
-                        .foregroundStyle(.black)
+                        .foregroundStyle(BrainColors.invertedText)
                         .frame(maxWidth: .infinity)
                         .frame(height: 46)
-                        .background(.white)
+                        .background(BrainColors.invertedBg)
                         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
                 .buttonStyle(.plain)
@@ -2377,13 +3530,13 @@ private struct SetupMiniCard: View {
                 Button(action: onCashpoint) {
                     Text("קופה")
                         .font(.system(size: 15, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.9))
+                        .foregroundStyle(BrainColors.textPrimary)
                         .frame(maxWidth: .infinity)
                         .frame(height: 46)
-                        .background(.white.opacity(0.10))
+                        .background(BrainColors.subtleFill)
                         .overlay(
                             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .stroke(.white.opacity(0.12), lineWidth: 1)
+                                .stroke(BrainColors.cardStroke, lineWidth: 1)
                         )
                         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
@@ -2393,10 +3546,10 @@ private struct SetupMiniCard: View {
         .padding(15)
         .background(
             RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .fill(.white.opacity(0.06))
+                .fill(BrainColors.cardFill)
                 .overlay(
                     RoundedRectangle(cornerRadius: 24, style: .continuous)
-                        .stroke(.white.opacity(0.08), lineWidth: 1)
+                        .stroke(BrainColors.cardStroke, lineWidth: 1)
                 )
         )
     }
@@ -2432,11 +3585,11 @@ private struct ShopTopBar: View {
                 HStack(spacing: 6) {
                     Text("בית העם היום")
                         .font(.system(size: 20, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.86))
+                        .foregroundStyle(BrainColors.textPrimary)
 
                     Image(systemName: "chevron.down")
                         .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.6))
+                        .foregroundStyle(BrainColors.textTertiary)
                 }
             }
 

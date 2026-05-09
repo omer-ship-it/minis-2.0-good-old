@@ -6361,6 +6361,13 @@ struct CashPointView: View {
 
                     // ✅ NOW: this only submits — must NOT close the sheet inside completeOrder
                     onCompleted: { phone, name, summary, discountOff, tip, existingOrderId in
+                        // ✅ ALWAYS submit. The banner above the cart has
+                        // already warned the cashier if WiFi hopped off the
+                        // printer LAN (e.g. Tabit Haam vs Beit Haam). The
+                        // server submit travels over the public internet, and
+                        // OneShotPrinter queues the ESC/POS jobs and retries
+                        // until the LAN is back — so the order never gets
+                        // dropped just because of a WiFi hop.
                         pendingFinishAfterSubmit = true
                         completeOrder(
                             customerPhone: phone,
@@ -6660,6 +6667,16 @@ struct CashPointView: View {
                 }
             }
         }
+        // 🆕 Printer-network alerts: banner above the cart when WiFi has
+        // hopped to the wrong SSID (e.g. Tabit Haam instead of Beit Haam)
+        // and an auto-dismissing "back online" toast. The order itself is
+        // never gated — submit always proceeds, OneShotPrinter retries the
+        // ESC/POS jobs until the LAN is back.
+        .printerNetworkAlerts(
+            monitor: printerMonitor,
+            basketIsEmpty: basket.isEmpty,
+            isRtl: isRtl
+        )
     }
 
     private struct RefundAmountView: View {
