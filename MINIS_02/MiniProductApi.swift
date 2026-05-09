@@ -123,6 +123,13 @@ struct MinisProductAPI {
     private var hardCodedMiniAppId: Int { miniAppId }   // ✅ changed (computed)
    
     
+    // NOTE: `Status` is intentionally NOT in this payload.
+    // Availability belongs to setStock / setStatus, NOT to product edits.
+    // Sending Status from upsert previously caused ghost-reactivations because
+    // it defaulted to `true` on every edit (price tweak, image change, etc.),
+    // silently re-enabling items that staff had toggled off. Server-side the
+    // upsert SQL no longer writes Status either; this is the matching client
+    // change so old payloads with Status are no longer constructed.
     struct UpsertPayload: Encodable {
         var Id: Int?                 // nil for new; DB product id for edit
         var MiniAppId: Int
@@ -131,7 +138,6 @@ struct MinisProductAPI {
         var Category: String
         var Image: String
         var Sort: Int?
-        var Status: Bool = true
         var JsonData: [String: AnyEncodable]
     }
 

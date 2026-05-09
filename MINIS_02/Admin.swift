@@ -2547,6 +2547,9 @@ extension AdminProductDraft {
            let jsonString = String(data: jsonData, encoding: .utf8) {
         }
         
+        // Status intentionally NOT passed: availability is owned by setStock/setStatus,
+        // not by the product editor. Letting upsert carry Status:true silently re-enabled
+        // items that staff had toggled off (the "stock comes back" bug).
         return .init(
             Id: productId,
             MiniAppId: shopId,
@@ -2555,7 +2558,6 @@ extension AdminProductDraft {
             Category: finalCategory,
             Image: cleanImage,
             Sort: nil,
-            Status: true,
             JsonData: injectedJsonDict   // ✅ dictionary (matches your UpsertPayload type)
         )
     }
