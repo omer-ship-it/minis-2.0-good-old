@@ -138,7 +138,7 @@ enum LocalNetworkInfo {
 
 struct PrinterNetworkConfig {
     /// Display name shown in copy as the network the cashier *should* be on.
-    var expectedSSID: String = "Beit Haam"
+    var expectedSSID: String = "Tabit Haam"
     /// IP prefix that identifies the printer LAN.
     var printerSubnetPrefix: String = "10.100.10."
 }
@@ -159,48 +159,48 @@ struct PrinterOfflineBanner: View {
     }
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 8) {
             Image(systemName: "wifi.exclamationmark")
-                .font(.system(size: 16, weight: .bold))
+                .font(.system(size: 13, weight: .bold))
                 .foregroundColor(.black)
 
-            VStack(alignment: isRtl ? .trailing : .leading, spacing: 2) {
+            VStack(alignment: isRtl ? .trailing : .leading, spacing: 1) {
                 Text(title)
-                    .font(.system(size: 14, weight: .bold))
+                    .font(.system(size: 12, weight: .bold))
                     .foregroundColor(.black)
                     .lineLimit(1)
                 Text(subtitle)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 10, weight: .semibold))
                     .foregroundColor(.black.opacity(0.7))
                     .lineLimit(1)
             }
 
-            Spacer(minLength: 8)
+            Spacer(minLength: 4)
 
             Button {
                 openWiFiSettings()
             } label: {
                 Text(PrinterNetCopy.openWiFi(isRtl: isRtl))
-                    .font(.system(size: 13, weight: .bold))
+                    .font(.system(size: 11, weight: .bold))
                     .foregroundColor(.white)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
                     .background(Color.black)
                     .clipShape(Capsule())
             }
             .buttonStyle(.plain)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
         .background(
-            RoundedRectangle(cornerRadius: 14)
-                .fill(Color(red: 1.0, green: 0.92, blue: 0.55)) // amber/wheat
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color(red: 1.0, green: 0.92, blue: 0.55))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 14)
+            RoundedRectangle(cornerRadius: 10)
                 .stroke(Color.black.opacity(0.08), lineWidth: 1)
         )
-        .padding(.horizontal, 12)
+        .fixedSize()
         .transition(.move(edge: .top).combined(with: .opacity))
         .environment(\.layoutDirection, isRtl ? .rightToLeft : .leftToRight)
     }
@@ -257,11 +257,9 @@ struct PrinterNetworkAlertsModifier: ViewModifier {
     @State private var currentSSID: String? = nil
 
     private var shouldShowBanner: Bool {
-        guard !basketIsEmpty else { return false }
+        if monitor.isReadyToPrint { return false }
         if !monitor.isNetworkUp { return true }
         if monitor.anyPrinterOffline { return true }
-        // Belt-and-suspenders: even if NWPath says satisfied, if our IP
-        // isn't on the printer subnet we're definitely on the wrong WiFi.
         if !LocalNetworkInfo.isOnSubnet(prefix: config.printerSubnetPrefix) { return true }
         return false
     }

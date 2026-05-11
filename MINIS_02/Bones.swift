@@ -125,6 +125,7 @@ struct DigitalBonesView: View {
         let id: Int
         let bone: Bone
         let status: BoneOrderStatus
+        let rawStatus: Int    // 🆕 (2026-05-10): keep raw DB status for strict Status==1 filtering
         let placedAt: Date
         let stations: Set<Station>
         let invoiceItems: [InvoiceItem]
@@ -933,6 +934,7 @@ struct DigitalBonesView: View {
                 id: order.id,
                 bone: order.bone,
                 status: .collected,          // 👈 move to collected
+                rawStatus: 5,                // 🆕 (2026-05-10) collected = DB Status=5
                 placedAt: order.placedAt,
                 stations: order.stations,
                 invoiceItems: order.invoiceItems,
@@ -963,6 +965,7 @@ struct DigitalBonesView: View {
                     id: order.id,
                     bone: order.bone,
                     status: .collected,      // 👈 go straight to history in UI
+                    rawStatus: 5,            // 🆕 (2026-05-10) collected = DB Status=5
                     placedAt: order.placedAt,
                     stations: order.stations,
                     invoiceItems: order.invoiceItems,
@@ -1002,6 +1005,7 @@ struct DigitalBonesView: View {
                 id: order.id,
                 bone: order.bone,
                 status: .ready,
+                rawStatus: 4,                // 🆕 (2026-05-10) ready = DB Status=4
                 placedAt: order.placedAt,
                 stations: order.stations,
                 invoiceItems: order.invoiceItems,
@@ -1033,6 +1037,7 @@ struct DigitalBonesView: View {
                 id: order.id,
                 bone: order.bone,
                 status: .collected,
+                rawStatus: 5,                // 🆕 (2026-05-10) collected = DB Status=5
                 placedAt: order.placedAt,
                 stations: order.stations,
                 invoiceItems: order.invoiceItems,
@@ -1056,32 +1061,21 @@ struct DigitalBonesView: View {
     }
     // MARK: - Rebuild bones arrays from allOrders (show ALL stations, filtered by search)
 
-    private static let bonesTimeWindowMinutes: Int = 30
+    private static let bonesTimeWindowMinutes: Int = 120
 
     private func rebuildBonesFromOrders() {
         let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 
-        // ⏱️ Only orders placed within the last `bonesTimeWindowMinutes`.
-        //    Without this, the bones screen accumulates everything ever loaded
-        //    into `allOrders` and shows stale stuff from earlier shifts.
-        let cutoff = Date().addingTimeInterval(
-            -TimeInterval(Self.bonesTimeWindowMinutes * 60)
-        )
-        let timeFilteredBase = allOrders.filter { order in
-            order.placedAt >= cutoff
-        }
-
-        let stationFilteredBase = timeFilteredBase.filter { order in
-            // ✅ only show orders that have kitchen items
+        let stationFilteredBase = allOrders.filter { order in
             let items = order.stationItems[.kitchen] ?? []
             return !items.isEmpty
         }
 
-        let relevant: [BoneOrder]
+        let searchFiltered: [BoneOrder]
         if q.isEmpty {
-            relevant = stationFilteredBase
+            searchFiltered = stationFilteredBase
         } else {
-            relevant = stationFilteredBase.filter { order in
+            searchFiltered = stationFilteredBase.filter { order in
                 let idMatch = "\(order.id)".contains(q)
                 let nameMatch = order.bone.customerName
                     .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1093,35 +1087,36 @@ struct DigitalBonesView: View {
 
         func stationBone(from order: BoneOrder) -> Bone {
             var b = order.bone
-            b.items = order.stationItems[.kitchen] ?? []   // ✅ always kitchen
+            b.items = order.stationItems[.kitchen] ?? []
             return b
         }
 
-        let received = relevant
-            .filter { $0.status == .received }
+        // 🆕 (2026-05-10): STRICT 2-state filter by raw DB status.
+        //   Active = ONLY rawStatus == 1 (paid). Everything else (rawStatus 0,
+        //   2, 3, 4, 5, etc.) → History. No time filter on either side.
+        //   Replaces the previous 3-bucket model (received/ready/collected with
+        //   time-windowed history) which broke after the server clock change.
+        let active = searchFiltered
+            .filter { $0.rawStatus == 1 }
             .sorted { $0.id > $1.id }
 
-        let ready = relevant
-            .filter { $0.status == .ready }
+        let history = searchFiltered
+            .filter { $0.rawStatus != 1 }
             .sorted { $0.id > $1.id }
 
-        // collected for history
-        let collected = relevant
-            .filter { $0.status == .collected }
-            .sorted { $0.id > $1.id }
+        toPrepare = active.map { stationBone(from: $0) }
 
-        // Top row – בהכנה
-        toPrepare = received.map { stationBone(from: $0) }
-
-        // Bottom row – ready
+        // readySlots is now empty — no orders are categorized as "ready slot"
+        // anymore (Status=4 goes to history per new spec).
         readySlots = Array(repeating: nil, count: 5)
-        for (i, order) in ready.prefix(5).enumerated() {
-            readySlots[i] = stationBone(from: order)
-        }
-        readyBones = ready.map { stationBone(from: $0) }
+        readyBones = []
 
-        // 👇 NEW: history – one “big row” of bones for collected
-        historyBones = collected.map { stationBone(from: $0) }
+        historyBones = history.map { stationBone(from: $0) }
+
+        // 🆕 (2026-05-10): print logs to verify what landed where
+        print("[Bones-rebuild] allOrders=\(allOrders.count) stationFiltered=\(stationFilteredBase.count) searchFiltered=\(searchFiltered.count) searchQuery=\(q.isEmpty ? "<empty>" : q)")
+        print("[Bones-rebuild] ACTIVE: count=\(active.count) ids=\(active.map(\.id)) (rawStatus==1 only)")
+        print("[Bones-rebuild] HISTORY: count=\(history.count) ids=\(history.map(\.id)) (rawStatus != 1, NO time filter)")
     }
 
     // MARK: - API DTOs, mapping, loadOrders (unchanged from your version)
@@ -1242,6 +1237,7 @@ struct DigitalBonesView: View {
                 id: order.id,
                 bone: order.bone,
                 status: .collected,
+                rawStatus: 5,                // 🆕 (2026-05-10) collected = DB Status=5
                 placedAt: order.placedAt,
                 stations: order.stations,
                 invoiceItems: order.invoiceItems,
@@ -1280,13 +1276,15 @@ struct DigitalBonesView: View {
     private func mapOrder(_ dto: BonesOrderDTO) -> BoneOrder {
         // Map overall status
         
+        let rawStatus = dto.status ?? 0
         let status: BoneOrderStatus = {
-            switch dto.status ?? 0 {
+            switch rawStatus {
             case 4:  return .ready
             case 5:  return .collected
             default: return .received
             }
         }()
+        print("[Bones] order #\(dto.id) rawStatus=\(rawStatus) mapped=\(status == .received ? "received" : status == .ready ? "ready" : "collected")")
 
         // Display name
         let displayName: String = {
@@ -1299,10 +1297,9 @@ struct DigitalBonesView: View {
         // Time text
         let df = DateFormatter()
         df.locale = Locale(identifier: "he_IL")
-        df.timeZone = .current
+        df.timeZone = TimeZone(identifier: "Asia/Jerusalem") ?? .current
         df.dateFormat = "HH:mm   dd/MM/yyyy"
-        let israelTime = Calendar.current.date(byAdding: .hour, value: 2, to: dto.placedAt) ?? dto.placedAt
-        let timeText = df.string(from: israelTime)
+        let timeText = df.string(from: dto.placedAt)
 
         // Service text (TA or sit)
         // Service text (TA / delivery etc.) based on dto.service
@@ -1440,6 +1437,7 @@ struct DigitalBonesView: View {
             id: dto.id,
             bone: bone,
             status: status,
+            rawStatus: rawStatus,                 // 🆕 (2026-05-10): keep raw DB status
             placedAt: dto.placedAt,
             stations: stationsSet,
             invoiceItems: invoiceItems,

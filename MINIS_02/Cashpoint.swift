@@ -1202,8 +1202,8 @@ struct CashPointView: View {
 
         Haptics.light()
 
-        // ping
-        ZCreditPaymentHandler.shared.pay(amount: 1.0, orderId: nil) { _ in }
+        // ping — use legacy /start so cancel is reliable
+        ZCreditPaymentHandler.shared.pay(amount: 1.0, orderId: nil, useLegacyEndpoint: true) { _ in }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             ZCreditPaymentHandler.shared.cancelCurrent()
         }

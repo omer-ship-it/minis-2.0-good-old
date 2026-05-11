@@ -137,6 +137,16 @@ struct MINIS_02App: App {
         UserDefaults.standard.removeObject(forKey: "posSavedName")
         UserDefaults.standard.removeObject(forKey: "posSavedPhone")
 
+        // ✅ Clear partial-pay snapshot on launch — never carry over to a new session
+        UserDefaults.standard.removeObject(forKey: "pos.partialPay.card")
+        UserDefaults.standard.removeObject(forKey: "pos.partialPay.cash")
+        UserDefaults.standard.removeObject(forKey: "pos.partialPay.remaining")
+        UserDefaults.standard.removeObject(forKey: "pos.partialPay.total")
+        UserDefaults.standard.removeObject(forKey: "pos.partialPay.ts")
+        UserDefaults.standard.removeObject(forKey: "pos.partialPay.token")
+        UserDefaults.standard.removeObject(forKey: "pos.partialPay.miniId")
+        UserDefaults.standard.removeObject(forKey: "pos.partialPay.completedToken")
+
         // ✅ NO BOOTSTRAP DEFAULT MINI HERE
         // miniAppId remains NIL (missing key) until a universal link / QR is scanned
         if let mid = storedMiniAppId {
@@ -151,10 +161,10 @@ struct MINIS_02App: App {
     // MARK: - Body
     var body: some Scene {
         WindowGroup {
-            Group {
+            Group { 
                 // ✅ 1) Admin always goes Tesla3
                 if isAdmin {
-                    menuView()
+                    Tesla3()
                         .tint(.primary)
                         .environment(\.layoutDirection, .leftToRight)
 
@@ -177,7 +187,7 @@ struct MINIS_02App: App {
                     environment(\.locale, appLocale)
                         .environment(\.isRtl, appIsRtl)
                 } else {
-                    menuView()
+                    Tesla3()
                                .environment(\.layoutDirection, .leftToRight)
                                .environment(\.locale, appLocale)
                                   .environment(\.isRtl, appIsRtl)   // your custom env key

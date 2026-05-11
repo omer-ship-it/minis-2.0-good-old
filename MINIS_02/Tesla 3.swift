@@ -824,6 +824,12 @@ struct Tesla3: View {
             .hidden()
 
             NavigationLink(
+                destination: CashPointView(),
+                isActive: $showCashpoint
+            ) { EmptyView() }
+            .hidden()
+
+            NavigationLink(
                 destination: FastlaneOnboardingMock {
                     showCreateShopFlow = false
                 }

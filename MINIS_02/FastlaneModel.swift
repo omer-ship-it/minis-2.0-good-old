@@ -2746,7 +2746,10 @@ final class ZCreditPaymentHandler {
         let useChargeV2Flag = UserDefaults.standard.bool(forKey: "payments.useChargeV2")
         let endpoint: String
         let endpointReason: String
-        if transactionType != "01" {
+        if useLegacyEndpoint {
+            endpoint = "/payments/zcredit/start"
+            endpointReason = "FORCE_LEGACY_PARTIAL"
+        } else if transactionType != "01" {
             endpoint = "/payments/zcredit/start"
             endpointReason = "LEGACY_NON_01_TXTYPE_\(transactionType)"
         } else if useChargeV2Flag {
@@ -2756,7 +2759,8 @@ final class ZCreditPaymentHandler {
             endpoint = "/payments/zcredit/start"
             endpointReason = "FLAG_USECHARGEV2_OFF"
         }
-        print("[ZCredit] 🚦 endpoint=\(endpoint) reason=\(endpointReason) flag=\(useChargeV2Flag) txType=\(transactionType) amount=\(safeAmount) pinpadId=\(pinpadId) miniAppId=\(mid) idempotency=\(idempotencyKey?.prefix(8) ?? "-")")
+        let endpointTag = endpoint.contains("/charge") ? "⚡ /CHARGE" : "🔧 /START"
+        print("[ENDPOINT] \(endpointTag) reason=\(endpointReason) forceLegacy=\(useLegacyEndpoint) flag=\(useChargeV2Flag) txType=\(transactionType) amount=\(safeAmount) pinpadId=\(pinpadId) miniAppId=\(mid) idempotency=\(idempotencyKey?.prefix(8) ?? "-")")
         guard let startURL = URL(string: endpoint, relativeTo: baseURL) else {
             DispatchQueue.main.async { completion(self.legacyBadURLResult()) }
             return
