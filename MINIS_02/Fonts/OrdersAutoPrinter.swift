@@ -173,7 +173,7 @@ final class OrdersAutoPrinter {
         let v = UserDefaults.standard.integer(forKey: "miniAppId")
         return v > 0 ? v : 0
     }
-    
+
     private var adminPickupLocation: String {
         UserDefaults.standard.string(forKey: "admin.pickupLocation") ?? "cafeteria"
     }
@@ -282,18 +282,24 @@ final class OrdersAutoPrinter {
     private func pollOnce(trigger: String) async {
         guard miniAppId > 0 else { return }
 
-        if let ip = currentLANIPv4() {
-            guard ip.hasPrefix("10.100.10.") else { return }
-        } else {
-            return
-        }
+        // ⛓️ The previous version short-circuited polling entirely when the
+        //     iPad's LAN IP didn't match the shop's `10.100.10.x` subnet.
+        //     That was silently dropping orders on the floor whenever the
+        //     iPad got a different DHCP lease, switched WiFi, or had a brief
+        //     network blip — no log, no retry. The right gate is the print
+        //     itself: PrinterManager already fails fast when no printer is
+        //     reachable, and the bounded print-retry handles transient
+        //     blips. So we just log the current IP for debugging and let
+        //     the poll proceed regardless of the subnet.
+        let lanIP = currentLANIPv4() ?? "unknown"
+        print("[OrdersAutoPrinter] 📡 pollOnce trigger=\(trigger) lanIP=\(lanIP) miniAppId=\(miniAppId)")
 
         guard let url = makeClaimURL() else {
             return
         }
         if miniAppId == 13 {
         }
-        
+
 
         var req = URLRequest(url: url, timeoutInterval: 15)
         req.httpMethod = "POST"
@@ -511,36 +517,60 @@ final class OrdersAutoPrinter {
     
     // MARK: - Print + markPrinted
 
-    private func printAndMark(order: SimpleOrder, trigger: String) async {
+    /// Back-off delays between print attempts (in seconds).
+    /// 0 = first attempt, then 3s, 10s, 30s before the next try.
+    /// Total worst-case wall time before giving up: ~43 s, which still
+    /// leaves the server-side claim valid (orders are eligible for up
+    /// to 5 minutes from PlacedAt) and avoids stale-state on the iPad.
+    /// Server is unchanged: the order stays claimed by this iPad the
+    /// whole time, so no other iPad will pick it up while we retry.
+    private static let printRetryDelaysSeconds: [UInt64] = [3, 10, 30]
 
+    private func printAndMark(order: SimpleOrder, trigger: String) async {
         let entries = toBasketEntries(from: order)
         let mode    = diningMode(for: order)
-        let ok = await PrinterManager.shared.printCashPointSplit(
-            orderNumber: order.id,
-            entries: entries,
-            total: order.total,
-            diningMode: mode,
-            customerName: order.customerName,
-            customerPhone: order.customerPhone,
-            showMinisRow: true   // auto-printer = app/auto order → show MINIS
-        )
+
+        // Try up to 1 + retries.count = 4 attempts. Most failures are a
+        // transient printer/network blip and clear on the first retry.
+        var ok = false
+        var attemptIndex = 0
+        let maxAttempts = Self.printRetryDelaysSeconds.count + 1
+
+        while attemptIndex < maxAttempts {
+            ok = await PrinterManager.shared.printCashPointSplit(
+                orderNumber: order.id,
+                entries: entries,
+                total: order.total,
+                diningMode: mode,
+                customerName: order.customerName,
+                customerPhone: order.customerPhone,
+                showMinisRow: true   // auto-printer = app/auto order → show MINIS
+            )
+
+            if ok { break }
+
+            // Last attempt: don't sleep, just fall out to the failure log.
+            if attemptIndex == maxAttempts - 1 { break }
+
+            let delay = Self.printRetryDelaysSeconds[attemptIndex]
+            print("[OrdersAutoPrinter] ⚠️ print attempt \(attemptIndex + 1)/\(maxAttempts) FAILED orderId=\(order.id) — retrying in \(delay)s trigger=\(trigger)")
+            try? await Task.sleep(nanoseconds: delay * 1_000_000_000)
+            attemptIndex += 1
+        }
 
         guard ok else {
-            // 🆕 2026-05-05: log the silent-fail so stranded auto-prints are
-            // visible in the console. Pair with [printCashPointSplit] log inside
-            // PrinterManager (which logs which station failed). Together: we see
-            // both the orderId AND which printer station caused the failure.
-            // Tag with [OrdersAutoPrinter] for filtering.
-            // Order will stay PrintedAt=NULL on server until a manual reprint OR
-            // the server expires the claim and reissues to another iPad.
+            // All attempts exhausted. Order stays SentToPrinterAt-set on
+            // the server; manual reprint or DB intervention required.
+            // The pre-existing [printCashPointSplit] log inside
+            // PrinterManager tells us which station kept failing.
             let _ts = ISO8601DateFormatter().string(from: Date())
-            print("[OrdersAutoPrinter] ❌ printAndMark FAILED orderId=\(order.id) trigger=\(trigger) total=\(order.total) ts=\(_ts)")
+            print("[OrdersAutoPrinter] ❌ printAndMark gave up after \(maxAttempts) attempts orderId=\(order.id) trigger=\(trigger) total=\(order.total) ts=\(_ts)")
             return
         }
 
         let marked = await markPrinted(orderId: order.id, claimToken: order.claimToken)
         if marked {
-            print("[OrdersAutoPrinter] ✅ printed+marked orderId=\(order.id) trigger=\(trigger) ts=\(ISO8601DateFormatter().string(from: Date()))")
+            print("[OrdersAutoPrinter] ✅ printed+marked orderId=\(order.id) trigger=\(trigger) attempts=\(attemptIndex + 1) ts=\(ISO8601DateFormatter().string(from: Date()))")
             printedOrderIds.insert(order.id)
         } else {
             // Edge case: print succeeded but server rejected the markPrinted POST

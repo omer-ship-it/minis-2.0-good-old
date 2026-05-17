@@ -3019,7 +3019,24 @@ struct CashPointView: View {
             )
         }
         
-        return AdminProductDraft(
+        // ✅ Per-weekday available hours: if any entry exists in the menu JSON
+        // for this product we treat the limit as enabled and surface the rows
+        // in the editor. Missing weekdays fall back to the editor defaults
+        // (08:00–17:00) so the time pickers don't open on 00:00–23:59.
+        let limitEnabled = (item.availableHours?.isEmpty == false)
+        let weekdayHours: [WeekdayHours] = {
+            var byDay: [Int: WeekdayHours] = [:]
+            for h in (item.availableHours ?? []) {
+                byDay[h.weekday] = h
+            }
+            let fallbacks = AdminProductDraft.defaultWeekdayHours()
+            return (0...6).map { wd in
+                if let existing = byDay[wd] { return existing }
+                return fallbacks[wd]
+            }
+        }()
+
+        var draftOut = AdminProductDraft(
             productId: item.id,
             name: item.name,
             priceText: String(format: "%.2f", item.price),
@@ -3032,6 +3049,9 @@ struct CashPointView: View {
             isPhoneRequired: (item.isPhone ?? false),
             isArchived: isArchived(item)
         )
+        draftOut.limitHoursEnabled = limitEnabled
+        draftOut.weekdayHours = weekdayHours
+        return draftOut
     }
     
     private var basketRequiresPhone: Bool {
@@ -3107,6 +3127,10 @@ struct CashPointView: View {
             let primary = resolvedPrimaryId(fallback: defaultPrinterId())
             let printers = resolvedPrinterIds(primary: primary)
 
+            // ✅ NEW: per-weekday available hours from the editor.
+            let availableHoursForLocal: [WeekdayHours]? =
+                draft.limitHoursEnabled ? draft.weekdayHours : nil
+
             let newItem = ShellMenuItem(
                 id: newId,
                 name: draft.name,
@@ -3118,7 +3142,8 @@ struct CashPointView: View {
                 status: 1,
                 stockQuantity: nil,
                 printer: primary,
-                printers: printers
+                printers: printers,
+                availableHours: availableHoursForLocal
             )
 
             api.items.append(newItem)
@@ -3148,6 +3173,12 @@ struct CashPointView: View {
             let primary = resolvedPrimaryId(fallback: fallbackPrimary)
             let printers = resolvedPrinterIds(primary: primary)
 
+            // ✅ NEW: persist per-weekday available hours coming from the editor.
+            // When the limit is off we store nil so other code paths treat the
+            // product as available all week.
+            let availableHoursForLocal: [WeekdayHours]? =
+                draft.limitHoursEnabled ? draft.weekdayHours : nil
+
             let updatedItem = ShellMenuItem(
                 id: productId,
                 name: draft.name,
@@ -3159,7 +3190,8 @@ struct CashPointView: View {
                 status: api.items[idx].status,
                 stockQuantity: api.items[idx].stockQuantity,
                 printer: primary,
-                printers: printers
+                printers: printers,
+                availableHours: availableHoursForLocal
             )
 
             api.items[idx] = updatedItem
@@ -4315,6 +4347,9 @@ struct CashPointView: View {
         if selectedCategory == archiveCategoryTitle {
             base = api.items.filter { isArchived($0) }
         } else {
+            // Products outside their per-day hours still appear in the grid;
+            // the tile renders a "8:00–17:00" badge (or "סגור היום") for them.
+            // The sort key already pushes them to the bottom via productSortKey.
             base = api.items.filter {
                 !isArchived($0) && $0.category == selectedCategory
             }
@@ -7134,9 +7169,20 @@ struct CashPointView: View {
     }
     */
     private func productSortKey(_ item: ShellMenuItem) -> (Int, Int, String) {
+        // Products with Status = 0 (turned off by admin) always sink to the
+        // bottom of their category — same bucket as out-of-stock items.
+        let inactiveByStatus = (item.status ?? 1) == 0
+
+        // Products outside their per-day window (e.g. coffee at 19:00 with
+        // an 8–17 window) also sink to the bottom. The tile renders a
+        // "8:00–17:00" badge so the cashier knows why.
+        let outsideHours = !item.isAvailableOnWeekday()
+
         // MiniApp 12 only: active products first, frozen/out-of-stock at bottom
         if resolvedMiniAppId == 12 {
             let isActive: Bool = {
+                if inactiveByStatus { return false }       // ✅ Status=0 → bottom
+                if outsideHours    { return false }        // ✅ outside hours → bottom
                 if let q = stockAdjustments[item.id] {
                     return q > 0          // 0 => bottom
                 }
@@ -7147,8 +7193,11 @@ struct CashPointView: View {
             return (activeRank, stableIndex(item), item.name)
         }
 
-        // Other minis: keep normal manual/category order
-        return (0, stableIndex(item), item.name)
+        // Other minis: keep manual/category order, but still push
+        // Status=0 / outside-hours items to the bottom so they're
+        // visible without crowding the top.
+        let activeRank = (inactiveByStatus || outsideHours) ? 1 : 0
+        return (activeRank, stableIndex(item), item.name)
     }
     
     private func addToBasket(item: ShellMenuItem, quantity: Int, subtitle: String?, unitPrice: Double) {
@@ -8903,6 +8952,83 @@ struct CashPointView: View {
             }
         }
     }
+
+    /// Multi-select chip used for `.additions` groups (extras like
+    /// "ביצה רכה", "פטה" on a salad). Tap toggles the item on/off.
+    /// Replaces the legacy עם/בלי/בצד 3-mode flow — selected items go
+    /// into `additionSelections[lineId][groupTitle][.with]` so the
+    /// rest of the basket plumbing (subtitle / pricing) continues to
+    /// see them as ordinary "with X" additions.
+    @ViewBuilder
+    func additionsChip(entry: BasketEntry, group: ModifierGroup, opt: ModifierItem) -> some View {
+        if isModifierVisible(opt) {
+            let withSet = (additionSelections[entry.id]?[group.title]?[.with]) ?? []
+            let isSelected = withSet.contains(opt.name)
+
+            let key = freezeKey(productId: entry.item.id, groupTitle: group.title, optionName: opt.name)
+            let frozenFromJson = (opt.status ?? 1) == 0
+            let frozenLocal = (localFrozenOverrides[key] == true)
+            let isFrozen = frozenFromJson || frozenLocal
+            let shownName = displayModifierName(opt)
+
+            Text(
+                modifierPriceLabel(opt.extraPrice).isEmpty
+                ? shownName
+                : "\(shownName) \(modifierPriceLabel(opt.extraPrice))"
+            )
+            .font(.system(size: 17, weight: .medium))
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(isSelected ? (colorScheme == .dark ? .white : .black) : Color(.systemGray5))
+            .foregroundColor(isSelected ? (colorScheme == .dark ? .black : .white) : .primary)
+            .opacity(isFrozen ? 0.35 : 1.0)
+            .overlay(alignment: .topTrailing) {
+                if isFrozen {
+                    Image(systemName: "snowflake")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.secondary)
+                        .padding(.top, 2)
+                        .padding(.trailing, 2)
+                }
+            }
+            .clipShape(Capsule())
+            .onTapGesture {
+                guard !isFrozen else { Haptics.error(); return }
+
+                var lineMap = additionSelections[entry.id] ?? [:]
+                var groupMap = lineMap[group.title] ?? [
+                    .with: [],
+                    .without: [],
+                    .side: []
+                ]
+                var withSet = groupMap[.with] ?? []
+
+                if withSet.contains(opt.name) {
+                    withSet.remove(opt.name)
+                } else {
+                    withSet.insert(opt.name)
+                    // Tap order tracking — used by the basket subtitle
+                    // builder elsewhere in the file.
+                    var order = additionOrder[entry.id] ?? []
+                    order.removeAll { $0 == opt.name }
+                    order.append(opt.name)
+                    additionOrder[entry.id] = order
+                }
+
+                groupMap[.with] = withSet
+                // Clear the unused legacy modes so they never leak into
+                // the subtitle / print path.
+                groupMap[.without] = []
+                groupMap[.side] = []
+
+                lineMap[group.title] = groupMap
+                additionSelections[entry.id] = lineMap
+
+                updateEntryPricingAndSubtitle(lineId: entry.id)
+                Haptics.light()
+            }
+        }
+    }
     
   
     private func isGroupRequired(_ group: ModifierGroup) -> Bool {
@@ -8917,8 +9043,9 @@ struct CashPointView: View {
 
         let groups = entry.item.modifiers ?? []
         let optionsMap = optionSelections[entry.id] ?? [:]
-        let additionsMap = additionSelections[entry.id] ?? [:]
-        let additionsModes = additionGroupModes[entry.id] ?? [:]
+        // Additions UI was removed (the old עם / בלי / בצד chips). The
+        // additionSelections / additionGroupModes state stays around because
+        // other helpers still reference it, but basketRow no longer reads it.
 
         let missingRequiredGroups: Set<String> = {
             var missing = Set<String>()
@@ -9023,6 +9150,15 @@ struct CashPointView: View {
                 }
 
                 if isExpanded {
+                    // Render every modifier group, both single-select
+                    // (`.options`) and multi-select (`.additions`). The
+                    // legacy עם / בלי / בצד three-mode chip flow has
+                    // been replaced with a flat multi-select inside the
+                    // `.additions` case — tap to toggle each item on/off,
+                    // no modes. This still uses the existing
+                    // `additionSelections` storage (under the `.with`
+                    // bucket) so the basket subtitle and pricing helpers
+                    // keep working unchanged.
                     if !groups.isEmpty {
                         VStack(alignment: .leading, spacing: 12) {
                             ForEach(groups.indices, id: \.self) { index in
@@ -9064,210 +9200,19 @@ struct CashPointView: View {
                                         )
 
                                     case .additions:
-                                        let selectedMode = additionsModes[g.title] ?? .with
-                                        let groupSelections = additionsMap[g.title] ?? [:]
-                                        let selectedSetForCurrentMode = groupSelections[selectedMode] ?? []
-
-                                        let withItems = Array(groupSelections[.with] ?? []).sorted()
-                                        let withoutItems = Array(groupSelections[.without] ?? []).sorted()
-                                        let sideItems = Array(groupSelections[.side] ?? []).sorted()
-
-                                       let withPills = withItems.map { "עם \($0)" }
-                                        let withoutPills = withoutItems.map { "בלי \($0)" }
-                                        let sidePills = sideItems.map { "\($0) בצד" }
-
-                                        let order = additionOrder[entry.id] ?? []
-
-                                        let summaryPills = order.compactMap { name -> String? in
-                                            if additionsMap[g.title]?[.with]?.contains(name) == true {
-                                                return "עם \(name)"
-                                            }
-                                            if additionsMap[g.title]?[.without]?.contains(name) == true {
-                                                return "בלי \(name)"
-                                            }
-                                            if additionsMap[g.title]?[.side]?.contains(name) == true {
-                                                return "\(name) בצד"
-                                            }
-                                            return nil
-                                        }
-
-                                        VStack(alignment: .leading, spacing: 10) {
-                                            HStack(spacing: 8) {
-                                                if !isRtl { Spacer() }
-
-                                                additionModeChip(
-                                                    title: "עם",
-                                                    selected: selectedMode == .with
-                                                ) {
-                                                    var map = additionGroupModes[entry.id] ?? [:]
-                                                    map[g.title] = .with
-                                                    additionGroupModes[entry.id] = map
-                                                    Haptics.light()
-                                                }
-
-                                                additionModeChip(
-                                                    title: "בלי",
-                                                    selected: selectedMode == .without
-                                                ) {
-                                                    var map = additionGroupModes[entry.id] ?? [:]
-                                                    map[g.title] = .without
-                                                    additionGroupModes[entry.id] = map
-                                                    Haptics.light()
-                                                }
-
-                                                additionModeChip(
-                                                    title: "בצד",
-                                                    selected: selectedMode == .side
-                                                ) {
-                                                    var map = additionGroupModes[entry.id] ?? [:]
-                                                    map[g.title] = .side
-                                                    additionGroupModes[entry.id] = map
-                                                    Haptics.light()
-                                                }
-
-                                                if isRtl { Spacer() }
-                                            }
-
-                                            if !summaryPills.isEmpty {
-                                                FlowLayout(data: summaryPills, spacing: 8) { text in
-                                                    Text(text)
-                                                        .font(.system(size: 15, weight: .semibold))
-                                                        .foregroundColor(.primary)
-                                                        .padding(.horizontal, 10)
-                                                        .padding(.vertical, 6)
-                                                        .background(Color.white.opacity(0.15))
-                                                        .clipShape(Capsule())
-                                                }
-                                            }
-                                            let rowStarts = Array(stride(from: 0, to: g.items.count, by: 3))
-
-                                            ForEach(rowStarts, id: \.self) { start in
-                                                let end = min(start + 3, g.items.count)
-                                                let rowItems = Array(g.items[start..<end])
-
-                                                HStack(spacing: 8) {
-                                                    if !isRtl { Spacer() }
-
-                                                    ForEach(rowItems.filter { isModifierVisible($0) }) { opt in
-                                                        let isSelected = selectedSetForCurrentMode.contains(opt.name)
-                                                        let key = freezeKey(productId: entry.item.id, groupTitle: g.title, optionName: opt.name)
-                                                        let frozenFromJson = (opt.status ?? 1) == 0
-                                                        let frozenLocal = (localFrozenOverrides[key] == true)
-                                                        let isFrozen = frozenFromJson || frozenLocal
-
-                                                        let shownName = displayModifierName(opt)
-
-                                                        Text(
-                                                            modifierPriceLabel(opt.extraPrice).isEmpty
-                                                            ? shownName
-                                                            : "\(shownName) \(modifierPriceLabel(opt.extraPrice))"
-                                                        )
-                                                        .font(.system(size: 17, weight: .medium))
-                                                        .padding(.horizontal, 16)
-                                                        .padding(.vertical, 8)
-                                                        .background(
-                                                            isSelected
-                                                            ? (colorScheme == .dark ? .white : .black)
-                                                            : Color(.systemGray5)
-                                                        )
-                                                        .foregroundColor(
-                                                            isSelected
-                                                            ? (colorScheme == .dark ? .black : .white)
-                                                            : .primary
-                                                        )
-                                                        .opacity(isFrozen ? 0.35 : 1.0)
-                                                        .overlay(alignment: .topTrailing) {
-                                                            if isFrozen {
-                                                                Image(systemName: "snowflake")
-                                                                    .font(.system(size: 10, weight: .bold))
-                                                                    .foregroundColor(.secondary)
-                                                                    .padding(.top, 2)
-                                                                    .padding(.trailing, 2)
-                                                            }
-                                                        }
-                                                        .clipShape(Capsule())
-                                                        .onTapGesture {
-                                                            guard !isFrozen else {
-                                                                Haptics.error()
-                                                                return
-                                                            }
-
-                                                            var lineMap = additionSelections[entry.id] ?? [:]
-                                                            var groupMap = lineMap[g.title] ?? [
-                                                                .with: [],
-                                                                .without: [],
-                                                                .side: []
-                                                            ]
-
-                                                            if isSelected {
-                                                                groupMap[selectedMode]?.remove(opt.name)
-
-                                                                additionOrder[entry.id]?.removeAll { $0 == opt.name }
-
-                                                            } else {
-                                                                groupMap[.with]?.remove(opt.name)
-                                                                groupMap[.without]?.remove(opt.name)
-                                                                groupMap[.side]?.remove(opt.name)
-
-                                                                groupMap[selectedMode, default: []].insert(opt.name)
-
-                                                                var order = additionOrder[entry.id] ?? []
-                                                                order.removeAll { $0 == opt.name }
-                                                                order.append(opt.name)            // ⭐ preserves tap order
-                                                                additionOrder[entry.id] = order
-                                                            }
-
-                                                            lineMap[g.title] = groupMap
-                                                            additionSelections[entry.id] = lineMap
-
-                                                            updateEntryPricingAndSubtitle(lineId: entry.id)
-                                                            Haptics.light()
-                                                        }
-                                                        .contextMenu {
-                                                            Button(isFrozen ? "הפשר" : "הקפא") {
-                                                                let targetEnabled = isFrozen
-                                                                let optimisticFrozen = !targetEnabled
-
-                                                                localFrozenOverrides[freezeKey(
-                                                                    productId: entry.item.id,
-                                                                    groupTitle: g.title,
-                                                                    optionName: opt.name
-                                                                )] = optimisticFrozen
-
-                                                                Haptics.light()
-
-                                                                Task {
-                                                                    let ok = await ModifierStatusAPI.setItemStatus(
-                                                                        productId: entry.item.id,
-                                                                        groupId: g.groupId,
-                                                                        title: g.title,
-                                                                        optionName: opt.name,
-                                                                        enabled: targetEnabled
-                                                                    )
-
-                                                                    await MainActor.run {
-                                                                        if ok {
-                                                                            Haptics.success()
-                                                                            safeReloadMenu(reason: "modifier freeze")
-                                                                        } else {
-                                                                            localFrozenOverrides[freezeKey(
-                                                                                productId: entry.item.id,
-                                                                                groupTitle: g.title,
-                                                                                optionName: opt.name
-                                                                            )] = frozenFromJson
-                                                                            Haptics.error()
-                                                                        }
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                        .environment(\.layoutDirection, .rightToLeft)
-                                                    }
-
-                                                    if isRtl { Spacer() }
-                                                }
+                                        // Plain multi-select chip group — tap an
+                                        // item to toggle it in/out of the line's
+                                        // selection. Backed by `additionSelections[
+                                        // lineId][groupTitle][.with]` so the rest
+                                        // of the basket plumbing (subtitle, price)
+                                        // sees the chosen items as ordinary
+                                        // additions.
+                                        VStack(alignment: .leading, spacing: 8) {
+                                            FlowLayout(data: g.items, spacing: 8) { opt in
+                                                additionsChip(entry: entry, group: g, opt: opt)
                                             }
                                         }
+                                        .frame(maxWidth: .infinity, alignment: isRtl ? .leading : .trailing)
                                         .padding(10)
                                     }
                                 }
@@ -9700,6 +9645,13 @@ struct CashProductTile: View {
     let isOutOfStock: Bool
     let isArchived: Bool
 
+    /// "8:00–17:00" when the product has per-day hours but the current
+    /// moment falls outside today's window. `"סגור היום"` when today is
+    /// marked closed. Nil when no badge should show.
+    private var hoursBadge: String? {
+        item.availableHoursBadge()
+    }
+
     var body: some View {
         ZStack(alignment: .topTrailing) {
 
@@ -9731,7 +9683,7 @@ struct CashProductTile: View {
                 RoundedRectangle(cornerRadius: 16)
                     .stroke(Color.black.opacity(0.05), lineWidth: 1)
             )
-            .opacity(isOutOfStock ? 0.4 : (isArchived ? 0.72 : 1.0))
+            .opacity(isOutOfStock ? 0.4 : (isArchived ? 0.72 : (hoursBadge != nil ? 0.55 : 1.0)))
 
             VStack(alignment: .trailing, spacing: 6) {
                 if isArchived {
@@ -9746,6 +9698,16 @@ struct CashProductTile: View {
 
                 if isOutOfStock {
                     Text("אזל")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color(.systemGray5))
+                        .clipShape(Capsule())
+                }
+
+                if let hoursBadge {
+                    Text(hoursBadge)
                         .font(.system(size: 12, weight: .bold))
                         .foregroundColor(.secondary)
                         .padding(.horizontal, 8)

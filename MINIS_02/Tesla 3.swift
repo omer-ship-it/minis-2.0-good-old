@@ -877,6 +877,7 @@ struct RestaurantAIHomeMock: View {
     let onDismissSetup: () -> Void
 
     @StateObject private var vm = DashboardVM()
+    @Environment(\.scenePhase) private var scenePhase
 
     @State private var shops: [ShopOption] = []
     @State private var selectedShop: ShopOption = .init(id: 12, name: "בית העם")
@@ -1146,6 +1147,19 @@ struct RestaurantAIHomeMock: View {
             vm.stopPolling()
             pinnedRefreshTimer?.invalidate()
             pinnedRefreshTimer = nil
+        }
+        .onChange(of: scenePhase) { phase in
+            // Coming back from background: a Task.sleep may have been
+            // suspended for minutes; force an immediate refresh so the
+            // hero number is current within a second of unlock.
+            if phase == .active {
+                vm.refreshNow(reason: "scenePhase.active")
+            }
+        }
+        .onChange(of: selectedShop.id) { newId in
+            // Switching shops should never strand stale numbers from the
+            // previous shop on screen.
+            vm.startPolling(miniAppId: newId)
         }
     }
 

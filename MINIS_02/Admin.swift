@@ -28,6 +28,23 @@ struct AdminProductDraft: Identifiable {
     var bundleSetProductIdsText: String = ""   // "834,835"
     var bundleMaxFreeQty: Int = 1
     var bundleStrategy: String = "most_expensive"
+
+    // ✅ NEW: per-weekday available hours
+    // - `limitHoursEnabled = false` → no restriction (won't be sent).
+    // - `weekdayHours` stores 7 entries keyed by weekday (0=Sunday … 6=Saturday).
+    var limitHoursEnabled: Bool = false
+    var weekdayHours: [WeekdayHours] = AdminProductDraft.defaultWeekdayHours()
+
+    static func defaultWeekdayHours() -> [WeekdayHours] {
+        (0...6).map { wd in
+            WeekdayHours(
+                weekday: wd,
+                isOpen: true,
+                openMinutes: 8 * 60,        // 08:00
+                closeMinutes: 17 * 60       // 17:00
+            )
+        }
+    }
 }
 
 // MARK: - Modifier drafts
@@ -433,6 +450,175 @@ struct AdminProductEditorView: View {
         }
         .padding(.vertical, 4)
     }
+    // MARK: - Limit hours (per weekday)
+
+    /// Sunday-first ordering used by the editor regardless of locale.
+    /// Index 0 = Sunday … 6 = Saturday — matches `WeekdayHours.weekday`.
+    private var weekdayLabels: [String] {
+        if isRtl {
+            return ["א'", "ב'", "ג'", "ד'", "ה'", "ו'", "שבת"]
+        } else {
+            return ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+        }
+    }
+
+    /// Helpers to bind a single weekday entry by index.
+    private func weekdayBinding(_ idx: Int) -> Binding<WeekdayHours> {
+        Binding(
+            get: {
+                if idx < draft.weekdayHours.count {
+                    return draft.weekdayHours[idx]
+                }
+                return WeekdayHours(weekday: idx)
+            },
+            set: { newValue in
+                // Make sure the array always has 7 slots in weekday order.
+                if draft.weekdayHours.count != 7 {
+                    draft.weekdayHours = AdminProductDraft.defaultWeekdayHours()
+                }
+                if idx < draft.weekdayHours.count {
+                    draft.weekdayHours[idx] = newValue
+                }
+            }
+        )
+    }
+
+    /// Convert a weekday's open/close minutes to a Date (today at H:MM)
+    /// for use with SwiftUI `DatePicker`. We only round-trip H:MM.
+    private func dateFromMinutes(_ minutes: Int) -> Date {
+        let cal = Calendar.current
+        let start = cal.startOfDay(for: Date())
+        let clamped = max(0, min(24 * 60 - 1, minutes))
+        return cal.date(byAdding: .minute, value: clamped, to: start) ?? start
+    }
+
+    private func minutesFromDate(_ d: Date) -> Int {
+        let cal = Calendar.current
+        let h = cal.component(.hour, from: d)
+        let m = cal.component(.minute, from: d)
+        return max(0, min(24 * 60, h * 60 + m))
+    }
+
+    private var limitHoursSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(isRtl ? "שעות זמינות" : "Available hours")
+                .font(.primariesDemi(14))
+
+            Toggle(isRtl ? "הגבל שעות לפי יום" : "Limit hours per day",
+                   isOn: $draft.limitHoursEnabled)
+                .font(.system(size: 16, weight: .semibold))
+                .toggleStyle(.switch)
+                .tint(.blue)
+                .onChange(of: draft.limitHoursEnabled) { newValue in
+                    if newValue {
+                        // Seed editor defaults (08:00–17:00) when:
+                        //  • the row count got out of sync, or
+                        //  • the existing rows are the "all-day-open" sentinel
+                        //    (open=0 / close=24:00) — i.e. nothing was ever
+                        //    saved for this product.
+                        let isAllDayOpen = draft.weekdayHours.allSatisfy {
+                            $0.isOpen && $0.openMinutes == 0 && $0.closeMinutes == 24 * 60
+                        }
+                        if draft.weekdayHours.count != 7 || isAllDayOpen {
+                            draft.weekdayHours = AdminProductDraft.defaultWeekdayHours()
+                        }
+                    }
+                    Haptics.light()
+                }
+
+            if draft.limitHoursEnabled {
+                Text(isRtl
+                     ? "כשמופעל, המוצר יוסתר מהלקוח מחוץ לשעות שנבחרו."
+                     : "When on, the product is hidden from customers outside the selected hours.")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.secondary)
+                    .padding(.bottom, 2)
+
+                VStack(spacing: 8) {
+                    ForEach(0..<7, id: \.self) { idx in
+                        let binding = weekdayBinding(idx)
+                        WeekdayHoursRow(
+                            isRtl: isRtl,
+                            label: weekdayLabels[idx],
+                            entry: binding,
+                            dateFromMinutes: dateFromMinutes,
+                            minutesFromDate: minutesFromDate
+                        )
+                    }
+                }
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private struct WeekdayHoursRow: View {
+        let isRtl: Bool
+        let label: String
+        @Binding var entry: WeekdayHours
+        let dateFromMinutes: (Int) -> Date
+        let minutesFromDate: (Date) -> Int
+
+        var body: some View {
+            HStack(alignment: .center, spacing: 10) {
+                // Weekday + on/off
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(label)
+                        .font(.system(size: 15, weight: .bold))
+                    Text(entry.isOpen
+                         ? (isRtl ? "פתוח" : "Open")
+                         : (isRtl ? "סגור" : "Closed"))
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(entry.isOpen ? .secondary : .red)
+                }
+                .frame(width: 56, alignment: .leading)
+
+                Toggle("", isOn: Binding(
+                    get: { entry.isOpen },
+                    set: { entry.isOpen = $0 }
+                ))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .tint(.blue)
+
+                Spacer(minLength: 4)
+
+                if entry.isOpen {
+                    DatePicker(
+                        "",
+                        selection: Binding(
+                            get: { dateFromMinutes(entry.openMinutes) },
+                            set: { entry.openMinutes = minutesFromDate($0) }
+                        ),
+                        displayedComponents: .hourAndMinute
+                    )
+                    .labelsHidden()
+
+                    Text("→")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundColor(.secondary)
+
+                    DatePicker(
+                        "",
+                        selection: Binding(
+                            get: { dateFromMinutes(entry.closeMinutes) },
+                            set: { entry.closeMinutes = minutesFromDate($0) }
+                        ),
+                        displayedComponents: .hourAndMinute
+                    )
+                    .labelsHidden()
+                } else {
+                    Text(isRtl ? "—" : "—")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.secondary)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(Color(.secondarySystemBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+        }
+    }
+
     // ✅ KEEP OLD QUICK PICKER (segment) while testing
     private enum LegacyStation: String, CaseIterable, Identifiable {
         case none = ""
@@ -551,6 +737,7 @@ struct AdminProductEditorView: View {
                     Section { headerImageSection }
                         Section { mainFieldsSectionWithoutBundle }
                         Section { bundleSection }
+                        Section { limitHoursSection }
 
 
                     Section(
@@ -2400,6 +2587,15 @@ extension AdminProductDraft {
         let MaxFreeQty: Int
         let Strategy: String
     }
+
+    /// Per-day available hours, encoded under JsonData["AvailableHours"].
+    /// Matches `WeekdayHours.CodingKeys` (weekday/isOpen/open/close).
+    private struct AvailableHoursJson: Encodable {
+        let weekday: Int
+        let isOpen: Bool
+        let open: Int
+        let close: Int
+    }
     
     
     /// Build the payload for the upsert API.
@@ -2515,6 +2711,26 @@ extension AdminProductDraft {
         } else {
             // ✅ if no ids yet, don't send Bundle at all
             injectedJsonDict.removeValue(forKey: "Bundle")
+        }
+
+        // ✅ NEW: per-weekday available hours.
+        // Send a clean array only when the user enabled the limit, otherwise
+        // explicitly NULL so the server clears any prior value.
+        if self.limitHoursEnabled && !self.weekdayHours.isEmpty {
+            let payload = self.weekdayHours
+                .sorted { $0.weekday < $1.weekday }
+                .map { h in
+                    AvailableHoursJson(
+                        weekday: max(0, min(6, h.weekday)),
+                        isOpen: h.isOpen,
+                        open: max(0, min(24 * 60, h.openMinutes)),
+                        close: max(0, min(24 * 60, h.closeMinutes))
+                    )
+                }
+            injectedJsonDict["AvailableHours"] = .init(payload)
+        } else {
+            // Encode an explicit empty array so the merge clears any prior value.
+            injectedJsonDict["AvailableHours"] = .init([AvailableHoursJson]())
         }
 
         // -----------------------------

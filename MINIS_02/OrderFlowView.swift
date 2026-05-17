@@ -3,6 +3,20 @@ import UniformTypeIdentifiers
 import Kingfisher
 import Combine
 
+// 🆕 (2026-05-17) Hole 118: sub-shekel tolerance for "fully
+// paid". The cash keypad is whole-shekel only, but a percent
+// discount can produce fractional grandTotals (10% off ₪15
+// hot bev → ₪13.50 due). Cashier types ₪13, system used to
+// leave ₪0.50 "owed" → order stuck in Open Orders → staff
+// cancelled it → real cash already in drawer became
+// unaccounted surplus (or card never actually charged →
+// lost sale). Treat any gap ≤₪0.99 as the cashier's intent
+// to fully close. Real partials (≥₪1 short) are unaffected.
+//
+// Replaces the previous `<= 0.1` tolerance that only handled
+// floating-point dust.
+fileprivate let fullyPaidTolerance: Double = 0.99
+
 struct OrderFlowView: View {
     let onSendToKitchen: () -> Void      // injected from CashPointView
     @State private var showManualCardEntry = false
@@ -675,7 +689,9 @@ struct OrderFlowView: View {
         let discountOff = studentDiscountActive ? max(0, total - effectiveTotal) : 0
         let tipOff      = max(0, tipAmount)
 
-        let fullyPaid = remainingToPay <= 0.1
+        // 🆕 (2026-05-17) Hole 118: widened from 0.1 to
+        // fullyPaidTolerance (₪0.99) — see header comment.
+        let fullyPaid = remainingToPay <= fullyPaidTolerance
 
         if fullyPaid {
             clearPartialPaySnapshot() // ✅ add
@@ -935,7 +951,9 @@ struct OrderFlowView: View {
     let resumedOrderId: Int?
 
     private var isOrderFullyPaid: Bool {
-        remainingToPay <= 0.1
+        // 🆕 (2026-05-17) Hole 118: widened from 0.1 to
+        // fullyPaidTolerance (₪0.99) — see header comment.
+        remainingToPay <= fullyPaidTolerance
     }
     private func buildPaymentSummary() -> OrderAPI.PaymentSummary {
         let card = cardPaidTotal
@@ -1382,6 +1400,30 @@ struct OrderFlowView: View {
         }
     }
 
+    // 🆕 (2026-05-11): manual "בדוק מצב עסקה" tap — does a verify-replay using
+    //   the EXISTING idempotency key (no fresh key minted). Server's Step 3a-bis
+    //   short-circuits to the row's current state (paid / declined / pending),
+    //   so the cashier discovers what actually happened on the server without
+    //   risking a second Z-Credit call. Used when state is .failed (network/
+    //   timeout/unknown) and the cashier wants to confirm before deciding
+    //   whether to retry or check the Z-Credit dashboard.
+    @MainActor
+    private func checkPaymentStatusNow() {
+        print("[ENDPOINT] TAP bdok-mtsav-iska state=\(currentCardPaymentStateLabel())")
+        let currentKey = PaymentAttemptStore.shared.activeAttempt?.idempotencyKey ?? "nil"
+        print("[OrderFlow] checkPaymentStatusNow — verifyReplay with key=\(currentKey)")
+        if let pending = currentPendingCardContext() {
+            dispatchPendingCardAttempt(pending, sendKind: .verifyReplay)
+        } else if isSplitMode, let idx = activeSplitIndex,
+                  splitParts.indices.contains(idx), !splitParts[idx].isPaid {
+            startCardForSplitPart(index: idx, sendKind: .verifyReplay)
+        } else {
+            // No pending context to verify against — fall back to standard retry.
+            print("[OrderFlow] checkPaymentStatusNow — no pending context, falling back to retryPayment()")
+            retryPayment()
+        }
+    }
+
     @MainActor
     private func startFreshRetry() {
         if retrySendKind() == .freshRetry {
@@ -1403,6 +1445,15 @@ struct OrderFlowView: View {
 
     @MainActor
     private func shouldEnterReconciling(for result: ZCreditResult) -> Bool {
+        // 🆕 (2026-05-11): Pending paths always enter reconciling — never hard failure.
+        // Server is explicitly signaling "still in flight / transient", so iPad must
+        // stay in verify-replay mode (same idem key) instead of switching to the
+        // fresh-retry button. Critical for the server's in-flight guard to work.
+        if let path = result.rawPath,
+           path == "charge_in_flight" || path == "pending_fast" || path == "status_pending" {
+            return true
+        }
+
         let normalized = result.message.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let hardFailureFragments = [
             "שגיאה בתחילת עסקה במסוף",
@@ -2067,28 +2118,44 @@ struct OrderFlowView: View {
                                 .font(.system(size: 16, weight: .semibold))
                             } else {
                                 // Credit card for this split row
+                                //
+                                // Uniform 2-second tap-lock so the in-flight cancel
+                                // (`ZCreditPaymentHandler.cancelCurrent()` inside
+                                // `startCardForSplitPart`) has time to land on the
+                                // pinpad before we kick off the next charge. Without
+                                // it, a quick re-tap can race the cancel and the
+                                // PinPad ends up running the previous transaction.
+                                // While the lock is held the button shows a small
+                                // ProgressView so the cashier sees that something
+                                // is in progress and doesn't think the tap missed.
                                 Button {
                                     guard !isPaying, !splitCardTapLocked else { return }
                                     splitCardTapLocked = true
                                     payError = nil
                                     activeSplitIndex = idx
 
-                                    let settleDelay: TimeInterval = {
-                                        guard let t = lastCashPaidAt else { return 0.15 }
-                                        return (Date().timeIntervalSince(t) < 2.0) ? 0.9 : 0.15
-                                    }()
-
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + settleDelay) {
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                                        splitCardTapLocked = false
                                         startCardForSplitPart(index: idx)
                                     }
                                 } label: {
-                                    Text(isRtl ? "אשראי" : "Credit card")
-                                        .font(.system(size: 16, weight: .semibold))
-                                        .padding(.horizontal, 12)
-                                        .padding(.vertical, 8)
-                                        .background(Color(.systemGray5))
-                                        .clipShape(Capsule())
+                                    HStack(spacing: 6) {
+                                        if splitCardTapLocked {
+                                            ProgressView()
+                                                .progressViewStyle(.circular)
+                                                .controlSize(.small)
+                                                .tint(.primary)
+                                        }
+                                        Text(isRtl ? "אשראי" : "Credit card")
+                                            .font(.system(size: 16, weight: .semibold))
+                                    }
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 8)
+                                    .background(Color(.systemGray5))
+                                    .clipShape(Capsule())
+                                    .opacity(splitCardTapLocked ? 0.7 : 1.0)
                                 }
+                                .disabled(splitCardTapLocked)
 
                                 // Cash for this split row
                                 Button {
@@ -2180,10 +2247,28 @@ struct OrderFlowView: View {
     
     private func handleChargeEntered() {
         let ts = { let f = DateFormatter(); f.dateFormat = "HH:mm:ss.SSS"; return f.string(from: Date()) }()
-        // ✅ Auto-start ONLY for the clean "full card" flow
-        guard !paymentStarted else { print("[TipRestart] \(ts) handleChargeEntered SKIP paymentStarted"); return }
-        guard !tipRestartPending else { print("[TipRestart] \(ts) handleChargeEntered SKIP tipRestartPending"); return }
-        guard !isPaying else { print("[TipRestart] \(ts) handleChargeEntered SKIP isPaying"); return }
+        // 🆕 (2026-05-14) Hole 48: re-enable auto-start of card charge
+        // on charge-step entry — mirrors the same fix in Minis-3.0.
+        //
+        // History: this was disabled on 2026-05-13 because the
+        // auto-fire raced with modifier changes (discount/tip taps in
+        // the seconds between step entry and PinPad commit, incident
+        // rows 59693/59694).
+        //
+        // Why it's safe now:
+        //   - `restartPaymentAfterTipChangeIfNeeded` and
+        //     `toggleStudentDiscount` already guard modifier-driven
+        //     restarts behind `hasAnyPayment` and cancel + 2s window
+        //     before re-firing.
+        //   - The guards below skip auto-start whenever there's any
+        //     in-flight payment, split state, cash flow, or sheet open,
+        //     so the auto-fire only happens on a clean first entry.
+        //   - Discount/tip taps AFTER the auto-fire trigger the
+        //     existing cancel-and-restart path with the new amount,
+        //     which is the right behaviour.
+        guard !paymentStarted else { print("[ChargeStep] \(ts) entry SKIP paymentStarted"); return }
+        guard !tipRestartPending else { print("[ChargeStep] \(ts) entry SKIP tipRestartPending"); return }
+        guard !isPaying else { print("[ChargeStep] \(ts) entry SKIP isPaying"); return }
         guard !payingWithCash else { return }
         guard !isSplitMode else { return }
         guard manualCashTargetAmount == nil else { return }
@@ -2192,30 +2277,17 @@ struct OrderFlowView: View {
         guard !showSplitSheet else { return }
         guard !showSplitAmountPad else { return }
         guard (cardPaidTotal + cashPaidTotal) < 0.01 else { return }
-        print("[TipRestart] \(ts) handleChargeEntered PASSED all guards → auto-start")
 
-        // ✅ Clear any stale attempt from a previous order — all guards above
-        // confirm no payment has been made for the current order, so any
-        // lingering attempt in the store belongs to an earlier session.
+        // ✅ Pre-emptive cleanup: clear any stale attempt from a
+        // previous order before auto-starting the new one.
         if PaymentAttemptStore.shared.activeAttempt != nil {
             print("[OrderFlow] handleChargeEntered clearing stale attempt before auto-start")
             PaymentAttemptStore.shared.markFailedFinal()
             PaymentAttemptStore.shared.clearIfTerminal()
         }
 
-        paymentStarted = true
-        payError = nil
-
-        beginPayAttempt("AUTO")
-
-
-        DispatchQueue.main.async {
-            ensureTicketNow(reason: "handleChargeEntered auto-start")
-               if ticketNow > 0 {
-                   pLog(.uiTap, ticket: ticketNow, amount: round2(currentTargetAmount), reason: "AUTO start (handleChargeEntered)")
-               }
-            startPayment()
-        }
+        print("[ChargeStep] \(ts) entry → auto-starting card charge (auto-start re-enabled 2026-05-14)")
+        startCardForRemainingNow()
     }
     
     /// Called after the tip sheet closes to restart ZCredit with the new total (including tip)
@@ -2264,21 +2336,30 @@ struct OrderFlowView: View {
             return
         }
 
-        // 6) Mark pending — blocks handleChargeEntered() from racing us.
-        //    The 6-second timer starts HERE (after cancel), guaranteeing
-        //    the terminal has time to finish the cancel before we start.
+        // 6) 2-second cancel-then-restart window (2026-05-13).
+        //
+        // Matches the same delay used in `toggleStudentDiscount`. The
+        // previous 0.5s was too short — Z-Credit's cancel hadn't
+        // always reached the PinPad by the time the new /charge
+        // fired, which could land the new commit on a still-active
+        // transaction. 2s gives the cancel time to propagate.
+        //
+        // tipRestartPending / paymentStarted block `handleChargeEntered`
+        // from auto-firing during the window (defensive — auto-fire
+        // on charge-step entry is now disabled, but we keep the
+        // flags for safety).
         tipRestartPending = true
         paymentStarted = true
-        print("[TipRestart] \(ts) scheduling startPayment in 0.5s")
+        print("[TipRestart] \(ts) cancel sent, scheduling startPayment in 2s")
 
         let work = DispatchWorkItem { [self] in
             let ts2 = { let f = DateFormatter(); f.dateFormat = "HH:mm:ss.SSS"; return f.string(from: Date()) }()
-            print("[TipRestart] \(ts2) FIRING startPayment (scheduled at \(ts))")
+            print("[TipRestart] \(ts2) FIRING startPayment (cancel+2s elapsed, scheduled at \(ts))")
             tipRestartPending = false
             startPayment()
         }
         restartWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: work)
     }
     
     private struct TerminalActivityRing: View {
@@ -2390,20 +2471,35 @@ struct OrderFlowView: View {
             return
         }
 
-        // 5) Block handleChargeEntered() from racing, wait 6s then restart
+        // 5) 3-second cancel-then-restart window (was 2s; bumped 2026-05-15).
+        //
+        // We need to wait long enough for Z-Credit's cancelCurrent to
+        // actually propagate to the PinPad before firing a new
+        // commit with the modified amount — otherwise the new /charge
+        // can collide with the tail-end of the still-cancelling old
+        // transaction. 2s was the original empirical sweet spot but
+        // ops asked for an extra second of margin so the modified
+        // amount lands cleanly even on slower terminals; cashier
+        // pacing still feels fine at 3s.
+        //
+        // tipRestartPending / paymentStarted block `handleChargeEntered`
+        // from auto-firing during the window — though with the auto-
+        // fire removed on charge-step entry (see handleChargeEntered
+        // above), this is now belt-and-suspenders defensive.
+        let restartDelay: TimeInterval = 3.0
         tipRestartPending = true
         paymentStarted = true
-        print("[DiscountRestart] \(ts) scheduling startPayment in 3s")
+        print("[DiscountRestart] \(ts) cancel sent, scheduling startPayment in \(restartDelay)s")
 
         let work = DispatchWorkItem { [self] in
             let ts2 = { let f = DateFormatter(); f.dateFormat = "HH:mm:ss.SSS"; return f.string(from: Date()) }()
-            print("[DiscountRestart] \(ts2) FIRING startPayment (scheduled at \(ts))")
+            print("[DiscountRestart] \(ts2) FIRING startPayment (cancel+\(restartDelay)s elapsed, scheduled at \(ts))")
             tipRestartPending = false
             startPayment()
         }
 
         restartWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + restartDelay, execute: work)
     }
     
     private func retryZCreditNow() {
@@ -2462,7 +2558,12 @@ struct OrderFlowView: View {
     private var isCashEnough: Bool {
         let received = round2(cashAmount)
         let due      = round2(cashDueNow)
-        return received >= due && due >= 0.01
+        // 🆕 (2026-05-17) Hole 118: accept whole-shekel cash
+        // for fractional due (cashier types ₪13 for ₪13.50)
+        // by widening the gate to fullyPaidTolerance. Without
+        // this, the "Paid" button stayed disabled and the
+        // cashier had no clean path to close the order.
+        return received + fullyPaidTolerance >= due && due >= 0.01
     }
     
     private var chargeStep: some View {
@@ -2488,29 +2589,41 @@ struct OrderFlowView: View {
                 VStack(spacing: 24) {
 
                     // 🔢 Big amount + discount/tip lines
+                    //
+                    // Once the order is fully paid (cash + card cover the
+                    // bill) `displayAmount` collapses to 0. Showing a giant
+                    // "0.00" on the success state looks broken, so we swap
+                    // it for a quiet "שולם" label and skip the discount/tip
+                    // sub-rows entirely until the next payment session.
                     VStack(spacing: 4) {
-                        Text(String(format: "%.2f", displayAmount))
-                            .font(kioskFont(50, weight: .heavy))
+                        if displayAmount > 0.01 {
+                            Text(String(format: "%.2f", displayAmount))
+                                .font(kioskFont(50, weight: .heavy))
 
-                        if studentDiscountActive, studentDiscountValue > 0 {
-                            Text(
-                                isRtl
-                                ? String(format: "הנחת סטודנט 10%%  -\(currency)%.2f", studentDiscountValue)
-                                : String(format: "Student 10%% discount  -\(currency)%.2f", studentDiscountValue)
-                            )
-                            .font(.system(size: 13))
-                            .foregroundColor(.secondary)
-                        }
-
-                        if tipAmount > 0 {
-                            Text(
-                                String(
-                                    format: isRtl ? "טיפ: \(currency)%.2f" : "Tip: \(currency)%.2f",
-                                    tipAmount
+                            if studentDiscountActive, studentDiscountValue > 0 {
+                                Text(
+                                    isRtl
+                                    ? String(format: "הנחת סטודנט 10%%  -\(currency)%.2f", studentDiscountValue)
+                                    : String(format: "Student 10%% discount  -\(currency)%.2f", studentDiscountValue)
                                 )
-                            )
-                            .font(.system(size: 13))
-                            .foregroundColor(.secondary)
+                                .font(.system(size: 13))
+                                .foregroundColor(.secondary)
+                            }
+
+                            if tipAmount > 0 {
+                                Text(
+                                    String(
+                                        format: isRtl ? "טיפ: \(currency)%.2f" : "Tip: \(currency)%.2f",
+                                        tipAmount
+                                    )
+                                )
+                                .font(.system(size: 13))
+                                .foregroundColor(.secondary)
+                            }
+                        } else {
+                            Text(isRtl ? "שולם" : "Paid")
+                                .font(kioskFont(34, weight: .heavy))
+                                .foregroundColor(.green)
                         }
                     }
 
@@ -2729,7 +2842,10 @@ struct OrderFlowView: View {
                                         ? verifyProgressMessage
                                         : (cardPaymentState == .declined
                                             ? (isRtl ? "התשלום נדחה" : "Payment declined")
-                                            : (isRtl ? "החיוב לא הושלם" : "Payment not completed"))
+                                            // 🆕 (2026-05-11): .failed = communication/timeout issue,
+                                            //   not an explicit server decline. Label it as such so
+                                            //   the cashier knows to verify before re-charging.
+                                            : (isRtl ? "בעיית תקשורת" : "Communication problem"))
                                 )
                                     .font(kioskFont(20, weight: .semibold))
                                     .multilineTextAlignment(.center)
@@ -2747,6 +2863,20 @@ struct OrderFlowView: View {
                                         RoundedRectangle(cornerRadius: 16)
                                             .fill(Color(.secondarySystemBackground))
                                     )
+
+                                // 🆕 (2026-05-11): show idempotency key (cashier-verifiable handle)
+                                //   so ops/cashier can cross-check with Z-Credit dashboard.
+                                if cardPaymentState == .failed || cardPaymentState == .declined,
+                                   let idemKey = PaymentAttemptStore.shared.activeAttempt?.idempotencyKey,
+                                   !idemKey.isEmpty {
+                                    Text(
+                                        (isRtl ? "מזהה ניסיון: " : "Attempt id: ")
+                                        + idemKey.prefix(8)
+                                    )
+                                        .font(.system(size: 11, weight: .regular, design: .monospaced))
+                                        .foregroundColor(.secondary.opacity(0.7))
+                                        .multilineTextAlignment(.center)
+                                }
 
                                 if cardPaymentState == .verifying {
                                     Text(verifyHoldMessage)
@@ -2769,13 +2899,34 @@ struct OrderFlowView: View {
                                     }
                                 }
 
-                                // 🆕 (2026-05-08): Try Again button for self-cashpoint declined path.
-                                //    Cashpoint mode has its own retry CTA (the Card button at
-                                //    line ~2774 swaps to "נסה שוב" when cardPaymentState is
-                                //    .declined / .failed). Self-cashpoint never sees that block,
-                                //    so without this we have no retry path for the customer.
-                                if !cashPointMode &&
-                                   (cardPaymentState == .declined || cardPaymentState == .failed) {
+                                // 🆕 (2026-05-11): self-cashpoint retry CTA — split by state.
+                                //   • .failed (communication problem) → "בדוק מצב עסקה" (verify-replay,
+                                //     same idem key). Asks server what really happened without
+                                //     triggering a new Z-Credit call.
+                                //   • .declined (real server decline) → "נסה שוב" (fresh retry,
+                                //     new idem key). Cashier explicitly wants another attempt.
+                                //
+                                // The verify-replay endpoint lives on the new `/charge` path.
+                                // When the shop runs on legacy `/start` (`payments.useChargeV2 = false`)
+                                // there's nothing to verify — the only sensible UX is a fresh
+                                // retry, so we suppress this button entirely and rely on the
+                                // sibling "נסה שוב" path below.
+                                if !cashPointMode
+                                    && cardPaymentState == .failed
+                                    && UserDefaults.standard.bool(forKey: "payments.useChargeV2") {
+                                    Button {
+                                        print("[ENDPOINT] TAP bdok-mtsav-iska-SELF state=\(cardPaymentState)")
+                                        checkPaymentStatusNow()
+                                    } label: {
+                                        Text(isRtl ? "בדוק מצב עסקה" : "Check transaction status")
+                                            .font(kioskFont(18, weight: .bold))
+                                            .foregroundColor(.white)
+                                            .frame(width: 280, height: 50)
+                                            .background(MenuTheme.buttonBackground)
+                                            .clipShape(RoundedRectangle(cornerRadius: 18))
+                                    }
+                                }
+                                if !cashPointMode && cardPaymentState == .declined {
                                     Button {
                                         print("[ENDPOINT] TAP nse-shov-SELF state=\(cardPaymentState)")
                                         retryPayment()
@@ -2810,21 +2961,39 @@ struct OrderFlowView: View {
                         VStack(spacing: 12) {
 
                             if shouldShowCardButton {
+                                // The "בדוק מצב עסקה" verify-replay flow only exists on the
+                                // new `/charge` endpoint. When the shop runs on legacy
+                                // `/start` (`payments.useChargeV2 = false`) we collapse the
+                                // .failed state into the same "נסה שוב" UX as .declined —
+                                // a fresh retry is the only thing the legacy path supports.
+                                let useChargeV2 = UserDefaults.standard.bool(forKey: "payments.useChargeV2")
+                                let showVerifyReplay = (cardPaymentState == .failed) && useChargeV2
+
                                 Button {
-                                    if cardPaymentState == .declined || cardPaymentState == .failed {
-                                        print("[ENDPOINT] TAP nse-shov state=\(cardPaymentState) isPaying=\(isPaying)")
+                                    // 🆕 (2026-05-11): three branches by state.
+                                    //   • .failed (and useChargeV2) → check status (verifyReplay, same key)
+                                    //   • .declined / .failed-on-legacy → fresh retry (new key)
+                                    //   • idle/etc → start fresh card payment
+                                    if showVerifyReplay {
+                                        print("[ENDPOINT] TAP bdok-mtsav-iska state=\(cardPaymentState) isPaying=\(isPaying)")
+                                        checkPaymentStatusNow()
+                                    } else if cardPaymentState == .declined || cardPaymentState == .failed {
+                                        print("[ENDPOINT] TAP nse-shov state=\(cardPaymentState) isPaying=\(isPaying) useChargeV2=\(useChargeV2)")
                                         retryPayment()
                                     } else {
                                         print("[ENDPOINT] TAP card-button state=\(cardPaymentState) isPaying=\(isPaying)")
                                         startCardForRemainingNow()
                                     }
                                 } label: {
-                                    Text((cardPaymentState == .declined || cardPaymentState == .failed)
-                                         ? (isRtl ? "נסה שוב" : "Try again")
-                                         : (isRtl ? "תשלום באשראי" : "Pay by card"))
+                                    // Label tracks the same three branches.
+                                    Text(showVerifyReplay
+                                         ? (isRtl ? "בדוק מצב עסקה" : "Check transaction status")
+                                         : ((cardPaymentState == .declined || cardPaymentState == .failed)
+                                            ? (isRtl ? "נסה שוב" : "Try again")
+                                            : (isRtl ? "תשלום באשראי" : "Pay by card")))
                                         .font(.system(size: 18, weight: .semibold))
                                         .foregroundColor(terminalActive ? .gray : primaryButtonForeground)
-                                        .frame(width: 240, height: 50)
+                                        .frame(width: showVerifyReplay ? 280 : 240, height: 50)
                                         .background(terminalActive ? Color(.systemGray4) : primaryButtonBackground)
                                         .clipShape(RoundedRectangle(cornerRadius: 18))
                                 }
@@ -2990,8 +3159,20 @@ struct OrderFlowView: View {
                                     .font(.system(size: 16, weight: .semibold))
                                 } else {
                                     // Card
+                                    //
+                                    // Uniform 2-second tap-lock so the cancel issued
+                                    // here (`ZCreditPaymentHandler.cancelCurrent()`)
+                                    // has time to land on the PinPad before the
+                                    // next charge starts. Without it a quick
+                                    // re-tap can race the cancel and the PinPad
+                                    // ends up running the previous transaction.
+                                    // While the lock is held the button shows a
+                                    // small ProgressView so the cashier sees that
+                                    // something is in progress.
                                     Button {
+                                        guard !isPaying, !splitCardTapLocked else { return }
                                         print("[Split] iPad card tapped row=\(idx) activeReqs=\(activePaymentRequestCount) isPaying=\(isPaying) storeAttempt=\(PaymentAttemptStore.shared.activeAttempt?.state.rawValue ?? "nil")")
+                                        splitCardTapLocked = true
                                         if !AppConfig.isDemoMode {
                                             ZCreditPaymentHandler.shared.cancelCurrent()
                                         }
@@ -3001,17 +3182,28 @@ struct OrderFlowView: View {
                                         activeSplitIndex = idx
                                         payError = nil
 
-                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                                            splitCardTapLocked = false
                                             startCardForSplitPart(index: idx)
                                         }
                                     } label: {
-                                        Text(isRtl ? "אשראי" : "Card")
-                                            .font(.system(size: 16, weight: .semibold))
-                                            .padding(.horizontal, 14)
-                                            .padding(.vertical, 8)
-                                            .background(Color(.systemGray5))
-                                            .clipShape(Capsule())
+                                        HStack(spacing: 6) {
+                                            if splitCardTapLocked {
+                                                ProgressView()
+                                                    .progressViewStyle(.circular)
+                                                    .controlSize(.small)
+                                                    .tint(.primary)
+                                            }
+                                            Text(isRtl ? "אשראי" : "Card")
+                                                .font(.system(size: 16, weight: .semibold))
+                                        }
+                                        .padding(.horizontal, 14)
+                                        .padding(.vertical, 8)
+                                        .background(Color(.systemGray5))
+                                        .clipShape(Capsule())
+                                        .opacity(splitCardTapLocked ? 0.7 : 1.0)
                                     }
+                                    .disabled(splitCardTapLocked)
                                   
                                     // Cash
                                     Button {
@@ -3074,20 +3266,25 @@ struct OrderFlowView: View {
                     }
                     // 2️⃣ Split mode
                     else if isSplitMode {
-                        VStack(spacing: 4) {
-                            Text(isRtl ? "יתרה לתשלום" : "Remaining to pay")
-                                .font(.system(size: 16))
-                                .foregroundColor(.secondary)
-                            Text(String(format: "\(currency)%.2f", max(remainingToPay, 0)))
-                                .font(.system(size: 24, weight: .heavy))
-                        }
+                        // Only show "Remaining to pay" while there's actually
+                        // money left to collect. Once the order is fully paid
+                        // we don't want a stray "₪0.00 remaining" line.
+                        if remainingToPay > 0.01 {
+                            VStack(spacing: 4) {
+                                Text(isRtl ? "יתרה לתשלום" : "Remaining to pay")
+                                    .font(.system(size: 16))
+                                    .foregroundColor(.secondary)
+                                Text(String(format: "\(currency)%.2f", max(remainingToPay, 0)))
+                                    .font(.system(size: 24, weight: .heavy))
+                            }
 
-                        VStack(spacing: 4) {
-                            Text(isRtl ? "סכום לתשלום בתשלום זה" : "Amount for this payment")
-                                .font(.system(size: 14))
-                                .foregroundColor(.secondary)
-                            Text(String(format: "\(currency)%.2f", currentTargetAmount))
-                                .font(.system(size: 22, weight: .semibold))
+                            VStack(spacing: 4) {
+                                Text(isRtl ? "סכום לתשלום בתשלום זה" : "Amount for this payment")
+                                    .font(.system(size: 14))
+                                    .foregroundColor(.secondary)
+                                Text(String(format: "\(currency)%.2f", currentTargetAmount))
+                                    .font(.system(size: 22, weight: .semibold))
+                            }
                         }
                     }
                     // 3️⃣ Normal full-order cash
@@ -3543,6 +3740,13 @@ struct OrderFlowView: View {
             print("[ZCredit] reusing existing idempotency=\(paymentAttempt.idempotencyKey)")
             logTryAgainDecision(sendKind: sendKind, selectedAttempt: paymentAttempt, previousKey: paymentAttempt.idempotencyKey)
         }
+        // 🆕 (2026-05-11): Fresh attempt → reset UI to .charging (clean processing screen).
+        if !isReplay {
+            isReconcilingPayment = false
+            cardPaymentState = .charging
+            payError = nil
+            pendingCardReconcile = .payOnBill(amount: amt)
+        }
         if sendKind == .verifyReplay {
             // A same-key replay intentionally reopens the previous attempt so we can ask the backend again.
             completedPaymentAttemptIds.remove(paymentAttempt.attemptId)
@@ -3671,8 +3875,18 @@ struct OrderFlowView: View {
                     self.verifyReplayTask?.cancel()
                     self.verifyReplayTask = nil
                     self.isReconcilingPayment = false
+                    let oldKey = PaymentAttemptStore.shared.activeAttempt?.idempotencyKey ?? "nil"
                     PaymentAttemptStore.shared.markFailedFinal()
                     PaymentAttemptStore.shared.clearIfTerminal()
+                    // 🆕 (2026-05-11): Dead-simple guarantee — when server says
+                    //   declined, mint a fresh idem key NOW. Any subsequent
+                    //   request will use the new key. No "same key replay" can
+                    //   happen on a declined row.
+                    let freshAttempt = PaymentAttemptStore.shared.beginNewAttempt(
+                        amount: amt,
+                        orderReference: self.currentOrderReference()
+                    )
+                    print("[ZCredit] declined → fresh idem ready old=\(oldKey.prefix(8)) new=\(freshAttempt.idempotencyKey.prefix(8))")
                     self.finishPaymentAttempt(
                         paymentAttempt,
                         state: .declined,
@@ -3955,6 +4169,15 @@ struct OrderFlowView: View {
             print("[ZCredit] reusing existing idempotency=\(paymentAttempt.idempotencyKey)")
             logTryAgainDecision(sendKind: sendKind, selectedAttempt: paymentAttempt, previousKey: paymentAttempt.idempotencyKey)
         }
+        // 🆕 (2026-05-11): Fresh attempt (not a same-key replay) → reset UI to
+        // .charging so cashier sees a clean "processing payment" screen
+        // instead of the confusing "checking previous transaction" spinner.
+        if !isReplay {
+            isReconcilingPayment = false
+            cardPaymentState = .charging
+            payError = nil
+            pendingCardReconcile = .full(amount: amountToCharge)
+        }
         if sendKind == .verifyReplay {
             // A same-key replay intentionally reopens the previous attempt so we can ask the backend again.
             completedPaymentAttemptIds.remove(paymentAttempt.attemptId)
@@ -4099,8 +4322,18 @@ struct OrderFlowView: View {
                     self.verifyReplayTask?.cancel()
                     self.verifyReplayTask = nil
                     self.isReconcilingPayment = false
+                    let oldKey = PaymentAttemptStore.shared.activeAttempt?.idempotencyKey ?? "nil"
                     PaymentAttemptStore.shared.markFailedFinal()
                     PaymentAttemptStore.shared.clearIfTerminal()
+                    // 🆕 (2026-05-11): Dead-simple guarantee — when server says
+                    //   declined, mint a fresh idem key NOW. Any subsequent
+                    //   request (retry tap, verify tap, anything) will use the
+                    //   new key. No "same key replay" can happen on a declined row.
+                    let freshAttempt = PaymentAttemptStore.shared.beginNewAttempt(
+                        amount: amountToCharge,
+                        orderReference: self.currentOrderReference()
+                    )
+                    print("[ZCredit] declined → fresh idem ready old=\(oldKey.prefix(8)) new=\(freshAttempt.idempotencyKey.prefix(8))")
                     if self.ticketNow > 0 {
                             self.pLog(.resultDeclined, ticket: self.ticketNow, amount: amountToCharge, status: "declined", reason: result.message)
                         }
@@ -4277,7 +4510,11 @@ struct OrderFlowView: View {
             manualCashTargetAmount = nil
             activeSplitIndex = nil
 
-            if remainingToPay <= 0 {
+            // 🆕 (2026-05-17) Hole 118: close on sub-shekel
+            // remainder so a ₪13 cash payment on a ₪13.50 due
+            // closes the order rather than leaving it open
+            // with ₪0.50 outstanding.
+            if remainingToPay <= fullyPaidTolerance {
                 playSuccessAndCompleteOrder()
             }
             return
@@ -4289,7 +4526,8 @@ struct OrderFlowView: View {
             activeSplitIndex = nil
             manualCashTargetAmount = nil
 
-            if remainingToPay <= 0 {
+            // 🆕 (2026-05-17) Hole 118: see above.
+            if remainingToPay <= fullyPaidTolerance {
                 playSuccessAndCompleteOrder()
             }
             return
@@ -4302,7 +4540,8 @@ struct OrderFlowView: View {
 
         remainingToPay = max(remainingToPay - thisCash, 0)
 
-        if remainingToPay <= 0 {
+        // 🆕 (2026-05-17) Hole 118: see above.
+        if remainingToPay <= fullyPaidTolerance {
             playSuccessAndCompleteOrder()
         }
     }
@@ -4360,20 +4599,25 @@ struct OrderFlowView: View {
                     }
                     // 2️⃣ Split mode
                     else if isSplitMode {
-                        VStack(spacing: 4) {
-                            Text(isRtl ? "יתרה לתשלום" : "Remaining to pay")
-                                .font(.system(size: 16))
-                                .foregroundColor(.secondary)
-                            Text(String(format: "\(currency)%.2f", max(remainingToPay, 0)))
-                                .font(.system(size: 24, weight: .heavy))
-                        }
+                        // Hide the "Remaining to pay" header once the order is
+                        // fully paid — we don't want a leftover "₪0.00" row
+                        // sitting under the success state.
+                        if remainingToPay > 0.01 {
+                            VStack(spacing: 4) {
+                                Text(isRtl ? "יתרה לתשלום" : "Remaining to pay")
+                                    .font(.system(size: 16))
+                                    .foregroundColor(.secondary)
+                                Text(String(format: "\(currency)%.2f", max(remainingToPay, 0)))
+                                    .font(.system(size: 24, weight: .heavy))
+                            }
 
-                        VStack(spacing: 4) {
-                            Text(isRtl ? "סכום לתשלום בתשלום זה" : "Amount for this payment")
-                                .font(.system(size: 14))
-                                .foregroundColor(.secondary)
-                            Text(String(format: "\(currency)%.2f", currentTargetAmount))
-                                .font(.system(size: 22, weight: .semibold))
+                            VStack(spacing: 4) {
+                                Text(isRtl ? "סכום לתשלום בתשלום זה" : "Amount for this payment")
+                                    .font(.system(size: 14))
+                                    .foregroundColor(.secondary)
+                                Text(String(format: "\(currency)%.2f", currentTargetAmount))
+                                    .font(.system(size: 22, weight: .semibold))
+                            }
                         }
                     }
                     // 3️⃣ Normal full-order cash
@@ -5358,6 +5602,13 @@ struct OrderFlowView: View {
         if isReplay {
             print("[ZCredit] reusing existing idempotency=\(paymentAttempt.idempotencyKey)")
             logTryAgainDecision(sendKind: sendKind, selectedAttempt: paymentAttempt, previousKey: paymentAttempt.idempotencyKey)
+        }
+        // 🆕 (2026-05-11): Fresh attempt → reset UI to .charging (clean processing screen).
+        if !isReplay {
+            isReconcilingPayment = false
+            cardPaymentState = .charging
+            payError = nil
+            pendingCardReconcile = .split(index: index, amount: amount)
         }
         if sendKind == .verifyReplay {
             // A same-key replay intentionally reopens the previous attempt so we can ask the backend again.

@@ -34,6 +34,37 @@ struct TodayDashboardDTO: Decodable {
     struct Channels: Decodable {
         let cashpoint: Int
         let selfOrders: Int
+
+        // Tolerate null / missing / wrong-typed fields server-side.
+        // SUM(CASE...) returns NULL when no rows match — we want 0,
+        // not a decode failure that wipes the whole refresh.
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            self.cashpoint = (try? c.decodeIfPresent(Int.self, forKey: .cashpoint)) ?? 0
+            self.selfOrders = (try? c.decodeIfPresent(Int.self, forKey: .selfOrders)) ?? 0
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case cashpoint, selfOrders
+        }
+    }
+
+    // Fully tolerant decoder. If a single field shows up as null, missing,
+    // or a slightly different numeric type, we still keep the rest of the
+    // payload — better stale-on-one-field than blank-on-everything.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.ok = (try? c.decodeIfPresent(Bool.self, forKey: .ok)) ?? false
+        self.miniAppId = (try? c.decodeIfPresent(Int.self, forKey: .miniAppId)) ?? 0
+        self.turnover = (try? c.decodeIfPresent(Double.self, forKey: .turnover)) ?? 0
+        self.orders = (try? c.decodeIfPresent(Int.self, forKey: .orders)) ?? 0
+        self.aov = (try? c.decodeIfPresent(Double.self, forKey: .aov)) ?? 0
+        self.channels = try? c.decodeIfPresent(Channels.self, forKey: .channels)
+        self.selfOrderingPct = try? c.decodeIfPresent(Double.self, forKey: .selfOrderingPct)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case ok, miniAppId, turnover, orders, aov, channels, selfOrderingPct
     }
 }
 
@@ -51,17 +82,21 @@ final class DashboardVM: ObservableObject {
     @Published var lastError: String? = nil
 
     private var pollTask: Task<Void, Never>?
+    private var currentMiniAppId: Int = 0
+    private static let pollIntervalSeconds: UInt64 = 30
+    private static let inFlightTimeoutSeconds: TimeInterval = 12
 
     func startPolling(miniAppId: Int) {
+        currentMiniAppId = miniAppId
         pollTask?.cancel()
         pollTask = Task { [weak self] in
             guard let self else { return }
-            await self.fetch(miniAppId: miniAppId)
+            await self.fetch(miniAppId: miniAppId, trigger: "startPolling")
 
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 30 * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: Self.pollIntervalSeconds * 1_000_000_000)
                 if Task.isCancelled { break }
-                await self.fetch(miniAppId: miniAppId)
+                await self.fetch(miniAppId: miniAppId, trigger: "interval")
             }
         }
     }
@@ -71,10 +106,23 @@ final class DashboardVM: ObservableObject {
         pollTask = nil
     }
 
-    func fetch(miniAppId: Int) async {
+    /// Force an immediate one-shot refresh. Safe to call on foreground,
+    /// pull-to-refresh, or tap. Does not disturb the polling cadence.
+    func refreshNow(reason: String = "manual") {
+        guard currentMiniAppId > 0 else { return }
+        let id = currentMiniAppId
+        Task { [weak self] in
+            await self?.fetch(miniAppId: id, trigger: reason)
+        }
+    }
+
+    func fetch(miniAppId: Int, trigger: String = "fetch") async {
+        let started = Date()
         isLoading = true
-        lastError = nil
         defer { isLoading = false }
+
+        let logTs = Self.tsFormatter.string(from: started)
+        print("[DashboardVM] ⏳ \(logTs) fetch trigger=\(trigger) miniAppId=\(miniAppId)")
 
         do {
             var comps = URLComponents(string: "https://minis.studio/api/dashboard/today")!
@@ -83,7 +131,7 @@ final class DashboardVM: ObservableObject {
 
             var req = URLRequest(url: url)
             req.httpMethod = "GET"
-            req.timeoutInterval = 12
+            req.timeoutInterval = Self.inFlightTimeoutSeconds
             req.cachePolicy = .reloadIgnoringLocalCacheData
             req.setValue("application/json", forHTTPHeaderField: "Accept")
 
@@ -95,12 +143,26 @@ final class DashboardVM: ObservableObject {
             }
             guard (200...299).contains(http.statusCode) else {
                 let body = String(data: data, encoding: .utf8) ?? ""
+                let snippet = String(body.prefix(240))
+                print("[DashboardVM] ❌ \(logTs) HTTP \(http.statusCode) body=\(snippet)")
                 throw NSError(domain: "DashboardVM", code: http.statusCode,
-                              userInfo: [NSLocalizedDescriptionKey: "HTTP \(http.statusCode) \(body)"])
+                              userInfo: [NSLocalizedDescriptionKey: "HTTP \(http.statusCode) \(snippet)"])
             }
 
-            let decoded = try JSONDecoder().decode(TodayDashboardDTO.self, from: data)
+            let decoded: TodayDashboardDTO
+            do {
+                decoded = try JSONDecoder().decode(TodayDashboardDTO.self, from: data)
+            } catch {
+                let body = String(data: data, encoding: .utf8) ?? ""
+                let snippet = String(body.prefix(240))
+                print("[DashboardVM] ❌ \(logTs) decode error=\(error) body=\(snippet)")
+                throw error
+            }
+
             guard decoded.ok else {
+                let body = String(data: data, encoding: .utf8) ?? ""
+                let snippet = String(body.prefix(240))
+                print("[DashboardVM] ⚠️ \(logTs) ok=false body=\(snippet)")
                 throw NSError(domain: "DashboardVM", code: -2,
                               userInfo: [NSLocalizedDescriptionKey: "API ok=false"])
             }
@@ -114,10 +176,24 @@ final class DashboardVM: ObservableObject {
                 selfOrderingPct = decoded.selfOrderingPct ?? 0
             }
             lastUpdatedAt = Date()
+            lastError = nil
+
+            let elapsed = String(format: "%.2f", Date().timeIntervalSince(started))
+            print("[DashboardVM] ✅ \(logTs) ok turnover=\(turnover) orders=\(orders) cash=\(cashpointOrders) self=\(selfOrders) elapsed=\(elapsed)s")
         } catch {
             lastError = (error as NSError).localizedDescription
+            let elapsed = String(format: "%.2f", Date().timeIntervalSince(started))
+            print("[DashboardVM] ❌ \(logTs) failed elapsed=\(elapsed)s err=\(lastError ?? "?")")
         }
     }
+
+    private static let tsFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "Asia/Jerusalem") ?? .current
+        f.dateFormat = "HH:mm:ss.SSS"
+        return f
+    }()
 }
 
 // MARK: - Shared helper (Israel opening time)

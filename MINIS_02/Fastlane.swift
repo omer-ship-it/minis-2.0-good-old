@@ -1462,7 +1462,11 @@ struct menuView: View {
     }
     private var items: [ShellMenuItem] {
         let d = Date()
-        return api.items.filter { $0.isAvailable && $0.isWithinActiveHours(now: d) }
+        return api.items.filter {
+            $0.isAvailable
+            && $0.isWithinActiveHours(now: d)
+            && $0.isAvailableOnWeekday(now: d)   // ✅ NEW: per-weekday hour limit
+        }
     }
     private var basketTotalQuantity: Int { basket.values.reduce(0) { $0 + $1.quantity } }
     private var basketTotalPrice: Double { basket.values.reduce(0) { $0 + Double($1.quantity) * $1.unitPrice } }

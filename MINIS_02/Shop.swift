@@ -3405,8 +3405,13 @@ final class ShopDataModel: ObservableObject {
     }
 
     private func applyFromAPI() {
+        let now = Date()
         let mappedProducts: [ShopProduct] = api.items
-            .filter { $0.isAvailable }
+            .filter {
+                $0.isAvailable
+                && $0.isWithinActiveHours(now: now)
+                && $0.isAvailableOnWeekday(now: now)   // ✅ NEW: per-weekday hour limit
+            }
             .compactMap { item in
                 guard
                     let s = item.imageURL,

@@ -364,16 +364,26 @@ struct AdminOrdersView: View {
         }
     }
 
-    private func toBasketEntries(from order: AdminOrderItem) -> [BasketEntry] {
-        order.items.map { li in
-            BasketEntry(
-                id: li.id,
-                item: makeShellMenuItem(from: li),
-                quantity: li.quantity,
-                subtitle: li.modifiersText,
-                unitPrice: li.unitPrice
-            )
-        }
+    private func toBasketEntries(
+        from order: AdminOrderItem,
+        includedLineIds: Set<Int>? = nil
+    ) -> [BasketEntry] {
+        order.items
+            .filter { li in
+                // ✅ When a selection is supplied, only kept lines are printed.
+                //    Nil means "print everything" (legacy behaviour).
+                guard let includedLineIds else { return true }
+                return includedLineIds.contains(li.id)
+            }
+            .map { li in
+                BasketEntry(
+                    id: li.id,
+                    item: makeShellMenuItem(from: li),
+                    quantity: li.quantity,
+                    subtitle: li.modifiersText,
+                    unitPrice: li.unitPrice
+                )
+            }
     }
 
  
@@ -392,6 +402,10 @@ struct AdminOrdersView: View {
     @State private var orders: [AdminOrderItem] = []
     @State private var selectedOrder: AdminOrderItem? = nil
     @State private var isLoading = false
+
+    // ✅ Bon print picker: when set, the BonPrintPickerSheet is shown for that
+    //    order and the user can untick individual lines before printing.
+    @State private var bonPickerOrder: AdminOrderItem? = nil
 
     @State private var pollTimer = Timer
         .publish(every: 10, on: .main, in: .common)
@@ -427,7 +441,7 @@ struct AdminOrdersView: View {
                                     item: order,
 
                                     // ✅ EOD: hide ALL row buttons by passing nil for all actions
-                                    onPrint: isEod ? {} : { printOrder(order) },
+                                    onPrint: isEod ? {} : { bonPickerOrder = order },
                                     onPrintInvoice: isEod ? {} : { printInvoice(for: order) },
 
                                     // ✅ IMPORTANT: in EOD we still want tap-to-open-details,
@@ -565,8 +579,12 @@ struct AdminOrdersView: View {
                     Task { await refreshOrders() }
                 },
                 onPrintBon: {
-                    printOrder(order)
+                    // ✅ Close the details cover first, then present the bon
+                    //    print picker so the user can deselect lines.
                     selectedOrder = nil
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                        bonPickerOrder = order
+                    }
                 },
                 onPrintInvoice: {
                     printInvoice(for: order)
@@ -589,7 +607,21 @@ struct AdminOrdersView: View {
             .environment(\.layoutDirection, .rightToLeft)   // ✅ FORCE RTL HERE (highest level of the cover)
             .environment(\.locale, Locale(identifier: "he_IL"))
         }
-     
+        // ✅ Bon-print picker — pre-selects every line and lets the user untick
+        //    a few before sending only the kept ones to the printer.
+        .sheet(item: $bonPickerOrder) { order in
+            BonPrintPickerSheet(
+                order: order,
+                onCancel: { bonPickerOrder = nil },
+                onPrint: { keptLineIds in
+                    bonPickerOrder = nil
+                    printOrder(order, includedLineIds: keptLineIds)
+                }
+            )
+            .environment(\.layoutDirection, .rightToLeft)
+            .environment(\.locale, Locale(identifier: "he_IL"))
+        }
+
         .navigationTitle("הזמנות")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -1327,10 +1359,24 @@ struct AdminOrdersView: View {
         }
     }
 
-    private func printOrder(_ order: AdminOrderItem) {
-        let entries = toBasketEntries(from: order)
+    private func printOrder(
+        _ order: AdminOrderItem,
+        includedLineIds: Set<Int>? = nil
+    ) {
+        let entries = toBasketEntries(from: order, includedLineIds: includedLineIds)
+
+        // ✅ Nothing left to print → bail out instead of producing a blank slip.
+        guard !entries.isEmpty else { return }
+
         let mode = order.diningMode                 // ✅ USE PARSED MODE
         let ticketNumber = Int(order.orderId) ?? order.id
+
+        // ✅ When only a subset is being printed we re-derive the total from
+        //    what's actually on the ticket, so the slip footer matches the
+        //    items above it (otherwise it shows the full order's total).
+        let printedTotal: Double = (includedLineIds == nil)
+            ? order.total
+            : entries.reduce(0.0) { $0 + Double($1.quantity) * $1.unitPrice }
 
 // optional debug
 
@@ -1338,7 +1384,7 @@ struct AdminOrdersView: View {
             let ok = await PrinterManager.shared.printCashPointSplit(
                 orderNumber: ticketNumber * 100 + Int.random(in: 1...99),   // ✅ manual dedupe-bust
                 entries: entries,
-                total: order.total,
+                total: printedTotal,
                 diningMode: mode,
                 customerName: order.customerName,
                 customerPhone: order.customerPhone
@@ -1347,7 +1393,7 @@ struct AdminOrdersView: View {
             if !ok {
             }
         }
-    
+
     }
 
     private func update(order: AdminOrderItem, to newStatus: AdminOrderStatus) {
@@ -2693,6 +2739,14 @@ private struct EODStepPreviewView: View {
 
     private func salesDataFromSnapshot(_ x: XReportApiResponse) -> PrinterManager.SalesReportData {
         let a = x.agg
+
+        // Cash tips are tracked separately on the server (`CashTipsTotal`) but
+        // for the Z-report printout we want the cash bucket to reflect what's
+        // actually in the drawer — i.e. cash payments PLUS cash tips. The
+        // legacy applyingXReport path already does this; mirror it here so the
+        // printed slip matches the dashboard.
+        let cashWithTips = a.cashTotal + a.cashTipsTotal
+
         return PrinterManager.SalesReportData(
             ppaRestaurant: 0,
             dinersRestaurant: a.restaurantCount,
@@ -2707,11 +2761,11 @@ private struct EODStepPreviewView: View {
             tipsTotal: a.tipsTotal,
             grandTotal: a.netTotal,
 
-            cashAmount: a.cashTotal,
+            cashAmount: cashWithTips,                 // ✅ includes CashTipsTotal
             cashCount: a.cashCount,
             cardAmount: a.cardTotal,
             cardCount: a.cardCount,
-            collectionsTotalAmount: a.paymentsTotal,
+            collectionsTotalAmount: a.paymentsTotal + a.cashTipsTotal,   // ✅ keep totals consistent
             collectionsTotalCount: a.ordersCount,
 
             closedDrawersAmount: 0,
@@ -2919,4 +2973,183 @@ enum EODFilter {
     case all
     case teamTablesOnly
     case openOrdersOnly
+}
+
+// MARK: - Bon Print Picker
+//
+// Sheet that lists every line of an order with a per-row checkbox.
+// All rows are pre-selected, so the default ("בונבון" right away) prints the
+// whole order. The user can untick individual lines and tap "הדפס" to send
+// only the kept ones to the printer.
+struct BonPrintPickerSheet: View {
+    let order: AdminOrderItem
+    let onCancel: () -> Void
+    let onPrint: (Set<Int>) -> Void
+
+    // Lines currently selected for printing. Seeded with every (non-cancelled)
+    // line on appear so the user starts from "print everything".
+    @State private var selected: Set<Int> = []
+    @State private var didSeed = false
+
+    private var visibleLines: [AdminOrderLineItem] {
+        // Cancelled lines are not eligible for re-printing as a fresh bon.
+        order.items.filter { !$0.isCancelled }
+    }
+
+    private var allSelected: Bool {
+        !visibleLines.isEmpty && visibleLines.allSatisfy { selected.contains($0.id) }
+    }
+
+    private var anySelected: Bool { !selected.isEmpty }
+
+    private func toggle(_ lineId: Int) {
+        if selected.contains(lineId) {
+            selected.remove(lineId)
+        } else {
+            selected.insert(lineId)
+        }
+        Haptics.light()
+    }
+
+    private func setAll(_ on: Bool) {
+        if on {
+            selected = Set(visibleLines.map(\.id))
+        } else {
+            selected.removeAll()
+        }
+        Haptics.light()
+    }
+
+    private func seedIfNeeded() {
+        guard !didSeed else { return }
+        selected = Set(visibleLines.map(\.id))
+        didSeed = true
+    }
+
+    private var keptCountLabel: String {
+        let total = visibleLines.count
+        let kept  = visibleLines.filter { selected.contains($0.id) }.count
+        return "\(kept) / \(total) פריטים"
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+
+                // Header summary + select-all
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("הדפסת בון להזמנה #\(order.orderId)")
+                            .font(.system(size: 16, weight: .bold))
+                        Text(keptCountLabel)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(.secondary)
+                    }
+
+                    Spacer()
+
+                    Button {
+                        setAll(!allSelected)
+                    } label: {
+                        Text(allSelected ? "בטל הכל" : "בחר הכל")
+                            .font(.system(size: 14, weight: .bold))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(Color(.systemGray6))
+                            .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 14)
+                .padding(.bottom, 10)
+
+                Divider()
+
+                // Lines
+                List {
+                    ForEach(visibleLines) { line in
+                        let isOn = selected.contains(line.id)
+
+                        Button {
+                            toggle(line.id)
+                        } label: {
+                            HStack(alignment: .center, spacing: 12) {
+                                Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
+                                    .font(.system(size: 22, weight: .bold))
+                                    .foregroundColor(isOn ? .blue : .secondary)
+
+                                VStack(alignment: .leading, spacing: 3) {
+                                    HStack(spacing: 6) {
+                                        Text("×\(line.quantity)")
+                                            .font(.system(size: 14, weight: .bold, design: .monospaced))
+                                            .foregroundColor(.secondary)
+                                        Text(line.name)
+                                            .font(.system(size: 16, weight: .semibold))
+                                            .foregroundColor(.primary)
+                                            .lineLimit(2)
+                                    }
+
+                                    if let mods = line.modifiersText?
+                                        .trimmingCharacters(in: .whitespacesAndNewlines),
+                                       !mods.isEmpty {
+                                        Text(mods)
+                                            .font(.system(size: 13, weight: .medium))
+                                            .foregroundColor(.secondary)
+                                            .lineLimit(3)
+                                    }
+                                }
+
+                                Spacer()
+
+                                Text(String(format: "₪%.2f", line.rowTotal))
+                                    .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                            }
+                            .contentShape(Rectangle())
+                            .padding(.vertical, 4)
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    if visibleLines.isEmpty {
+                        Text("אין פריטים להדפסה בהזמנה זו")
+                            .foregroundColor(.secondary)
+                            .padding(.vertical, 12)
+                    }
+                }
+                .listStyle(.insetGrouped)
+            }
+            .navigationTitle("הדפסת בון")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("ביטול", action: onCancel)
+                }
+            }
+            .safeAreaInset(edge: .bottom) {
+                Button {
+                    onPrint(selected)
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "printer.fill")
+                            .font(.system(size: 15, weight: .bold))
+                        Text(anySelected ? "הדפס בון" : "בחר פריט אחד לפחות")
+                            .font(.system(size: 17, weight: .bold))
+                    }
+                    .foregroundColor(.black)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 52)
+                    .background(anySelected ? Color.white : Color(.systemGray5))
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .disabled(!anySelected)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(Color(.systemBackground).ignoresSafeArea(edges: .bottom))
+            }
+            .onAppear { seedIfNeeded() }
+        }
+    }
 }

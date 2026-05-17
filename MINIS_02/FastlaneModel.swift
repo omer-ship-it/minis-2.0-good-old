@@ -562,6 +562,7 @@ final class MenuApiModel: ObservableObject {
                 printers: $0.printers,
                 activeFrom: $0.activeFrom,
                 activeTo: $0.activeTo,
+                availableHours: $0.availableHours,
                 isPhone: $0.isPhone,
                 bundle: $0.bundle
             )
@@ -806,6 +807,9 @@ struct ProductPayload: Decodable {
     let activeFrom: Int?
     let activeTo: Int?
 
+    // ✅ per-weekday available hours window (nil = no per-day restriction)
+    let availableHours: [WeekdayHours]?
+
     // ✅ ask phone (from published JSON "isPhone")
     let isPhone: Bool?
 
@@ -836,6 +840,9 @@ struct ProductPayload: Decodable {
         case activeFromLower = "activeFrom"
         case activeTo        = "ActiveTo"
         case activeToLower   = "activeTo"
+
+        case availableHours  = "AvailableHours"
+        case availableHoursL = "availableHours"
 
         case isPhoneP        = "isPhone"
         case isPhoneC        = "IsPhone"
@@ -907,6 +914,16 @@ struct ProductPayload: Decodable {
         activeTo =
             (try? c.decodeIfPresent(Int.self, forKey: .activeTo)) ??
             (try? c.decodeIfPresent(Int.self, forKey: .activeToLower))
+
+        // ✅ per-weekday available hours
+        let rawHours =
+            (try? c.decodeIfPresent([WeekdayHours].self, forKey: .availableHours)) ??
+            (try? c.decodeIfPresent([WeekdayHours].self, forKey: .availableHoursL))
+        if let rawHours, !rawHours.isEmpty {
+            availableHours = rawHours
+        } else {
+            availableHours = nil
+        }
 
         // ✅ isPhone
         isPhone =
@@ -1063,6 +1080,49 @@ struct ApiModifierItem: Decodable {
 }
 
 
+// MARK: - Per-weekday available hours
+//
+// One entry per weekday (Sunday=0 ... Saturday=6).
+// `isOpen=false`  → product hidden on that weekday.
+// Otherwise the product is available between `openMinutes`
+// and `closeMinutes` (minutes from midnight, 0..1440).
+// If `closeMinutes <= openMinutes`, the window wraps midnight.
+struct WeekdayHours: Codable, Hashable, Equatable {
+    let weekday: Int        // 0 = Sunday ... 6 = Saturday
+    var isOpen: Bool
+    var openMinutes: Int    // 0..1440
+    var closeMinutes: Int   // 0..1440
+
+    enum CodingKeys: String, CodingKey {
+        case weekday    = "weekday"
+        case isOpen     = "isOpen"
+        case openMinutes  = "open"
+        case closeMinutes = "close"
+    }
+
+    init(weekday: Int,
+         isOpen: Bool = true,
+         openMinutes: Int = 0,
+         closeMinutes: Int = 24 * 60) {
+        self.weekday = weekday
+        self.isOpen = isOpen
+        self.openMinutes = openMinutes
+        self.closeMinutes = closeMinutes
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let wd = (try? c.decode(Int.self, forKey: .weekday)) ?? 0
+        let on = (try? c.decode(Bool.self, forKey: .isOpen)) ?? true
+        let op = (try? c.decode(Int.self, forKey: .openMinutes)) ?? 0
+        let cl = (try? c.decode(Int.self, forKey: .closeMinutes)) ?? 24 * 60
+        self.weekday = max(0, min(6, wd))
+        self.isOpen = on
+        self.openMinutes = max(0, min(24 * 60, op))
+        self.closeMinutes = max(0, min(24 * 60, cl))
+    }
+}
+
 struct ShellMenuItem: Identifiable {
     let id: Int
 
@@ -1092,6 +1152,9 @@ struct ShellMenuItem: Identifiable {
     // ✅ Active window
     let activeFrom: Int?
     let activeTo: Int?
+
+    // ✅ NEW: per-weekday available hours (nil = no per-day restriction)
+    let availableHours: [WeekdayHours]?
 
     // ✅ NEW: ask phone (from JSON isPhone)
     let isPhone: Bool?
@@ -1178,6 +1241,9 @@ struct ShellMenuItem: Identifiable {
         activeFrom: Int? = nil,
         activeTo: Int? = nil,
 
+        // ✅ NEW: per-weekday available hours
+        availableHours: [WeekdayHours]? = nil,
+
         // ✅ NEW
         isPhone: Bool? = nil,
 
@@ -1212,6 +1278,25 @@ struct ShellMenuItem: Identifiable {
 
         self.activeFrom = activeFrom
         self.activeTo = activeTo
+
+        // Normalize availableHours: keep one entry per weekday (0..6),
+        // last write wins when duplicates appear, drop nil/empty arrays.
+        if let availableHours, !availableHours.isEmpty {
+            var dedup: [Int: WeekdayHours] = [:]
+            for h in availableHours {
+                let wd = max(0, min(6, h.weekday))
+                dedup[wd] = WeekdayHours(
+                    weekday: wd,
+                    isOpen: h.isOpen,
+                    openMinutes: max(0, min(24 * 60, h.openMinutes)),
+                    closeMinutes: max(0, min(24 * 60, h.closeMinutes))
+                )
+            }
+            self.availableHours = dedup.values.sorted { $0.weekday < $1.weekday }
+        } else {
+            self.availableHours = nil
+        }
+
         self.isPhone = isPhone
 
         // ✅ bundle
@@ -2050,17 +2135,36 @@ enum OrderAPI {
             print("[submitOrder/curl] \(req.curlDebug)")
 #endif
 
-            // ✅ Build envelope (used only on failure for retry)
+            // 🆕 (2026-05-15) Hole 62: build envelope and persist it to
+            // disk SYNCHRONOUSLY before any network activity. This is
+            // the cash-loss insurance for the rare crash-during-submit
+            // window — if the app is killed while URLSession is mid
+            // round-trip, the envelope is already on disk and the
+            // drainer (on next launch / cashpoint onAppear / network
+            // restore) will replay it. The server's idem-key dedup
+            // handles the "already landed but we crashed before
+            // hearing back" case so we never create a duplicate Yesh
+            // invoice.
+            //
+            // State = `.sending`, `lastAttemptAt` = now: this tells the
+            // drainer "a direct fire is currently in-flight, don't
+            // touch this for 60s." On success the direct fire
+            // synchronously removes the envelope; on failure it
+            // flips state to `.pending` and kicks the drainer. See
+            // Hole 62 comment in `OrderOutbox.drainNow` for the
+            // drainer-side rule.
             let env = OutboxEnvelope(
                 id: idempotencyKey,
                 createdAt: Date(),
-                state: .pending,
-                attemptCount: 0,
-                lastAttemptAt: nil,
+                state: .sending,
+                attemptCount: 1,
+                lastAttemptAt: Date(),
                 endpoint: url.absoluteString,
                 body: req.httpBody ?? Data(),
                 headers: req.allHTTPHeaderFields ?? [:]
             )
+            OrderOutbox.persistSync(env)
+            print("📥 [submitOrder/PRE-FIRE-ENQUEUE] idem=\(idempotencyKey) state=sending — envelope on disk before URLSession fires")
 
             // 🛑 DUPLICATE-YESH FIX (canary):
             // Previously this fired BOTH the outbox (enqueue + drainNow) AND a direct
@@ -2086,11 +2190,18 @@ enum OrderAPI {
             // 🟥 [submitOrder/DIRECT-FIRE] direct URLSession = ONLY network hit on happy path
             print("🟥 [submitOrder/DIRECT-FIRE] idem=\(idempotencyKey) ts=\(ISO8601DateFormatter().string(from: Date())) — direct URLSession.dataTask (outbox disabled on success path)")
 
-            // Helper: enqueue + drain outbox for retry on failure
+            // 🆕 (2026-05-15) Hole 62: with the synchronous pre-fire
+            // enqueue above, the envelope is already on disk in
+            // `.sending` state. On failure we just flip it to
+            // `.pending` so the drainer takes over. The disk write
+            // is synchronous + nonisolated so it happens immediately
+            // on the URLSession callback thread (no MainActor hop).
+            // The drainer kick still hops through MainActor since the
+            // drainer itself is @MainActor-bound.
             func enqueueForRetry(reason: String) {
-                print("🔁 [submitOrder/RETRY-ENQUEUE] idem=\(idempotencyKey) reason=\(reason) — falling back to outbox")
+                print("🔁 [submitOrder/RETRY-ENQUEUE] idem=\(idempotencyKey) reason=\(reason) — flipping pre-fired envelope to .pending")
+                OrderOutbox.markPendingSync(id: idempotencyKey)
                 Task { @MainActor in
-                    OrderOutbox.shared.enqueue(env)
                     OrderOutbox.shared.drainNow()
                 }
             }
@@ -2136,7 +2247,15 @@ enum OrderAPI {
                 }
 
                 if oid > 0 {
-                    // ✅ Direct fire succeeded — outbox stays clean (we never enqueued).
+                    // 🆕 (2026-05-15) Hole 62: direct fire succeeded —
+                    // synchronously remove the pre-fired envelope so the
+                    // drainer can't pick it up and re-fire it. Removal
+                    // is nonisolated + synchronous so it happens on this
+                    // callback thread immediately, BEFORE the completion
+                    // handler returns and any UI-side state change kicks
+                    // a drain trigger.
+                    OrderOutbox.removeSync(id: idempotencyKey)
+                    print("✅ [submitOrder/POST-SUCCESS-REMOVE] idem=\(idempotencyKey) orderId=\(oid) — envelope cleared from outbox")
                     completion(.success(oid))
                 } else {
                     enqueueForRetry(reason: "direct-fire returned no orderId")
@@ -2517,6 +2636,58 @@ final class ZCreditPaymentHandler {
 
         // ------- CLASSIFICATION (similar spirit to old parseEnvelope) -------
 
+        // 🆕 (2026-05-11): Pending paths take priority over rc-based classification.
+        // These are server signals that the original /charge is still in flight or
+        // that Z-Credit returned a transient response (-50101 etc). They must NOT
+        // be treated as declined — that would cause the cashier to mint a fresh
+        // idem key and bypass the server's in-flight guard, producing orphan rows.
+        //
+        //   - charge_in_flight : Step 3a-bis hit a Status=0 row younger than 90s
+        //   - pending_fast     : Z-Credit returned -50101 (PinPad transient)
+        //   - status_pending   : status-* lookup hasn't resolved yet
+        //
+        // Returning .unknown lets OrderFlowView's `shouldEnterReconciling` decide
+        // — and the allowlist there forces TRUE for these paths, so the cashier
+        // stays on "בדוק מצב עסקה" (verify-replay with same key) instead of
+        // being shown "נסה שוב" (fresh key retry).
+        let isPendingPath = (
+            path == "charge_in_flight" ||
+            path == "pending_fast" ||
+            path == "status_pending"
+        )
+        if isPendingPath {
+            let status: ZCreditResult.Status = .unknown
+            lastStartSafeParsedStatus = statusLabel(status)
+
+            invalidateTimers()
+            currentCorrelationId      = nil
+            currentReferenceOrSession = nil
+            currentSessionId          = nil
+
+            let fallbackMsg: String = {
+                if path == "charge_in_flight" {
+                    return "החיוב המקורי עדיין בתהליך. אנא המתינו ובדקו שוב."
+                }
+                if path == "pending_fast" {
+                    return "התשלום בתהליך במסוף. אנא המתינו ובדקו שוב."
+                }
+                return "התשלום בתהליך. אנא בדקו שוב."
+            }()
+
+            let result = ZCreditResult(
+                status: status,
+                message: msg.isEmpty ? fallbackMsg : msg,
+                referenceNumber: reference,
+                transactionId: txId,
+                orderId: orderId,
+                rawPath: pathRaw,
+                rawReturnCode: rc
+            )
+            log("start-safe returning orderId=\(orderId.map(String.init) ?? "nil") status=\(statusLabel(status)) (pending path=\(path))")
+            DispatchQueue.main.async { completion(result) }
+            return
+        }
+
         // Explicit “device busy” code → decline with a clear message
         if rc == "-50101" {
             let status: ZCreditResult.Status = .declined
@@ -2704,45 +2875,24 @@ final class ZCreditPaymentHandler {
             "idempotencyKey": idempotencyKey ?? ""
         ]
 
-        // 🧪 SIMULATOR-ONLY CANARY HARDCODE for /charge.
-        //    Simulator routes eligible regular charges (txType=="01") to
-        //    /payments/zcredit/charge for end-to-end validation against the new endpoint.
-        //    Refunds (txType="53") and other types fall through to /start (legacy).
+        // 🚦 SERVER-DRIVEN /charge TOGGLE — single source of truth.
         //
-        // 🛑 REAL iPad (any device build) — routes to /start (legacy).
-        //
-        //    History:
-        //    • /charge endpoint was promoted to all-builds-hardcode on 2026-05-04
-        //      morning after passing 10/10 canary tests (1× happy path, 1× network drop,
-        //      1× decline, 1× idem dedup probe, 1× single retry button, 5-in-a-row,
-        //      customer name persistence, Bones screen, self-cashpoint stock).
-        //    • Reverted to simulator-only on 2026-05-04 afternoon — see TODO/ticket
-        //      for the deciding incident. Server-side /charge endpoint remains
-        //      deployed and ready; flipping the gate back is a one-line change.
-        //
-        //    The `useLegacyEndpoint` parameter is kept in the signature for ABI
-        //    stability with callers, but is ignored here — endpoint is unconditional
-        //    per build environment.
-        // 🚦 SERVER-DRIVEN /charge TOGGLE — task #20 wiring (2026-05-04 afternoon).
-        //
-        // Reads the `payments.useChargeV2` flag from UserDefaults, which is populated
-        // each time the published shop JSON is parsed (see decodeAndPersistUseChargeV2
-        // in load() above). Source of truth: mini.settings.payments.useChargeV2 in
-        // https://minis.studio/json/{shopId}.json
+        // Reads `payments.useChargeV2` from UserDefaults, populated each
+        // time the published shop JSON is polled (see
+        // `decodeAndPersistUseChargeV2` in `load()` and the periodic
+        // `startUseChargeV2Polling` timer wired in `MINIS_02App.swift`).
+        // The published JSON's `mini.settings.payments.useChargeV2` flag
+        // is the only thing routing chooses on — there is no compile-time
+        // hardcode, no simulator-only canary, and no per-shop override
+        // anywhere in the iPad code. Republish the shop JSON with
+        // `payments.useChargeV2: true` (or `false`) and every iPad picks
+        // up the change on its next poll (~30 s).
         //
         // Selection logic:
-        //   - txType != "01" (refunds, force-charge, etc.) → /start (legacy, never /charge)
-        //   - txType == "01" and useChargeV2 = true        → /charge (new endpoint)
-        //   - txType == "01" and useChargeV2 = false       → /start (legacy)
-        //
-        // This lets ops flip /charge on/off per shop without an iPad rebuild — just
-        // republish the shop JSON with `payments.useChargeV2: true` (or false) and
-        // every iPad picks up the change on the next JSON refresh (cache TTL ~ minutes).
-        //
-        // 🆕 (2026-05-08): canary HARDCODE removed — server JSON's
-        //    `mini.settings.payments.useChargeV2` is now the single source of
-        //    truth for /charge↔/start routing per shop. Republish the shop JSON
-        //    to flip; every iPad picks up on its next poll.
+        //   - useLegacyEndpoint == true                     → /start (caller forced legacy, e.g. partial pay)
+        //   - txType != "01" (refunds, force-charge, etc.)  → /start (legacy, never /charge)
+        //   - txType == "01" and useChargeV2 = true         → /charge (new endpoint)
+        //   - txType == "01" and useChargeV2 = false        → /start (legacy)
         let useChargeV2Flag = UserDefaults.standard.bool(forKey: "payments.useChargeV2")
         let endpoint: String
         let endpointReason: String
@@ -4026,6 +4176,20 @@ final class ReportPreviewModel: ObservableObject {
         let OrdersCount: Int
         let MissingPaymentCount: Int
 
+        // 🆕 (2026-05-16) Hole 94: discount aggregation columns.
+        // Optional + default 0 in `applyingZReport` so older
+        // ZReports rows that predate the columns decode cleanly
+        // (server returns them as null on backwards-compat reads).
+        let DiscountsTotal: Double?
+        let DiscountsCount: Int?
+
+        // 🆕 (2026-05-16) Hole 101: OTH (on-the-house)
+        // aggregation columns. Same shape + decode tolerance as
+        // the discount fields above — pre-Hole-101 rows return
+        // null and we fall back to 0.
+        let OtherTotal: Double?
+        let OtherCount: Int?
+
         let JsonData: String?
     }
 
@@ -4223,6 +4387,19 @@ struct ZReport: Decodable, Identifiable {
     let ordersCount: Int
     let missingPaymentCount: Int
 
+    // 🆕 (2026-05-16) Hole 94: discount aggregation columns
+    // (added to dbo.ZReports). Both default to 0 in the decode
+    // path below so older rows that predate the migration stay
+    // valid on the wire.
+    let discountsTotal: Double
+    let discountsCount: Int
+
+    // 🆕 (2026-05-16) Hole 101: OTH (on-the-house) aggregation
+    // columns. Same shape + tolerant-decode handling as the
+    // discount fields above — pre-migration rows default to 0.
+    let othTotal: Double
+    let othCount: Int
+
     let jsonData: String?
     let createdAt: String?
 
@@ -4245,6 +4422,10 @@ struct ZReport: Decodable, Identifiable {
         case cardTipsTotal = "CardTipsTotal"
         case ordersCount = "OrdersCount"
         case missingPaymentCount = "MissingPaymentCount"
+        case discountsTotal = "DiscountsTotal"
+        case discountsCount = "DiscountsCount"
+        case othTotal = "OtherTotal"
+        case othCount = "OtherCount"
 
         // ✅ accept both styles
         case jsonData = "JsonData"
@@ -4279,6 +4460,18 @@ struct ZReport: Decodable, Identifiable {
         ordersCount = try c.decode(Int.self, forKey: .ordersCount)
         missingPaymentCount = try c.decode(Int.self, forKey: .missingPaymentCount)
 
+        // 🆕 (2026-05-16) Hole 94: tolerant decode — older ZReports
+        // rows predate these columns and the server returns them as
+        // null/missing on backwards-compat reads. Default to 0 so
+        // the printed Z slip's "הנחות" line shows "-" for those.
+        discountsTotal = (try? c.decodeIfPresent(Double.self, forKey: .discountsTotal)) ?? 0
+        discountsCount = (try? c.decodeIfPresent(Int.self,    forKey: .discountsCount)) ?? 0
+
+        // 🆕 (2026-05-16) Hole 101: tolerant decode for OTH —
+        // pre-migration rows return null/missing, default to 0.
+        othTotal = (try? c.decodeIfPresent(Double.self, forKey: .othTotal)) ?? 0
+        othCount = (try? c.decodeIfPresent(Int.self,    forKey: .othCount)) ?? 0
+
         // ✅ tolerant decode
         jsonData =
             (try? c.decodeIfPresent(String.self, forKey: .jsonData))
@@ -4309,12 +4502,27 @@ extension PrinterManager.SalesReportData {
         d.ppaTA = (res.agg.taCount > 0) ? Int((res.agg.taGross / Double(res.agg.taCount)).rounded()) : 0
 
         // Payments
+        //
+        // Cash bucket = cash sales + cash tips, so the figure on the slip
+        // matches what's physically in the drawer (and the "הד. סגורות /
+        // סה״כ במגירה / מגירה ראשית" rows below). Mirrors the explicit
+        // restore-Z math at FastlaneModel.swift:4050–4058.
+        let cashWithCashTips = res.agg.cashTotal + res.agg.cashTipsTotal
+
         d.cashCount = res.agg.cashCount
-        d.cashAmount = res.agg.cashTotal
+        d.cashAmount = cashWithCashTips
         d.cardCount = res.agg.cardCount
         d.cardAmount = res.agg.cardTotal
         d.collectionsTotalCount = res.agg.cashCount + res.agg.cardCount + res.agg.mixedCount
-        d.collectionsTotalAmount = res.agg.cashTotal + res.agg.cardTotal
+        d.collectionsTotalAmount = cashWithCashTips + res.agg.cardTotal
+
+        // Drawer rows on the printed slip read from these fields and
+        // currently default to 0 in the live X/Z path; populate them from
+        // the cash-with-tips total so "הד. סגורות / סה״כ במגירה / מגירה
+        // ראשית" don't lag behind the payments section.
+        d.closedDrawersAmount = cashWithCashTips
+        d.drawerTotalAmount   = cashWithCashTips
+        d.mainDrawerAmount    = cashWithCashTips
 
         // Tips
         d.tipsTotal = res.agg.tipsTotal
@@ -4351,6 +4559,24 @@ extension PrinterManager.SalesReportData {
 
         // Tips (your struct uses these in tables)
         d.tipsTotal = latest.tipsTotal
+
+        // 🆕 (2026-05-16) Hole 94: surface the discount aggregation
+        // on the printed Z-Report. PrinterManager's printSalesReport
+        // already has a "הנחות" row in the EXCEPTIONS section that
+        // reads `report.discountsAmount` + `report.discountsCount` —
+        // populating these here lights it up for closed Z reports
+        // the same way applyingXReport does for the X variant.
+        d.discountsAmount = latest.discountsTotal
+        d.discountsCount = latest.discountsCount
+
+        // 🆕 (2026-05-16) Hole 101: surface the OTH (on-the-
+        // house) aggregation on the printed Z. PrinterManager's
+        // EXCEPTIONS section already has an "OTH הזמנות" row
+        // bound to `report.ordersOTHAmount` + `report.ordersOTHCount`;
+        // populating those here means closed Zs print the comp
+        // line the same way X-Reports do.
+        d.ordersOTHAmount = latest.othTotal
+        d.ordersOTHCount = latest.othCount
 
         // Note: don't set ordersCount (no such field)
         return d
@@ -4722,6 +4948,63 @@ final class OrderOutbox: ObservableObject {
         }
     }
 
+    // 🆕 (2026-05-15) Hole 62: nonisolated synchronous file ops so
+    // submitOrder can persist the envelope to disk BEFORE firing the
+    // network call. The MainActor wrapper on the class is only needed
+    // for the ObservableObject publishing side; raw file I/O is
+    // thread-safe with atomic writes and doesn't need actor isolation.
+    //
+    // Closes the crash-window where a wifi blip + force-quit during
+    // URLSession.dataTask would have lost a cash row entirely. Before
+    // this fix, the envelope was only written to disk on `.failure`
+    // (and even then via a `Task { @MainActor in }` — async write).
+    // Now the envelope hits disk synchronously on the thread that
+    // started the submit, before any network activity.
+
+    /// Nonisolated path to the outbox directory. Creates it if missing.
+    nonisolated static func envelopeDirURL() -> URL {
+        let fm = FileManager.default
+        let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let dir = base.appendingPathComponent("order_outbox", isDirectory: true)
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    nonisolated static func envelopeFileURL(for id: String) -> URL {
+        envelopeDirURL().appendingPathComponent("\(id).json")
+    }
+
+    /// Write (or overwrite) an envelope to disk synchronously. Used by
+    /// `OrderAPI.submitOrder` to pre-stage the retry envelope BEFORE
+    /// the URLSession.dataTask fires. Overwrites any prior envelope
+    /// with the same idem key (deliberate — represents the freshest
+    /// in-flight attempt).
+    nonisolated static func persistSync(_ env: OutboxEnvelope) {
+        let url = envelopeFileURL(for: env.id)
+        guard let data = try? JSONEncoder().encode(env) else { return }
+        try? data.write(to: url, options: [.atomic])
+    }
+
+    /// Synchronous delete — called on submitOrder direct-fire success
+    /// to cleanly remove the pre-staged envelope before any drainer
+    /// can pick it up and re-fire it.
+    nonisolated static func removeSync(id: String) {
+        let url = envelopeFileURL(for: id)
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    /// Synchronous state flip from `.sending` → `.pending`. Called on
+    /// submitOrder direct-fire failure to hand the envelope over to
+    /// the drainer for later retry.
+    nonisolated static func markPendingSync(id: String) {
+        let url = envelopeFileURL(for: id)
+        guard let raw = try? Data(contentsOf: url),
+              var env = try? JSONDecoder().decode(OutboxEnvelope.self, from: raw) else { return }
+        env.state = .pending
+        guard let data = try? JSONEncoder().encode(env) else { return }
+        try? data.write(to: url, options: [.atomic])
+    }
+
     func drainNow() {
         guard !isDraining else { return }
         isDraining = true
@@ -4736,6 +5019,27 @@ final class OrderOutbox: ObservableObject {
                 guard let raw = try? Data(contentsOf: f),
                       var env = try? JSONDecoder().decode(OutboxEnvelope.self, from: raw) else {
                     try? fm.removeItem(at: f) // corrupt -> drop
+                    continue
+                }
+
+                // 🆕 (2026-05-15) Hole 62: skip envelopes currently
+                // in-flight from a direct fire. With the new
+                // synchronous-before-network pattern, submitOrder
+                // writes the envelope in `.sending` state with a
+                // fresh `lastAttemptAt` BEFORE firing the network
+                // call. If a drainer is triggered (e.g., by network
+                // reachability) while the direct fire is mid-call,
+                // we must NOT fire a second POST with the same idem
+                // key — the server's idempotency SELECT/INSERT race
+                // would create duplicate Yesh invoices (the bug
+                // that the old "only enqueue on failure" pattern
+                // was trying to avoid). Skip anything `.sending`
+                // less than 60s old; older `.sending` envelopes are
+                // assumed orphaned (app crashed mid-fire) and are
+                // safe to retake.
+                if env.state == .sending,
+                   let last = env.lastAttemptAt,
+                   Date().timeIntervalSince(last) < 60 {
                     continue
                 }
 
@@ -5369,7 +5673,61 @@ extension ShellMenuItem {
         return true
     }
 
-  
+    /// Today's available-hours entry, if one exists for the current weekday.
+    /// Returns `nil` when the product has no per-day window configured (i.e.
+    /// it's available all the time and no badge is needed).
+    func todayAvailableHoursEntry(now: Date = Date(), calendar: Calendar = .current) -> WeekdayHours? {
+        guard let hours = availableHours, !hours.isEmpty else { return nil }
+        let weekday = calendar.component(.weekday, from: now) - 1
+        return hours.first(where: { $0.weekday == weekday })
+    }
+
+    /// Short label describing the per-day availability, e.g. `"8:00–17:00"`
+    /// or `"סגור היום"`. Returns `nil` when the product is currently inside
+    /// its window (no badge needed) or has no per-day restriction at all.
+    func availableHoursBadge(now: Date = Date(), calendar: Calendar = .current) -> String? {
+        guard let entry = todayAvailableHoursEntry(now: now, calendar: calendar) else { return nil }
+        if isAvailableOnWeekday(now: now) { return nil }   // inside window → no badge
+
+        if !entry.isOpen { return "סגור היום" }
+
+        func format(_ minutes: Int) -> String {
+            let h = (minutes / 60) % 24
+            let m = minutes % 60
+            return String(format: "%d:%02d", h, m)
+        }
+
+        return "\(format(entry.openMinutes))–\(format(entry.closeMinutes))"
+    }
+
+    /// Per-weekday available hours.
+    /// • If `availableHours` is nil/empty → no restriction (true).
+    /// • If today's entry is missing → treated as no restriction (true).
+    /// • If today's entry has `isOpen=false` → false (hidden today).
+    /// • Otherwise the current minute-of-day must fall inside [open, close).
+    ///   If `close <= open`, the window wraps midnight.
+    func isAvailableOnWeekday(now: Date = Date()) -> Bool {
+        guard let hours = availableHours, !hours.isEmpty else { return true }
+
+        let cal = Calendar.current
+        // Calendar weekday: 1 = Sunday … 7 = Saturday  →  0..6
+        let weekday = cal.component(.weekday, from: now) - 1
+        let h = cal.component(.hour, from: now)
+        let m = cal.component(.minute, from: now)
+        let nowMin = h * 60 + m
+
+        guard let entry = hours.first(where: { $0.weekday == weekday }) else {
+            return true
+        }
+        if !entry.isOpen { return false }
+
+        let open = entry.openMinutes
+        let close = entry.closeMinutes
+        if open == close { return true }                 // all-day edge
+        if open < close { return nowMin >= open && nowMin < close }
+        // wraps midnight (e.g. 22:00 → 02:00)
+        return nowMin >= open || nowMin < close
+    }
 }
 
 

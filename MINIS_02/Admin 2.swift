@@ -164,8 +164,12 @@ struct AdminProductEditorView: View {
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button { dismiss() } label: {
-                        Image(systemName: isRtl ? "chevron.right" : "chevron.left")
-                            .font(.system(size: 17, weight: .semibold))
+                        Image(systemName: "xmark")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundColor(.white)
+                            .padding(8)
+                            .background(Color.black.opacity(0.6))
+                            .clipShape(Circle())
                     }
                 }
                 ToolbarItem(placement: .principal) {
